@@ -18,6 +18,11 @@ This repository contains the source code for the primary FLO executable, called
 from Strand Cam `imops` and controls motors. This is the main, high-level FLO
 program.
 
+## Other FLO-related repositories
+
+- https://github.com/strawlab/flo-hardware build instructions and manual for the
+  FLO BYO-camera insect tracking/filming setup
+
 ## Overview of multiple pieces when using PWM servo motors
 
 Other variants trade `rpipico-pantilt` and the PWM servo motors for other types
