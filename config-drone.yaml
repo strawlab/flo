@@ -1,0 +1,102 @@
+geometry: MovingCamera
+mavlink:
+  port_path: serial:/dev/serial/by-id/usb-FTDI_TTL232R-3V3_FTGBISCC-if00-port0:1000000
+kalman_filter_parameters:
+  motion_noise: 3.0
+  observation_noise: 0.0001
+kalman_filter_dist_parameters:
+  # Motion noise [m/s2] for constant-speed dynamic model is
+  # root-mean-square of (unknown random) acceleration [m/s2].
+  # flying animals have thrust to mass ratios anywhere between
+  # circa 11 and 50 m/s2 [doi: 10.1098/rsos.160746]. Honey bees
+  # are probably around 17 m/s2.
+  motion_noise: 20
+  # rms measurement noise at 1 meter; this is internally scaled
+  # according to stereopsis law (i.e., multiplied by r^2)
+  observation_noise: 0.0005
+control_loop_timestep_secs: 0.001
+kp_pan_angle: 0.5
+kp_tilt_angle: 0.5
+ki_pan_angle:   25
+ki_tilt_angle: 25
+kd_pan: 0.0
+kd_tilt: 0.0
+centroid_to_sensor_x_angle_func:
+  dx_gain: 0.000138 # 3.45um / 25mm
+  dy_gain: 0.0
+  offset: 0.0
+centroid_to_sensor_y_angle_func:
+  dx_gain: 0.0
+  dy_gain: -0.000138
+  offset: 0.0
+centroid_lag: 0.004
+pan_motor_config:
+  endpoint_low: -1.9
+  endpoint_high: 1.9
+  neutral_position: 0.0
+  control_lag: 0.000
+tilt_motor_config:
+  endpoint_low: -1.57
+  endpoint_high: 0.52
+  neutral_position: -0.414
+gimbal_config:
+  port_path: /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+  reverse_pan: false
+  reverse_tilt: true
+tracking_thresholds:
+  msecs_to_suspend: 1000 # how long to keep tracking the lost animal with estimated velocity, before switching to SuspendedClosedLoop (staring at the last observation)
+  msecs_to_acquire_lock: 30000 # how long to stay in SuspendedClosedLoop before centering
+# motor_timeconstant (s) needs to be larger than main loop dt
+# if motor_timeconstant_secs=dt (=.001), the estimated motor position is the
+# current motor command
+motor_timeconstant_secs: .01
+encoder_lag: 0.003
+#stereopsis parameters
+secondary_cam_name: Basler-40331532
+strand_cam_main:
+  url: http://127.0.0.1:5555
+strand_cam_secondary:
+  url: http://127.0.0.1:5556
+stereopsis_calib:
+  r1_m: 1.526
+  x_offset_1_px: 383.8
+  r2_m: 23.3
+  x_offset_2_px: 40.8
+  pixel_size_um: 3.45
+sounds_filenames:
+  enter_manual_open_loop: /home/strawlab/resource/sounds/launch02.ogg
+  enter_closed_loop: /home/strawlab/resource/sounds/glee2.ogg
+  enter_suspended_closed_loop: /home/strawlab/resource/sounds/mumble1.ogg
+  enter_acquiring_lock: /home/strawlab/resource/sounds/launch03.ogg
+osd_config:
+  port_path: /dev/serial/by-id/usb-FTDI_TTL232R-3V3_FTGXKCET-if00-port0
+  cal:
+    camera_calibration: /home/strawlab/src/flo/flo/dji-o3-goggles2-calibration.yaml
+    osd_area_w: 1276.0
+    osd_area_h: 990.0
+    osd_char_w: 30
+    osd_char_h: 16
+    pose:
+      z: 0.050
+      pitch_deg: -23.7
+rc_config:
+  track_start:
+    ch_no: 7
+    val_min: 0.7
+    val_max: 2.0
+  track_stop:
+    ch_no: 7
+    val_min: -2.0
+    val_max: -0.7
+  pan_knob:
+    ch_no: 12
+    max_angle: 60
+    noise_gate:
+      noise_gate: 0.02
+      hold_time: 2.0
+  tilt_knob:
+    ch_no: 13
+    max_angle: 40
+    noise_gate:
+      noise_gate: 0.02
+      hold_time: 2.0

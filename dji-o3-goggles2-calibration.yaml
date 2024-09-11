@@ -1,0 +1,57 @@
+# Saved by strand-cam-offline-checkerboards at 2024-08-09 14:13:47.699672 +02:00
+# Mean reprojection distance: 0.80
+image_width: 1920
+image_height: 1080
+camera_name: goggles-images
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 710.5977039278466
+  - 0.0
+  - 951.0897199684624
+  - 0.0
+  - 710.5123855447195
+  - 535.8478759819812
+  - 0.0
+  - 0.0
+  - 1.0
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data:
+  - -0.1089260274995761
+  - 0.007711833746711651
+  - 0.0007648866641256889
+  - 0.0004018593235516152
+  - 0.0
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+projection_matrix:
+  rows: 3
+  cols: 4
+  data:
+  - 710.5977039278466
+  - 0.0
+  - 951.0897199684624
+  - 0.0
+  - 0.0
+  - 710.5123855447195
+  - 535.8478759819812
+  - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+  - 0.0

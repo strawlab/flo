@@ -1,0 +1,18 @@
+[package]
+name = "tokio-mavlink"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures = "0.3.30"
+mavlink = { version = "0.12.2", default-features = false, features = ["std"] }
+thiserror = "1.0.62"
+tokio = { version = "1", features = [
+    "macros",
+    "net",
+    "sync",
+    "time",
+    "io-util",
+] }
+tokio-stream = "0.1.15"
+tracing = "0.1.40"

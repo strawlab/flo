@@ -1,0 +1,43 @@
+geometry: MovingCamera
+pwm_output_enabled: true
+kalman_filter_parameters:
+  motion_noise: 1000.0
+  observation_noise: 0.0001
+control_loop_timestep_secs: 0.001
+kp_pan_angle: 0.0
+kp_tilt_angle: 0.0
+ki_pan_angle:  20.0
+ki_tilt_angle:  15.0
+centroid_to_sensor_x_angle_func:
+# needs to be adjusted to specific camera/lens combination
+  dx_gain: 0.00035 # 5.6 um / 16mm    (px pitch / focal length)
+  dy_gain: 0.0
+  offset: 0.0
+centroid_to_sensor_y_angle_func:
+  dx_gain: 0.0
+  dy_gain: -0.00035 # same here, minus sign due to mounting
+  offset: 0.0
+pan_motor_config:
+  endpoint_low: -1.5708
+  endpoint_high: 1.5708
+  neutral_position: 0.0
+tilt_motor_config:
+  endpoint_low: -0.7854
+  endpoint_high: 0.5
+  neutral_position: 0.0
+pan_pwm_config:
+  low_value: 700.0
+  high_value: 2600.0
+tilt_pwm_config:
+  low_value: 1200.0
+  high_value: 2000.0
+tracking_thresholds:
+  # how long to keep tracking the lost animal with estimated velocity,
+  # before switching to SuspendedClosedLoop (staring at the last observation)
+  msecs_to_suspend: 1000
+  # how long to stay in SuspendedClosedLoop before centering
+  msecs_to_acquire_lock: 30000
+# motor_timeconstant (s) needs to be larger than main loop dt
+# if motor_timeconstant_secs=dt (=.001), the estimated motor position is the
+# current motor command
+motor_timeconstant_secs: .001

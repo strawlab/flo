@@ -1,0 +1,1 @@
+See the comment at the top of `lib.rs` for information.

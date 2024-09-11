@@ -1,0 +1,24 @@
+[package]
+name = "mavlink-dump"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+color-eyre = "0.6.3"
+clap = { version = "4.0.10", features = ["derive"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+tracing-panic = "0.1.1"
+tokio = { version = "1", features = [
+    "macros",
+    "net",
+    "sync",
+    "time",
+    "rt-multi-thread",
+] }
+
+flo-core = { path = "../../flo-core" }
+flo-mavlink = { path = ".." }
+chrono = "0.4.38"
+num-traits = "0.2.18"
+serde_json = "1.0.116"

@@ -1,0 +1,107 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/flo-bui",
+  "crates/flo-core",
+  "crates/flo-mavlink",
+  "crates/flo-mavlink/mavlink-dump",
+  "crates/flo-webserver",
+  "crates/osd-displayport",
+  "crates/platform-uuid",
+  "crates/pwm-motor-types",
+  "crates/sbgc-gimbal",
+  "crates/simplebgc",
+  "crates/simplebgc-derive",
+  "crates/tilta-dongle-comms",
+  "crates/tokio-mavlink",
+  "crates/trinamic",
+]
+exclude = ["rpipico-pantilt", "tilta-dongle-firmware"]
+
+[package]
+name = "flo"
+version = "0.1.0"
+edition = "2021"
+authors = [
+  "Andrew Straw <strawman@astraw.com>",
+  "Victor V. Titov <vv.titov@gmail.com>",
+  "Stephan Lochner <lochner@bio.uni-freiburg.de>",
+]
+description = "method for videography using a camera system that automatically moves to follow the subject"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+color-eyre = "0.6.3"
+thiserror = "1.0.37"
+serde = { version = "1.0.79", features = ["derive"] }
+serde_json = "1.0.29"
+serde_yaml = "0.9.14"
+parking_lot = "0.12"
+bytes = { version = "1", default-features = false }
+futures = "0.3.25"
+tokio = { version = "1", features = ["macros", "net", "sync", "time"] }
+tokio-util = { version = "0.7.4", features = ["net", "codec", "time"] }
+tokio-serial = { package = "kioto-serial", version = "0.1.0" }
+tokio-stream = { version = "0.1", features = ["sync"] }
+preferences-serde1 = "2.0.0"
+cookie_store = "0.20.0"
+clap = { version = "4.0.10", features = ["derive"] }
+memchr = "2.5.0"
+sha2 = "0.10.6"
+rand = "0.8.5"
+chrono = { version = "0.4.23", features = ["serde"] }
+zip = { version = "0.6.3", default-features = false, features = ["time"] }
+walkdir = "2.2"
+csv = "1.1"
+home = "0.5.4"
+iana-time-zone = "0.1.57"
+rodio = { version = "0.17.3", default-features = false, features = [
+  "wav",
+  "vorbis",
+] }
+hyper = "1.1"
+time = "0.3.36"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
+shellexpand = "3.1.0"
+tracing-panic = "0.1.1"
+serde_cbor = "0.11.1"
+multiwii_serial_protocol_v2 = "0.1.12"
+packed_struct = "0.3"
+glob = "0.3.1"
+regex = "1.10.5"
+http-body-util = "0.1.0"
+axum = "0.7.4"
+nalgebra = { version = "0.32.1", default-features = false }
+adskalman = { version = "0.15.0", default-features = false }
+
+flo-core = { path = "crates/flo-core" }
+flo-mavlink = { path = "crates/flo-mavlink" }
+flo-webserver = { path = "crates/flo-webserver", default-features = false }
+platform-uuid = { path = "crates/platform-uuid" }
+trinamic = { path = "crates/trinamic" }
+sbgc-gimbal = { path = "crates/sbgc-gimbal" }
+tilta-dongle-comms = { path = "crates/tilta-dongle-comms" }
+osd-displayport = { path = "crates/osd-displayport" }
+json-lines = { version = "0.1.1", features = ["codec"] }
+
+flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
+bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
+ci2-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
+strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
+
+# for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
+# sudo apt install librust-alsa-sys-dev
+
+[dev-dependencies]
+tempfile = "3"
+
+
+[features]
+default = ["bundle_files"]
+
+# Serve style
+## Bundle files into executable
+bundle_files = ["flo-webserver/bundle_files"]
+## Serve files from disk at runtime
+serve_files = ["flo-webserver/serve_files"]

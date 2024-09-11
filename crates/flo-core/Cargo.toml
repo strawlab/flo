@@ -1,0 +1,46 @@
+[package]
+name = "flo-core"
+description = "Common definitions"
+version = "0.1.0"
+authors = ["Andrew Straw <strawman@astraw.com>"]
+edition = "2021"
+
+[dependencies]
+thiserror = "1.0"
+eyre = "0.6.12"
+tracing = "0.1"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+bytes = "1"
+serde_json = { version = "1.0" }
+serde_cbor = "0.11.1"
+futures = { version = "0.3.25", optional = true }
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
+tokio-util = { version = "0.7.4", features = ["codec", "net"], optional = true }
+if-addrs = { version = "0.10.0", optional = true }
+socket2 = { version = "0.5.5", optional = true }
+chrono = { version = "0.4.23", default-features = false, features = [
+    "serde",
+    "clock",
+] }
+nalgebra = { version = "0.32.1", default-features = false }
+adskalman = { version = "0.15.0", default-features = false }
+const_format = { version = "0.2.30", default-features = false }
+pwm-motor-types = { path = "../pwm-motor-types" }
+num = "0.4.3"
+num-derive = "0.4.2"
+num-traits = "0.2.19"
+opencv-ros-camera = { version = "0.14.0", features = ["serde-serialize"] }
+cam-geom = "0.14.0"
+
+[dev-dependencies]
+rand = "0.6.3"
+approx = "0.5"
+chrono = "0.4.23"
+csv = "1.3.0"
+
+[features]
+default = ["full"]
+# `full` includes things that require platform support like the socket2 crate
+# and UDP support. These cannot be expected from all platforms with std, such as
+# wasm.
+full = ["if-addrs", "tokio", "socket2", "tokio-util", "futures"]

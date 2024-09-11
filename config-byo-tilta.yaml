@@ -1,0 +1,75 @@
+geometry: MovingMirror
+kalman_filter_parameters:
+  motion_noise: 3.0
+  observation_noise: 0.0001
+kalman_filter_dist_parameters:
+  # Motion noise [m/s2] for constant-speed dynamic model is
+  # root-mean-square of (unknown random) acceleration [m/s2].
+  # flying animals have thrust to mass ratios anywhere between
+  # circa 11 and 50 m/s2 [doi: 10.1098/rsos.160746]. Honey bees
+  # are probably around 17 m/s2.
+  motion_noise: 20
+  # rms measurement noise at 1 meter; this is internally scaled
+  # according to stereopsis law (i.e., multiplied by r^2)
+  observation_noise: 0.0005
+control_loop_timestep_secs: 0.001
+kp_pan_angle: 0.0
+kp_tilt_angle: 0.0
+ki_pan_angle:  20.0
+ki_tilt_angle:  15.0
+centroid_to_sensor_x_angle_func:
+  dx_gain: 0.000138 # 3.45 um / 25mm    (px pitch / focal length)
+  dy_gain: 0.0
+  offset: 0.0
+centroid_to_sensor_y_angle_func:
+  dx_gain: 0.0
+  dy_gain: -0.000138
+  offset: 0.0
+pan_motor_config:
+  endpoint_low: -3.14
+  endpoint_high: 3.14
+  neutral_position: 0.0
+tilt_motor_config:
+  endpoint_low: -1.5
+  endpoint_high: 1.5
+  neutral_position: 0.0
+pan_trinamic_config:
+  microsteps_per_radian: 117437.6
+tilt_trinamic_config:
+  microsteps_per_radian: 20371.8
+  # microsteps_per_radian: 40764.3 this refers to mirror angles
+focus_motor_config:
+  motor: !Tilta
+    port: COM10
+  min_pos: 0.0
+  max_pos: 4095.0
+  pos_offset: -5.5 # [mot]
+  adjust_step: 1.0 # [mot]
+  park_position: 5.5 # [mot]
+  home_position: 2.0 # [m]
+  backlash: 11.0
+  noise_gate: 2.0
+  cal:
+    distance_offset: 0.267
+    #mot_pos = a0 + a1/r^1 + a2/r^2 + a3/r^3
+    a0: 81.403
+    a1: 589.14
+    a2: 108.331
+    a3: 0.0
+    min_dist: 0.3
+    max_dist: 1e6
+tracking_thresholds:
+  msecs_to_suspend: 1000 # how long to keep tracking the lost animal with estimated velocity, before switching to SuspendedClosedLoop (staring at the last observation)
+  msecs_to_acquire_lock: 30000 # how long to stay in SuspendedClosedLoop before centering
+# motor_timeconstant (s) needs to be larger than main loop dt
+# if motor_timeconstant_secs=dt (=.001), the estimated motor position is the
+# current motor command
+motor_timeconstant_secs: .01
+#stereopsis parameters
+secondary_cam_name: Basler-40300216
+stereopsis_calib:
+  r1_m: 2.546
+  x_offset_1_px: -8.8
+  r2_m: 25.9
+  x_offset_2_px: -113.3
+  pixel_size_um: 3.4

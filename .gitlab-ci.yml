@@ -1,0 +1,101 @@
+cargo-fmt:
+  image: rust
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --check
+
+rpipico-pantilt-firmware:
+  image: rust
+  script:
+    # Install and build elf2uf2-rs
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
+    - cargo install elf2uf2-rs --locked
+
+    # Now build firmware
+    - cd rpipico-pantilt
+    - rustup target install thumbv6m-none-eabi
+    - cargo install flip-link
+    - cargo build --release
+
+    # Convert to .uf2 and copy to filename with our commit hash
+    - elf2uf2-rs target/thumbv6m-none-eabi/release/rpipico-pantilt
+    - cp target/thumbv6m-none-eabi/release/rpipico-pantilt.uf2 ${CI_PROJECT_DIR}/rpipico-pantilt-${CI_COMMIT_SHA}.uf2
+  artifacts:
+    paths:
+      - rpipico-pantilt-${CI_COMMIT_SHA}.uf2
+    name: "rpipico-pantilt-${CI_COMMIT_SHA}"
+
+pwm-motor-types:
+  image: rust
+  script:
+    - export RUSTFLAGS="-D warnings"
+
+    - rustup target install thumbv6m-none-eabi
+
+    - cd crates/pwm-motor-types
+    # Ensure that it builds without std
+    - cargo build --target thumbv6m-none-eabi
+    - cargo test
+
+flo:
+  image: rust
+  script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
+
+    - export RUSTFLAGS="-D warnings"
+
+    - cargo install grass
+    - curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+    - cd crates/flo-bui
+    - ./build.sh
+    - cd ../..
+
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y librust-alsa-sys-dev
+    - cargo test
+    - cargo run -- --config config-byo.yaml show-config
+    - cargo run -- --config config-drone.yaml show-config
+    - cargo run -- --config config-mini.yaml show-config
+
+flo-core:
+  image: rust
+  script:
+    - export RUSTFLAGS="-D warnings"
+
+    - cd crates/flo-core
+    - cargo test
+
+flo-mavlink:
+  image: rust
+  script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
+
+    - export RUSTFLAGS="-D warnings"
+
+    - cd crates/flo-mavlink
+    - cargo test
+
+    - cd mavlink-dump
+    - cargo test
+
+simplebgc:
+  image: rust
+  script:
+    - export RUSTFLAGS="-D warnings"
+
+    - cd crates/simplebgc
+    - cargo test
+
+trinamic:
+  image: rust
+  script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
+
+    - export RUSTFLAGS="-D warnings"
+
+    - cd crates/trinamic
+    - cargo test
