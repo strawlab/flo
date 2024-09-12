@@ -20,8 +20,11 @@ program.
 
 ## Other FLO-related repositories
 
+- https://github.com/strawlab/flo-data-analysis data analysis for FLO data
 - https://github.com/strawlab/flo-hardware build instructions and manual for the
-  FLO BYO-camera insect tracking/filming setup
+  FLO BYO-camera insect tracking/filming setup.
+- https://github.com/strawlab/red-button-trigger-timestamp hardware to record
+  times of external trigger events.
 
 ## Overview of multiple pieces when using PWM servo motors
 
