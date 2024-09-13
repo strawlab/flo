@@ -1,5 +1,7 @@
 # Fast Lock On - FLO
 
+[![DOI](https://zenodo.org/badge/845941788.svg)](https://zenodo.org/doi/10.5281/zenodo.13757150)
+
 FLO is a method for videography using a camera system that automatically moves
 to follow the subject.
 
