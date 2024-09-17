@@ -58,10 +58,10 @@ strand_cam_main:
 strand_cam_secondary:
   url: http://127.0.0.1:5556
 stereopsis_calib:
-  r1_m: 1.526
-  x_offset_1_px: 383.8
-  r2_m: 23.3
-  x_offset_2_px: 40.8
+  r1_m: 1.799
+  x_offset_1_px: 326.0
+  r2_m: 20.16
+  x_offset_2_px: 41.5
   pixel_size_um: 3.45
 sounds_filenames:
   enter_manual_open_loop: /home/strawlab/resource/sounds/launch02.ogg
