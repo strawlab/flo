@@ -47,7 +47,7 @@ fn main() -> ! {
 
     let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
 
-    let _clocks = hal::clocks::init_clocks_and_plls(
+    let clocks = hal::clocks::init_clocks_and_plls(
         XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
@@ -89,7 +89,7 @@ fn main() -> ! {
     trigpwm.enable();
 
     //beam duration limiter timer
-    let tt = hal::Timer::new(pac.TIMER, &mut pac.RESETS);
+    let tt = hal::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     let mut timer = tt.count_down();
 
     //state machine
