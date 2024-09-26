@@ -29,7 +29,6 @@ use embedded_hal::{
     timer::{Cancel, CountDown},
     PwmPin,
 };
-use hal::multicore::{Multicore, Stack};
 use hal::pac;
 use rp2040_hal::{self as hal, pwm::Slices as PWMSlices, Sio};
 use rp_pico::XOSC_CRYSTAL_FREQ;
@@ -40,24 +39,25 @@ const MAX_BEAM_DURATION_US: u32 = 500;
 const FRAMERATE: f64 = 150.0;
 const FRAMERATE_CLOCK_DIVIDER: u8 = 20; //divider should be high enough to allow 16-bit counting. If 125.0e6/(divider * framerate) is < 65536 then we're good.
 
-// core0: usb, servo control
-// core1: fully dedicated to beam drive. With exposure times in 50-microsecond zone, it
-//   is critical that the latency is very small. Interrupts don't seem to be fast enough.
+#[rp2040_hal::entry]
+fn main() -> ! {
+    let mut pac = pac::Peripherals::take().unwrap();
 
-/// Stack for core 1
-///
-/// Core 0 gets its stack via the normal route - any memory not used by static values is
-/// reserved for stack and initialised by cortex-m-rt.
-/// To get the same for Core 1, we would need to compile everything seperately and
-/// modify the linker file for both programs, and that's quite annoying.
-/// So instead, core1.spawn takes a [usize] which gets used for the stack.
-/// NOTE: We use the `Stack` struct here to ensure that it has 32-byte alignment, which allows
-/// the stack guard to take up the least amount of usable RAM.
-static mut CORE1_STACK: Stack<4096> = Stack::new();
+    let _core = pac::CorePeripherals::take().unwrap();
 
-fn core1_task() -> ! {
-    let mut pac = unsafe { pac::Peripherals::steal() };
-    let _core = unsafe { pac::CorePeripherals::steal() };
+    let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
+
+    let _clocks = hal::clocks::init_clocks_and_plls(
+        XOSC_CRYSTAL_FREQ,
+        pac.XOSC,
+        pac.CLOCKS,
+        pac.PLL_SYS,
+        pac.PLL_USB,
+        &mut pac.RESETS,
+        &mut watchdog,
+    )
+    .ok()
+    .unwrap();
 
     let sio = Sio::new(pac.SIO);
     let pins = hal::gpio::Pins::new(
@@ -140,44 +140,5 @@ fn core1_task() -> ! {
                 }
             }
         }
-    }
-}
-
-// core0
-#[rp2040_hal::entry]
-fn main() -> ! {
-    let mut pac = pac::Peripherals::take().unwrap();
-    let _core = pac::CorePeripherals::take().unwrap();
-
-    let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
-
-    let _clocks = hal::clocks::init_clocks_and_plls(
-        XOSC_CRYSTAL_FREQ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut pac.RESETS,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
-
-    let mut sio = Sio::new(pac.SIO);
-    let _pins = rp_pico::Pins::new(
-        pac.IO_BANK0,
-        pac.PADS_BANK0,
-        sio.gpio_bank0,
-        &mut pac.RESETS,
-    );
-
-    //start core1 task
-    let mut mc = Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
-    let cores = mc.cores();
-    let core1 = &mut cores[1];
-    let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || core1_task());
-
-    loop {
-        cortex_m::asm::wfi();
     }
 }
