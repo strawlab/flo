@@ -36,7 +36,7 @@ rpipico-pantilt-firmware:
     - cargo install elf2uf2-rs --locked
 
     # Now build firmware
-    - cd rpipico-pantilt
+    - cd firmware/rpipico-pantilt
     - rustup target install thumbv6m-none-eabi
     - cargo install flip-link
     - cargo build --release
