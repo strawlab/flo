@@ -1,0 +1,77 @@
+[package]
+authors = ["Straw Lab"]
+edition = "2021"
+readme = "README.md"
+name = "beamdriver"
+version = "0.0.1"
+
+[dependencies]
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.3"
+embedded-hal = { version = "0.2.5" }
+defmt = "0.3.1"
+defmt-rtt = "0.4.0"
+
+# panic-probe = { version = "0.3.0", features = ["print-defmt"] }
+panic-reset = "0.1"
+
+rp-pico = "0.8.0"
+rp2040-hal = { version = "0.9.2" }
+
+fugit = { version = "0.3.6", features = ["defmt"] }
+
+# cargo build/run
+[profile.dev]
+codegen-units = 1
+debug = 2
+debug-assertions = true
+incremental = false
+opt-level = 3
+overflow-checks = true
+
+# cargo build/run --release
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 3
+overflow-checks = false
+
+# do not optimize proc-macro crates = faster builds from scratch
+[profile.dev.build-override]
+codegen-units = 8
+debug = false
+debug-assertions = false
+opt-level = 0
+overflow-checks = false
+
+[profile.release.build-override]
+codegen-units = 8
+debug = false
+debug-assertions = false
+opt-level = 0
+overflow-checks = false
+
+# cargo test
+[profile.test]
+codegen-units = 1
+debug = 2
+debug-assertions = true
+incremental = false
+opt-level = 3
+overflow-checks = true
+
+# cargo test --release
+[profile.bench]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 3
+
+# The crate `rpipico-pantilt` should not be in a workspace because we set our
+# profile above and also have a `.cargo/config` file.
+[workspace]
