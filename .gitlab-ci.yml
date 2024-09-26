@@ -4,6 +4,29 @@ cargo-fmt:
     - rustup component add rustfmt
     - cargo fmt --check
 
+beamdriver:
+  image: rust
+  script:
+    # Install and build elf2uf2-rs
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
+    - cargo install elf2uf2-rs --locked
+
+    # Now build firmware
+    - cd firmware/beamdriver
+    - rustup target install thumbv6m-none-eabi
+    - cargo install flip-link
+    - cargo build --release
+
+    # Convert to .uf2 and copy to filename with our commit hash
+    - elf2uf2-rs target/thumbv6m-none-eabi/release/beamdriver
+    - cp target/thumbv6m-none-eabi/release/beamdriver.uf2 ${CI_PROJECT_DIR}/beamdriver-${CI_COMMIT_SHA}.uf2
+  artifacts:
+    paths:
+      - beamdriver-${CI_COMMIT_SHA}.uf2
+    name: "beamdriver-${CI_COMMIT_SHA}"
+
+
 rpipico-pantilt-firmware:
   image: rust
   script:
