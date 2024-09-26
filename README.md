@@ -62,7 +62,7 @@ Camera is available [here](https://strawlab.org/strand-cam/).
 ## Overview of top-level directories
 
 - `crates` Rust crates (libraries) used by `flo` and other software
-- `firmware/beamdriver` firmware for IR LED source
+- `firmware/beamdriver` Firmware for IR LED source
+- `firmware/flo-tilta-dongle` Firmware for USB dongle to control Tilta motors.
 - `firmware/rpipico-pantilt` Firmware for RPi Pico to control PWM servo motors.
 - `src` Rust source code for `flo`
-- `tilta-dongle-firmware` Firmware for USB dongle to control Tilta motors.

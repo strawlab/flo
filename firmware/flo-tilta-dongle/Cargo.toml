@@ -6,7 +6,7 @@ authors = ["DeepSOIC <vv.titov@gmail.com>"]
 resolver = "2"
 
 [dependencies]
-tilta-dongle-comms = { path = "../crates/tilta-dongle-comms" }
+tilta-dongle-comms = { path = "../../crates/tilta-dongle-comms" }
 
 static_cell = { version = "2" }
 num-traits = { version = "0.2.18", default-features = false }

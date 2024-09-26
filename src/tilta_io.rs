@@ -14,7 +14,7 @@ pub async fn run_tilta_loop(port: &str, mut rx: watch::Receiver<MotorValueCache>
 
     let serial_device = tokio_serial::new(port, baud_rate)
         .open_native_async()
-        .with_context(|| format!("Failed to open tilta-dongle serial device {}", port))?;
+        .with_context(|| format!("Failed to open flo-tilta-dongle serial device {}", port))?;
 
     let framed = tokio_util::codec::Framed::new(serial_device, MyCodec::default());
 
