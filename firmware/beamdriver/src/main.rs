@@ -2,8 +2,8 @@
 #![no_main]
 
 // Pins in use:
-//  gp6: PWM for pan servo
-//  gp7: PWM for tilt servo
+//  gp6: PWM for pan servo (not used but connected)
+//  gp7: PWM for tilt servo (not used but connected)
 //  gp8: connected to led driver, high = beam on
 //  gp18: cam0 line1 (not used but connected)
 //  gp19: cam1 line1 (not used but connected)

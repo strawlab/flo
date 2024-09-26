@@ -1,9 +1,8 @@
-# PanTilt for RP-pico - Receive from USB (serial) and emit PWM for two servos
+# beamdriver
 
-Based on
-[rp2040-project-template](https://github.com/rp-rs/rp2040-project-template). See
-there for building and running instructions. The following is a summary of the
-key points:
+Hardware: This firmware is compiled and flashed onto a Raspberry Pi Pico board.
+The Pico board itself is soldered onto the "Dual Cam PCB" described
+[here](https://github.com/strawlab/flo-hardware/tree/1b6ac0d5a3159aff7339ef3ac55a16303297b537/beam-driver/dual-cam-pcb%20v2).
 
 ## Installation of development dependencies
 
@@ -16,14 +15,16 @@ cargo install probe-run
 cargo install elf2uf2-rs --locked
 ```
 
-
 ## Running
 
 For a debug build
+
 ```sh
 cargo run
 ```
+
 For a release build
+
 ```sh
 cargo run --release
 ```
