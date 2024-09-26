@@ -305,8 +305,7 @@ impl From<EndpointError> for Disconnected {
 
 //uicr_write_masked copied from embassy/embassy-nrf/src/lib.rs
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, defmt::Format)]
 enum WriteResult {
     /// Word was written successfully, needs reset.
     Written,
