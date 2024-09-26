@@ -13,18 +13,15 @@ Commands and replies are sent as lines of json.
 
 ## Hardware
 
-At this time, it must be programmed to an nrf52840-dongle from Nordic via SWD debugger (requires soldering).
+* Adafruit Feather nRF52840 Express ADA4062.
 
-It is planned to port it to Feather nRF52840 Express ADA4062 soon.
-(It might even work there as-is, but leds are likely incorrect).
+* nrf52840-dongle from Nordic via SWD debugger (requires soldering). The LED assignments are incorrect.
 
 ## Indication
 
-green blink = firmware is running
+red blink = firmware is running
 
-rgb green = ramp in progress
-
-rgb blue = rf transmission
+blue = rf transmission
 
 # Build and flash
 
@@ -37,6 +34,12 @@ cargo install probe-rs --locked --features cli
 ## Programmer/debugger hardware
 
 https://github.com/rp-rs/rp2040-project-template/blob/main/debug_probes.md#raspberry-pi-pico
+
+## Compile and flash
+
+```
+cargo flash --release --chip nRF52840_xxAA
+```
 
 ## Run/Debug
 
