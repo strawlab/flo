@@ -11,7 +11,7 @@ tilta-dongle-comms = { path = "../../crates/tilta-dongle-comms" }
 static_cell = { version = "2" }
 num-traits = { version = "0.2.18", default-features = false }
 serde = { version = "1.0.197", default-features = false }
-serde-json-core = { version = "0.5.1", default-features = false }
+serde-json-core = { version = "0.6.0", default-features = false }
 heapless = { version = "0.8.0", features = ["defmt-03"] }
 
 defmt = "0.3"
