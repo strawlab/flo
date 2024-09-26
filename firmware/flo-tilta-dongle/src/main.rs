@@ -41,7 +41,7 @@ type MyRadio = ieee802154::Radio<'static, embassy_nrf::peripherals::RADIO>;
 
 struct RadioLoopData {
     rf: MyRadio,
-    ramp_led: Output<'static>,
+    // ramp_led: Output<'static>,
     radio_led: Output<'static>,
 }
 
@@ -104,7 +104,6 @@ async fn main(spawner: Spawner) {
         let cdc_state = STATE.init(CdcState::new());
 
         // Create embassy-usb DeviceBuilder using the driver and config.
-        static DEVICE_DESC: StaticCell<[u8; 256]> = StaticCell::new();
         static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
         static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
         static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
@@ -112,7 +111,6 @@ async fn main(spawner: Spawner) {
         let mut builder = UsbBuilder::new(
             usb_driver,
             config,
-            &mut DEVICE_DESC.init([0; 256])[..],
             &mut CONFIG_DESC.init([0; 256])[..],
             &mut BOS_DESC.init([0; 256])[..],
             &mut MSOS_DESC.init([0; 128])[..],
@@ -127,8 +125,8 @@ async fn main(spawner: Spawner) {
         (usb, cdc_class)
     };
 
-    let ramp_led = Output::new(p.P1_09, Level::High, OutputDrive::Standard);
-    let radio_led = Output::new(p.P0_12, Level::High, OutputDrive::Standard);
+    // let ramp_led = Output::new(p.P1_09, Level::High, OutputDrive::Standard);
+    let radio_led = Output::new(p.P1_10, Level::Low, OutputDrive::Standard);
 
     spawner.spawn(usb_task(usb)).expect("usb task");
     spawner
@@ -137,12 +135,12 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(radio_loop(RadioLoopData {
             rf,
-            ramp_led,
+            // ramp_led,
             radio_led,
         }))
         .expect("radio task");
 
-    let mut blinker = Output::new(p.P0_06, Level::Low, OutputDrive::Standard);
+    let mut blinker = Output::new(p.P1_15, Level::Low, OutputDrive::Standard);
     loop {
         blinker.set_low();
         //INTERNAL_CHANNEL.try_send(InternalMsg::SetPos { pos: (0) }).unwrap();
@@ -273,20 +271,20 @@ async fn radio_loop(mut ctx: RadioLoopData) {
         //ramp
         let dx_lim = (RAMP_RATE * RF_SEND_PERIOD).ceil() as i32;
         let dx = (target_pos - last_pos).clamp(-dx_lim, dx_lim);
-        ctx.ramp_led.set_level((dx == 0).into());
+        // ctx.ramp_led.set_level((dx == 0).into());
 
         last_pos += dx;
 
         //transmit
         update_packet(last_pos, &mut p);
-        ctx.radio_led.set_low();
+        ctx.radio_led.set_high();
         match ctx.rf.try_send(&mut p).await {
             Ok(()) => {}
             Err(e) => {
                 defmt::error!("transmission failed: {:?}", e);
             }
         }
-        ctx.radio_led.set_high();
+        ctx.radio_led.set_low();
 
         Timer::after(duration_secs(RF_SEND_PERIOD)).await;
     }
@@ -305,8 +303,7 @@ impl From<EndpointError> for Disconnected {
 
 //uicr_write_masked copied from embassy/embassy-nrf/src/lib.rs
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, defmt::Format)]
 enum WriteResult {
     /// Word was written successfully, needs reset.
     Written,

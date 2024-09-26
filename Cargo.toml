@@ -16,7 +16,11 @@ members = [
   "crates/tokio-mavlink",
   "crates/trinamic",
 ]
-exclude = ["firmware/beamdriver", "firmware/rpipico-pantilt", "tilta-dongle-firmware"]
+exclude = [
+  "firmware/beamdriver",
+  "firmware/flo-tilta-dongle",
+  "firmware/rpipico-pantilt",
+]
 
 [package]
 name = "flo"
