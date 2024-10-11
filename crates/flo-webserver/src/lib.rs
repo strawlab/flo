@@ -57,9 +57,10 @@ impl<S> axum::extract::FromRequestParts<S> for AcceptsEventStream {
 
 async fn callback_handler(
     State(app_state): State<AppState>,
-    _session_key: axum_token_auth::SessionKey,
+    session_key: axum_token_auth::SessionKey,
     Json(payload): Json<FloCommand>,
 ) -> impl IntoResponse {
+    session_key.is_present();
     tracing::trace!("got HTTP message {:?}", payload);
     app_state
         .user_commands_tx
@@ -69,9 +70,10 @@ async fn callback_handler(
 
 async fn events_handler(
     State(app_state): State<AppState>,
-    _session_key: axum_token_auth::SessionKey,
+    session_key: axum_token_auth::SessionKey,
     _: AcceptsEventStream,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    session_key.is_present();
     // use futures::stream::StreamExt;
     use futures::stream::{self, StreamExt};
     let from_device_rx = app_state.from_device_rx.clone();
