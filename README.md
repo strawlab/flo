@@ -7,9 +7,9 @@ to follow the subject.
 
 FLO is described in the following publication:
 
-[FLO paper]: https://doi.org/10.1101/2023.12.20.572558
+[Free access]: https://strawlab.org/publications/?flo-paper-link
 
-Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor Videography of Insects Using Fast Lock-On Tracking. bioRxiv (2023) [doi:10.1101/2023.12.20.572558][FLO paper].
+Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor Videography of Insects Using Fast Lock-On Tracking. Science Robotics 9(95), eadm7689 (2024) [Free-access link][Free access] DOI: 10.1126/scirobotics.adm7689.
 
 ![flo video rollup](https://strawlab.org/assets/images/flo-video-rollup-tiny.gif)
 
