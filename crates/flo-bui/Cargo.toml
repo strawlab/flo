@@ -35,7 +35,7 @@ flo-core = { path = "../flo-core", default-features = false }
 serde_path_to_error = "0.1.16"
 
 [dependencies.web-sys]
-version = "0.3.60"
+version = "0.3.72"
 features = [
     "DomRect",
     "DomTokenList",
