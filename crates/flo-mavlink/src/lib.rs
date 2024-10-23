@@ -93,7 +93,9 @@ impl DroneCoordinator {
                 self.broadway
                     .drone_events
                     .send(DroneEvent::BatteryState(BatteryState {
-                        batt_voltage: bs.voltages[0] as FloatType / 4.0 / 1000.0,
+                        batt_voltage: bs.voltages[0] as FloatType
+                            / self.mavlink_cfg.batt_s
+                            / 1000.0,
                         batt_percent: bs.battery_remaining as FloatType,
                         timestamp: now(),
                     }))?;
