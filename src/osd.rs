@@ -12,7 +12,7 @@ use color_eyre::eyre::{self, Result, WrapErr};
 use futures::{SinkExt, StreamExt};
 use tokio_serial::SerialPortBuilderExt;
 
-pub async fn run_osd_loop(
+pub(crate) async fn run_osd_loop(
     mut flo: tokio::sync::watch::Receiver<FloStatus>,
     broadway: Broadway,
     config: OsdConfig,

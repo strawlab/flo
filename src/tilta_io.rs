@@ -9,7 +9,10 @@ use tilta_dongle_comms::TitlaFocusDongleMessage as MyMessage;
 
 type MyCodec = json_lines::codec::JsonLinesCodec<MyMessage, MyMessage>;
 
-pub async fn run_tilta_loop(port: &str, mut rx: watch::Receiver<MotorValueCache>) -> Result<()> {
+pub(crate) async fn run_tilta_loop(
+    port: &str,
+    mut rx: watch::Receiver<MotorValueCache>,
+) -> Result<()> {
     let baud_rate = 115_200;
 
     let serial_device = tokio_serial::new(port, baud_rate)

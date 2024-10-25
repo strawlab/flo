@@ -4,7 +4,7 @@ use tracing as log;
 
 use flo_core::{MotorDriveMode, MotorPositionResult, MotorValueCache, TrinamicAxisConfig};
 
-pub async fn run_trinamic_loop(
+pub(crate) async fn run_trinamic_loop(
     mut rx: watch::Receiver<MotorValueCache>,
     motor_position_tx: tokio::sync::mpsc::Sender<MotorPositionResult>,
     mut pan_device: trinamic::Motor,

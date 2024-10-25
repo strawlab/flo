@@ -86,7 +86,7 @@ fn centroid_to_angle(p: &CentroidToAngleCalibration, dx: &FloatType, dy: &FloatT
 }
 
 /// Compute angular error to target from sensor center direction.
-pub fn centroid_to_sensor_angles(
+pub(crate) fn centroid_to_sensor_angles(
     cfg: &FloControllerConfig,
     centroid: Option<MomentCentroid>,
 ) -> SensorAngle2D {
@@ -105,7 +105,7 @@ pub fn centroid_to_sensor_angles(
 
 /// Updates tracking_state. {pan_obs, tilt_obs, kalman_estimates, last_observation}
 #[allow(clippy::too_many_arguments)]
-pub fn kalman_step(
+pub(crate) fn kalman_step(
     tracking_state: &mut TrackingState,
     cfg: &FloControllerConfig,
     sensor_angle: SensorAngle2D,
@@ -365,7 +365,7 @@ pub fn kalman_step(
     next_mode
 }
 
-pub fn predict_motor_position(
+pub(crate) fn predict_motor_position(
     dt: FloatType,
     tracking_state: &TrackingState,
     device_state: &DeviceState,
@@ -438,7 +438,7 @@ pub fn predict_motor_position(
 }
 
 // ========================================================================
-pub fn compute_motor_output(
+pub(crate) fn compute_motor_output(
     tracking_state: &mut TrackingState,
     device_state: &DeviceState,
     cfg: &FloControllerConfig,

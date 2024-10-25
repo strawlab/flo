@@ -4,7 +4,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use super::*;
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub(crate) enum Error {
     #[error("serde JSON error {0}")]
     SerdeJson(#[from] serde_json::Error),
     #[error("io error {0}")]
@@ -17,10 +17,10 @@ pub enum Error {
 
 /// JSON Lines text format, also called newline-delimited JSON.
 #[derive(Default)]
-pub struct JsonLinesCodec {}
+pub(crate) struct JsonLinesCodec {}
 
 impl JsonLinesCodec {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {}
     }
 }
