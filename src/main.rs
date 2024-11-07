@@ -132,6 +132,7 @@ struct FloCoordinator<'a> {
     from_device_http_tx: watch::Sender<DeviceState>,
     broadway: flo_core::Broadway,
     cam_session_main: Option<HttpSession>,
+    cam_session_secondary: Option<HttpSession>,
 }
 
 impl<'a> FloCoordinator<'a> {
@@ -146,7 +147,7 @@ impl<'a> FloCoordinator<'a> {
         from_device_http_tx: watch::Sender<DeviceState>,
         broadway: Broadway,
     ) -> Result<Self> {
-        let cam_session_main = init_strand_cams(device_config).await?;
+        let (cam_session_main, cam_session_secondary) = init_strand_cams(device_config).await?;
         Ok(Self {
             device_config,
             tracking_state: Default::default(),
@@ -163,6 +164,7 @@ impl<'a> FloCoordinator<'a> {
             from_device_http_tx,
             broadway,
             cam_session_main,
+            cam_session_secondary,
         })
     }
 
@@ -529,9 +531,11 @@ impl<'a> FloCoordinator<'a> {
                     ))?;
                 }
 
-                // start/stop saving .mp4 file on primary tracking camera
+                // start/stop saving .mp4 file on tracking cameras
+                for cam_session in
+                    [&mut self.cam_session_main, &mut self.cam_session_secondary].iter_mut()
                 {
-                    if let Some(sess) = self.cam_session_main.as_mut() {
+                    if let Some(sess) = cam_session.as_mut() {
                         let body =
                             axum::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
                                 serde_json::to_vec(&strand_cam_storetype::CallbackType::ToCamera(
@@ -644,7 +648,9 @@ async fn initialize_strand_cam_session(
     Ok(session)
 }
 
-async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<Option<HttpSession>> {
+async fn init_strand_cams(
+    device_config: &FloControllerConfig,
+) -> Result<(Option<HttpSession>, Option<HttpSession>)> {
     // Connect to strand-cam for main and secondary cameras.
     let jar: cookie_store::CookieStore =
         match Preferences::load(&flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY) {
@@ -709,7 +715,7 @@ async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<Option<
             }
         }
     }
-    Ok(cam_session_main)
+    Ok((cam_session_main, cam_session_secondary))
 }
 
 trait BroadwaySend {
