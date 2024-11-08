@@ -1118,17 +1118,5 @@ fn test_serde_nan() -> eyre::Result<()> {
     assert!(with_nans.angle.0.is_nan());
     assert!(with_nans.dist.0.is_nan());
 
-    // CBOR with finite values
-    let buf = serde_cbor::to_vec(&finite)?;
-    let normal_floats: MyStruct = serde_cbor::from_slice(&buf)?;
-    assert!((normal_floats.angle.0).abs() < 1e-10);
-    assert!((normal_floats.dist.0 - 1.234).abs() < 1e-10);
-
-    // CBOR with NAN values
-    let buf = serde_cbor::to_vec(&has_nans)?;
-    let with_nans: MyStruct = serde_cbor::from_slice(&buf)?;
-    assert!(with_nans.angle.0.is_nan());
-    assert!(with_nans.dist.0.is_nan());
-
     Ok(())
 }

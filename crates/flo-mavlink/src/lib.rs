@@ -1,4 +1,4 @@
-use color_eyre::eyre::{self, Ok, Result, WrapErr};
+use eyre::{Ok, Result, WrapErr};
 use flo_core::{
     drone_structs::{self, BatteryState, ChannelCondition, DroneEvent},
     elapsed_by, now, Angle, Broadway, CommandSource, DeviceMode, DroneChannelData, FloCommand,

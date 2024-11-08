@@ -12,30 +12,24 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 yew = { version = "0.21.0", features = ["csr"] }
-anyhow = "1.0"
 js-sys = "0.3"
 gloo-timers = "0.3.0"
 gloo-events = "0.2.0"
 gloo-utils = "0.2.0"
 wasm-bindgen = "0.2.58"
 wasm-bindgen-futures = "0.4"
-log = "0.4"
+log.workspace = true
 wasm-logger = "0.2.0"
-instant = { version = "0.1", features = ["wasm-bindgen", "inaccurate"] }
 getrandom = { version = "0.2", features = ["js"] }
-chrono = { version = "0.4.23", default-features = false, features = [
-    "clock",
-    "std",
-    "wasmbind",
-] }
+chrono = { workspace = true, features = ["clock", "std", "wasmbind"] }
 
-serde_json = "1.0"
-serde_yaml = "0.9.14"
+serde_json.workspace = true
+serde_yaml.workspace = true
+serde_path_to_error = "0.1.16"
 
 yew-tincture = "0.2.2"
 
 flo-core = { path = "../flo-core", default-features = false }
-serde_path_to_error = "0.1.16"
 
 [dependencies.web-sys]
 version = "0.3.72"

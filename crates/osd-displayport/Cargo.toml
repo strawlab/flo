@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 multiwii_serial_protocol_v2 = "0.1.12"
-tokio-util = { version = "0.7", features = ["codec"] }
-bytes = "1.0.1"
-thiserror = "1.0.16"
-tracing = "0.1.40"
+tokio-util = { workspace = true, features = ["codec"] }
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

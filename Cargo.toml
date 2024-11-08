@@ -35,25 +35,25 @@ description = "method for videography using a camera system that automatically m
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-color-eyre = "0.6.3"
-thiserror = "1.0.37"
+color-eyre.workspace = true
+thiserror.workspace = true
 serde = { version = "1.0.79", features = ["derive"] }
-serde_json = "1.0.29"
-serde_yaml = "0.9.14"
+serde_json.workspace = true
+serde_yaml.workspace = true
 parking_lot = "0.12"
-bytes = { version = "1", default-features = false }
-futures = "0.3.25"
-tokio = { version = "1", features = ["macros", "net", "sync", "time"] }
-tokio-util = { version = "0.7.4", features = ["net", "codec", "time"] }
+bytes.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "sync", "time"] }
+tokio-util = { workspace = true, features = ["net", "codec", "time"] }
 tokio-serial = { package = "kioto-serial", version = "0.1.0" }
-tokio-stream = { version = "0.1", features = ["sync"] }
-preferences-serde1 = "2.0.0"
+tokio-stream = { workspace = true, features = ["sync"] }
+preferences-serde1.workspace = true
 cookie_store = "0.20.0"
-clap = { version = "4.0.10", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 memchr = "2.5.0"
 sha2 = "0.10.6"
 rand = "0.8.5"
-chrono = { version = "0.4.23", features = ["serde"] }
+chrono = { workspace = true, default-features = true, features = ["serde"] }
 zip = { version = "0.6.3", default-features = false, features = ["time"] }
 walkdir = "2.2"
 csv = "1.1"
@@ -65,19 +65,21 @@ rodio = { version = "0.17.3", default-features = false, features = [
 ] }
 hyper = "1.1"
 time = "0.3.36"
-tracing = "0.1.40"
+tracing.workspace = true
 tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
 shellexpand = "3.1.0"
-tracing-panic = "0.1.1"
+tracing-panic.workspace = true
 serde_cbor = "0.11.1"
-multiwii_serial_protocol_v2 = "0.1.12"
 packed_struct = "0.3"
 glob = "0.3.1"
 regex = "1.10.5"
 http-body-util = "0.1.0"
 axum = "0.7.4"
-nalgebra = { version = "0.32.1", default-features = false }
-adskalman = { version = "0.15.0", default-features = false }
+nalgebra.workspace = true
+adskalman.workspace = true
+json-lines = { version = "0.1.1", features = ["codec"] }
+
+multiwii_serial_protocol_v2.workspace = true
 
 flo-core = { path = "crates/flo-core" }
 flo-mavlink = { path = "crates/flo-mavlink" }
@@ -87,7 +89,6 @@ trinamic = { path = "crates/trinamic" }
 sbgc-gimbal = { path = "crates/sbgc-gimbal" }
 tilta-dongle-comms = { path = "crates/tilta-dongle-comms" }
 osd-displayport = { path = "crates/osd-displayport" }
-json-lines = { version = "0.1.1", features = ["codec"] }
 
 flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
 bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
@@ -100,6 +101,32 @@ strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev =
 [dev-dependencies]
 tempfile = "3"
 
+[workspace.dependencies]
+adskalman = { version = "0.15.0", default-features = false }
+bytes = "1"
+chrono = { version = "0.4.38", default-features = false }
+clap = "4.0.10"
+color-eyre = "0.6.3"
+enumflags2 = "0.7.7"
+eyre = "0.6.12"
+futures = "0.3.30"
+image = { version = "0.25", default-features = false }
+log = "0.4.17"
+machine-vision-formats = "0.1.2"
+mavlink = { version = "0.12.2", default-features = false }
+multiwii_serial_protocol_v2 = "0.1.12"
+nalgebra = { version = "0.32.1", default-features = false }
+num-derive = "0.4.2"
+num-traits = "0.2.19"
+preferences-serde1 = "2.0.0"
+serde_json = "1.0.116"
+serde_yaml = "0.9.14"
+thiserror = "1.0.62"
+tokio = "1"
+tokio-stream = "0.1.15"
+tokio-util = "0.7.4"
+tracing = "0.1.40"
+tracing-panic = "0.1.1"
 
 [features]
 default = ["bundle_files"]
