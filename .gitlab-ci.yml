@@ -26,7 +26,6 @@ beamdriver:
       - beamdriver-${CI_COMMIT_SHA}.uf2
     name: "beamdriver-${CI_COMMIT_SHA}"
 
-
 rpipico-pantilt-firmware:
   image: rust
   script:
@@ -65,7 +64,7 @@ flo:
   image: rust
   script:
     - apt-get update
-    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev libclang-dev
 
     - export RUSTFLAGS="-D warnings"
 
