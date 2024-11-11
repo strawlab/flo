@@ -72,7 +72,7 @@ sounds_filenames:
 osd_config:
   port_path: /dev/serial/by-id/usb-FTDI_TTL232R-3V3_FTGXKCET-if00-port0
   cal:
-    camera_calibration: /home/strawlab/src/flo/flo/dji-o3-goggles2-calibration.yaml
+    camera_calibration: /home/strawlab/src/flo/dji-o3-goggles2-calibration.yaml
     osd_area_w: 1276.0
     osd_area_h: 990.0
     osd_char_w: 30
