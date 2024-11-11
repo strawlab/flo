@@ -2,6 +2,7 @@ use crate::{
     sq, Angle, DeviceMode as TrackingMode, FloatType, MotorPositionResult, RadialDistance,
 };
 
+use eyre::Context;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_FPV_CAL_YAML: &str = include_str!("../../../dji-o3-goggles2-calibration.yaml");
@@ -43,7 +44,8 @@ impl TryFrom<FpvCameraOSDCalibration> for LoadedFpvCameraOSDCalibration {
     type Error = eyre::Report;
     fn try_from(orig: FpvCameraOSDCalibration) -> eyre::Result<Self> {
         let yaml_buf = if let Some(fname) = orig.camera_calibration {
-            std::fs::read(fname)?
+            std::fs::read(&fname)
+                .with_context(|| format!("while reading camera calibration {}", fname.display()))?
         } else {
             DEFAULT_FPV_CAL_YAML.as_bytes().to_vec()
         };
