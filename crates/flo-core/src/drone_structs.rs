@@ -113,6 +113,8 @@ impl Default for MavlinkConfig {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RcConfig {
+    #[serde(default)]
+    pub us_mapping: ChannelRange,
     /// State to wait for as a command to start tracking.
     #[serde(default)]
     pub track_start: Option<ChannelCondition>,
@@ -128,6 +130,29 @@ pub struct RcConfig {
 
     #[serde(default)]
     pub tilt_knob: Option<AngleKnobConfig>,
+}
+
+///convert "pwm microsecond pulse duration" into a value in range -1..+1
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelRange {
+    pub neutral_value_us: FloatType,
+    pub span_us: FloatType,
+}
+
+impl Default for ChannelRange {
+    fn default() -> Self {
+        Self {
+            neutral_value_us: 1500.0,
+            span_us: 500.0,
+        }
+    }
+}
+
+impl ChannelRange {
+    pub fn convert(&self, val_us: FloatType) -> FloatType {
+        (val_us - self.neutral_value_us) / self.span_us
+    }
 }
 
 ///defines a check that a channel value is in a certain range

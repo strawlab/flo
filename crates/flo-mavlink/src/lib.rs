@@ -185,7 +185,13 @@ impl DroneCoordinator {
 
         let rc = DroneChannelData {
             timestamp: now(),
-            values: std::array::from_fn(|i| (vals[i] as FloatType - 1500.0) / 500.0),
+            values: std::array::from_fn(|i| {
+                self.rc_cfg
+                    .as_ref()
+                    .unwrap()
+                    .us_mapping
+                    .convert(vals[i] as FloatType)
+            }),
         };
 
         self.broadway
