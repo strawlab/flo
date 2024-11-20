@@ -142,7 +142,7 @@ pub(crate) fn writer_task_main(
                     ws.save_motor_position(*motor_position)?;
                 }
             }
-            ToggleSavingCsv(values) => {
+            ToggleSavingFloz(values) => {
                 if let Some((creation_time, output_dirname)) = values {
                     tracing::info!("Saving FLO data to {}", output_dirname.display());
                     if writing_state.is_none() {

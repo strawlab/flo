@@ -57,7 +57,7 @@ impl std::fmt::Display for DistanceMeters {
 }
 
 struct App {
-    this_recording_path: Option<RecordingPath>,
+    floz_recording_path: Option<RecordingPath>,
     pan_center_degrees: TypedInputStorage<AngleDegrees>,
     tilt_center_degrees: TypedInputStorage<AngleDegrees>,
     distance_center: TypedInputStorage<DistanceMeters>,
@@ -80,7 +80,7 @@ enum Msg {
     GamepadConnected((bool, Gamepad)),
     GamepadInterval,
     SendMessageFetchState(FetchState),
-    DoRecordMotorPositionsCsv(bool),
+    DoRecordMotorPositionsFloz(bool),
     SetDistanceCorrection,
     AdjustFocus(i32),
     RenderView,
@@ -181,7 +181,7 @@ impl Component for App {
 
         Self {
             es,
-            this_recording_path: None,
+            floz_recording_path: None,
             pan_center_degrees: TypedInputStorage::from_initial(AngleDegrees(0.0)),
             tilt_center_degrees: TypedInputStorage::from_initial(AngleDegrees(0.0)),
             distance_center: TypedInputStorage::from_initial(DistanceMeters(0.5)),
@@ -217,7 +217,7 @@ impl Component for App {
             Msg::SendMessageFetchState(_fetch_state) => {
                 return false;
             }
-            Msg::DoRecordMotorPositionsCsv(val) => {
+            Msg::DoRecordMotorPositionsFloz(val) => {
                 let msg = flo_core::FloCommand::SetRecordingState(val);
                 self.send_message(msg, ctx);
                 return false; // Don't update DOM, do that when backend notifies us of new state.
@@ -296,7 +296,7 @@ impl Component for App {
                                     new_state.home_position.2 .0,
                                 ));
 
-                                self.this_recording_path = new_state.recording_path.clone();
+                                self.floz_recording_path = new_state.floz_recording_path.clone();
                                 self.last_state = Some(new_state);
                             }
                             BuiEventData::Config(cfg) => {
@@ -387,9 +387,9 @@ impl Component for App {
                     // </div>
                     <div>
                         <RecordingPathWidget
-                        label="Record motor positions .csv file"
-                        value={self.this_recording_path.clone()}
-                        ontoggle={ctx.link().callback(|checked| {Msg::DoRecordMotorPositionsCsv(checked)})}
+                        label="Record motor positions .floz file"
+                        value={self.floz_recording_path.clone()}
+                        ontoggle={ctx.link().callback(|checked| {Msg::DoRecordMotorPositionsFloz(checked)})}
                         />
                     </div>
                     <div class="button-holder">

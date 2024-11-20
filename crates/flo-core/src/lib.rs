@@ -431,7 +431,7 @@ pub struct DeviceState {
     pub recent_centroid_packets: u16,
     pub device_id: DeviceId,
     pub home_position: (Angle, Angle, RadialDistance),
-    pub recording_path: Option<RecordingPath>,
+    pub floz_recording_path: Option<RecordingPath>,
     pub stereopsis_state: Option<StereopsisState>,
 }
 
@@ -825,7 +825,7 @@ impl DeviceState {
             recent_centroid_packets: 0,
             device_id,
             home_position: (Angle(0.0), Angle(0.0), RadialDistance(1.0)),
-            recording_path: None,
+            floz_recording_path: None,
             stereopsis_state: Default::default(),
         }
     }
@@ -907,7 +907,7 @@ fn unique_id_to_hex(unique_id: &[u8; DEVICE_ID_LEN], hex_out: &mut [u8; DEVICE_I
 #[derive(Debug)]
 pub enum SaveToDiskMsg {
     /// Start or stop saving data to disk.
-    ToggleSavingCsv(Option<(chrono::DateTime<chrono::Local>, std::path::PathBuf)>),
+    ToggleSavingFloz(Option<(chrono::DateTime<chrono::Local>, std::path::PathBuf)>),
     /// New centroid data
     CentroidData((chrono::DateTime<chrono::Local>, MomentCentroid)),
     /// New tracking state data

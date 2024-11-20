@@ -494,25 +494,28 @@ impl<'a> FloCoordinator<'a> {
                 };
             }
             FloCommand::SetRecordingState(enable) => {
-                let inner = if enable {
+                let floz_msg = if enable {
                     let creation_time = chrono::Local::now();
-                    let final_dir_name = creation_time.format(FLO_DIRNAME_TEMPLATE).to_string();
-                    if !regex::Regex::new(FLO_DIRNAME_RE)?.is_match(&final_dir_name) {
+                    let floz_dirname = creation_time.format(FLO_DIRNAME_TEMPLATE).to_string();
+                    if !regex::Regex::new(FLO_DIRNAME_RE)?.is_match(&floz_dirname) {
                         tracing::error!("new dirname does not match expected pattern");
                     }
-                    let output_dirname = flo_data_dir().join(final_dir_name);
-                    self.my_state.recording_path =
+                    let full_floz_dirname = flo_data_dir().join(floz_dirname);
+                    self.my_state.floz_recording_path =
                         Some(flo_core::RecordingPath::from_path_and_time(
-                            output_dirname.display().to_string(),
+                            full_floz_dirname.display().to_string(),
                             creation_time,
                         ));
-                    Some((creation_time, output_dirname))
+                    Some((creation_time, full_floz_dirname))
                 } else {
-                    self.my_state.recording_path = None;
+                    // disable recording
+
+                    self.my_state.floz_recording_path = None;
                     None
                 };
-                let msg = SaveToDiskMsg::ToggleSavingCsv(inner);
-                self.flo_saver_tx.send(msg).unwrap();
+                self.flo_saver_tx
+                    .send(SaveToDiskMsg::ToggleSavingFloz(floz_msg))
+                    .unwrap();
             }
         };
         Ok(())
@@ -524,7 +527,7 @@ impl<'a> FloCoordinator<'a> {
             E::Armed | E::Disarmed => {
                 let want_recording = evt == E::Armed;
                 // start/stop saving .flo data
-                if self.my_state.recording_path.is_some() != want_recording {
+                if self.my_state.floz_recording_path.is_some() != want_recording {
                     self.broadway.flo_events.send(FloEvent::Command(
                         FloCommand::SetRecordingState(want_recording),
                         CommandSource::DroneRC,
