@@ -85,6 +85,10 @@ struct Cli {
     /// Filename of initial device configuration in YAML format
     #[arg(long)]
     config: Option<String>,
+
+    /// If set, .floz files and logs are saved to this directory.
+    #[arg(long)]
+    data_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, clap::Subcommand, Default)]
@@ -112,11 +116,8 @@ pub(crate) enum UdpMsg {
     Centroid(MomentCentroid),
 }
 
-fn flo_data_dir() -> std::path::PathBuf {
-    home::home_dir().unwrap().join("flo-data")
-}
-
 struct FloCoordinator<'a> {
+    data_dir: &'a std::path::Path,
     device_config: &'a mut FloControllerConfig,
     tracking_state: flo_core::TrackingState,
     latest_centroid: Option<MomentCentroid>,
@@ -146,9 +147,11 @@ impl<'a> FloCoordinator<'a> {
         audio_stream: Option<&'a rodio::OutputStreamHandle>,
         from_device_http_tx: watch::Sender<DeviceState>,
         broadway: Broadway,
+        data_dir: &'a std::path::Path,
     ) -> Result<Self> {
         let (cam_session_main, cam_session_secondary) = init_strand_cams(device_config).await?;
         Ok(Self {
+            data_dir,
             device_config,
             tracking_state: Default::default(),
             latest_centroid: Default::default(),
@@ -500,7 +503,7 @@ impl<'a> FloCoordinator<'a> {
                     if !regex::Regex::new(FLO_DIRNAME_RE)?.is_match(&floz_dirname) {
                         tracing::error!("new dirname does not match expected pattern");
                     }
-                    let full_floz_dirname = flo_data_dir().join(floz_dirname);
+                    let full_floz_dirname = self.data_dir.join(floz_dirname);
                     self.my_state.floz_recording_path =
                         Some(flo_core::RecordingPath::from_path_and_time(
                             full_floz_dirname.display().to_string(),
@@ -740,6 +743,19 @@ async fn main() -> Result<()> {
         std::env::set_var("RUST_LOG", envstr);
     }
 
+    let cli = Cli::parse();
+    let (log_dir, data_dir) = if let Some(dd) = cli.data_dir.as_ref() {
+        (dd.clone(), dd.clone())
+    } else {
+        let home_dir = home::home_dir().unwrap();
+        (home_dir.clone(), home_dir.join("flo-data"))
+    };
+
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("While creating directory {}", log_dir.display()))?;
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("While creating directory {}", data_dir.display()))?;
+
     // Enable logging to console and to disk using tracing.
     {
         use time::{format_description::well_known::Iso8601, UtcOffset};
@@ -749,10 +765,13 @@ async fn main() -> Result<()> {
         };
 
         let log_file_name = chrono::Local::now()
-            .format("~/.flo-%Y%m%d_%H%M%S.%f.log")
+            .format(".flo-%Y%m%d_%H%M%S.%f.log")
             .to_string();
-        let log_file_name =
-            std::path::PathBuf::from(shellexpand::full(&log_file_name)?.to_string());
+        let full_log_file_name = log_dir
+            .join(&log_file_name)
+            .into_os_string()
+            .into_string()
+            .unwrap();
 
         // Create a fixed offset time formatter based on the timezone at the
         // time this line of code runs.
@@ -761,7 +780,8 @@ async fn main() -> Result<()> {
             Iso8601::DEFAULT,
         );
 
-        let file = std::fs::File::create(log_file_name)?;
+        let file = std::fs::File::create(&full_log_file_name)
+            .with_context(|| format!("While creating file {full_log_file_name}"))?;
         let file_writer = Mutex::new(file);
         let file_layer = fmt::layer()
             .with_timer(timer.clone())
@@ -780,33 +800,6 @@ async fn main() -> Result<()> {
         tracing::subscriber::set_global_default(collector)?;
         std::panic::set_hook(Box::new(tracing_panic::panic_hook));
     }
-
-    let cli = Cli::parse();
-
-    // First we match candidates with glob, then we get more specific with regex.
-    let pattern = format!("{}/{}", flo_data_dir().display(), FLO_DIRNAME_GLOB);
-    let re_flo = regex::Regex::new(FLO_DIRNAME_RE).unwrap();
-    for existing_flo_dir in glob::glob(&pattern)? {
-        let existing_flo_dir = existing_flo_dir?;
-        let existing_flo_dir_str = existing_flo_dir
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("no filename"))?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("path not unicode"))?;
-        if !re_flo.is_match(existing_flo_dir_str) {
-            // Name does not match our more-specific regex, skip it.
-            continue;
-        }
-        if existing_flo_dir.is_dir() {
-            tracing::info!(
-                "cleaning up existing FLO directory: {}",
-                existing_flo_dir.display()
-            );
-            writing_state::repair_unfinished_flo(existing_flo_dir)?;
-        }
-    }
-
-    tracing::info!("done cleaning up FLO directories with pattern {pattern}");
 
     let device_id = match get_device_id() {
         Ok(device_id) => device_id,
@@ -913,6 +906,35 @@ async fn main() -> Result<()> {
     // after we display the config because it may show errors, which we want to
     // be after the config.
     device_config.fix_deprecations();
+
+    // First we match candidates with glob, then we get more specific with regex.
+    let pattern = data_dir
+        .join(FLO_DIRNAME_GLOB)
+        .into_os_string()
+        .into_string()
+        .unwrap();
+    let re_flo = regex::Regex::new(FLO_DIRNAME_RE).unwrap();
+    for existing_flo_dir in glob::glob(&pattern)? {
+        let existing_flo_dir = existing_flo_dir?;
+        let existing_flo_dir_str = existing_flo_dir
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("no filename"))?
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("path not unicode"))?;
+        if !re_flo.is_match(existing_flo_dir_str) {
+            // Name does not match our more-specific regex, skip it.
+            continue;
+        }
+        if existing_flo_dir.is_dir() {
+            tracing::info!(
+                "cleaning up existing FLO directory: {}",
+                existing_flo_dir.display()
+            );
+            writing_state::repair_unfinished_flo(existing_flo_dir)?;
+        }
+    }
+
+    tracing::info!("done cleaning up FLO directories with pattern {pattern}");
 
     match cli.command {
         Some(Commands::ShowConfig) => {
@@ -1189,6 +1211,7 @@ async fn main() -> Result<()> {
         audio_stream_handle.as_ref(),
         from_device_http_tx,
         broadway,
+        &data_dir,
     )
     .await?;
 
