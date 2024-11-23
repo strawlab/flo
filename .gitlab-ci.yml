@@ -81,7 +81,7 @@ flo:
     - cargo run -- --config config-drone.yaml show-config
     - cargo run -- --config config-mini.yaml show-config
 
-flo-core:
+test-crates:
   image: rust
   script:
     - export RUSTFLAGS="-D warnings"
