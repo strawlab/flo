@@ -621,7 +621,7 @@ async fn initialize_strand_cam_session(
     jar: Arc<RwLock<cookie_store::CookieStore>>,
 ) -> Result<HttpSession> {
     let info = flydra_types::BuiServerAddrInfo::parse_url_with_token(&cfg.url)?;
-    let session = bui_backend_session::create_session(&info, jar.clone())
+    let mut session = bui_backend_session::create_session(&info, jar.clone())
         .await
         .with_context(|| {
             format!(
@@ -637,7 +637,18 @@ async fn initialize_strand_cam_session(
         tracing::debug!("saved cookie store {STRAND_CAM_COOKIE_KEY}");
     }
 
-    tracing::info!("opened strand cam session at {}", &cfg.url);
+    let cam_name = {
+        let name_response = session
+            .get("cam-name")
+            .await
+            .with_context(|| "Making request for camera name")?;
+
+        use http_body_util::BodyExt;
+        let body_bytes = name_response.collect().await?.to_bytes();
+        String::from_utf8(body_bytes.to_vec())?
+    };
+
+    tracing::info!("opened camera {cam_name} at {url}", url = &cfg.url);
 
     if cfg.gain.is_some() {
         warn!("not implemented: set gain");
