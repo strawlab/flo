@@ -67,7 +67,6 @@ hyper = "1.1"
 time = "0.3.36"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
-shellexpand = "3.1.0"
 tracing-panic.workspace = true
 serde_cbor = "0.11.1"
 packed_struct = "0.3"
