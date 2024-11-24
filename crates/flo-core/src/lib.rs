@@ -582,10 +582,8 @@ impl Default for TrinamicAxisConfig {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct StrandCamConfig {
     pub url: String,
-    pub gain: Option<f64>,
-    pub exposure_dur_usec: Option<u64>,
-    pub center_x: Option<u32>,
-    pub center_y: Option<u32>,
+    #[serde(default)]
+    pub on_attach_json_commands: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]

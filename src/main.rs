@@ -15,7 +15,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_serial::SerialPortBuilderExt;
-use tracing::{self as log, warn};
+use tracing::{self as log};
 
 use flo_core::{
     drone_structs::DroneEvent, Angle, Broadway, CommandSource, DeviceId, DeviceMode, DeviceState,
@@ -650,17 +650,11 @@ async fn initialize_strand_cam_session(
 
     tracing::info!("opened camera {cam_name} at {url}", url = &cfg.url);
 
-    if cfg.gain.is_some() {
-        warn!("not implemented: set gain");
-    }
-    if cfg.exposure_dur_usec.is_some() {
-        warn!("not implemented: set exposure_dur_usec");
-    }
-    if cfg.center_x.is_some() {
-        warn!("not implemented: set center x");
-    }
-    if cfg.center_y.is_some() {
-        warn!("not implemented: set center y");
+    for cmd in cfg.on_attach_json_commands.iter() {
+        session
+            .post("callback", cmd.clone().into())
+            .await
+            .with_context(|| format!("Making callback to {cam_name}: {cmd}"))?;
     }
     Ok(session)
 }
