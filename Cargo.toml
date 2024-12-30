@@ -37,7 +37,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 color-eyre.workspace = true
 thiserror.workspace = true
-serde = { version = "1.0.79", features = ["derive"] }
+serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 parking_lot = "0.12"
@@ -118,6 +118,7 @@ nalgebra = { version = "0.32.1", default-features = false }
 num-derive = "0.4.2"
 num-traits = "0.2.19"
 preferences-serde1 = "2.0.0"
+serde = { version = "1.0.79", default-features = false }
 serde_json = "1.0.116"
 serde_yaml = "0.9.14"
 thiserror = "1.0.62"
