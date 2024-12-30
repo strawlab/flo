@@ -14,3 +14,9 @@ quote = "1.0.3"
 syn = "2"
 proc-macro-error = "1.0.2"
 proc-macro2 = "1.0.12"
+
+[dev-dependencies]
+bytes.workspace = true
+enumflags2.workspace = true
+num-traits.workspace = true
+thiserror.workspace = true
