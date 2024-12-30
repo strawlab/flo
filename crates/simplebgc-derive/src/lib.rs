@@ -214,7 +214,7 @@ pub fn payload_derive(input: TokenStream) -> TokenStream {
 fn dummy_const_trick<T: quote::ToTokens>(name: &Ident, exp: T) -> TokenStream2 {
     let dummy_const = format_ident!("__IMPL_PAYLOAD_FOR_{}", name);
     quote! {
-        #[allow(non_upper_case_globals, unused_qualifications)]
+        #[allow(non_upper_case_globals, unused_qualifications, non_local_definitions)]
         const #dummy_const: () = {
             use bytes::{Bytes, BytesMut, Buf, BufMut};
             #[allow(unused_imports)]
