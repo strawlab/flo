@@ -2,13 +2,12 @@ use bui_backend_session::HttpSession;
 use clap::Parser;
 use color_eyre::eyre::{self, self as anyhow, Result, WrapErr};
 use futures::StreamExt;
-use parking_lot::RwLock;
 use preferences_serde1::Preferences;
 use serde::{Deserialize, Serialize};
 use std::{
     future::{pending, Future},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 use tokio::{
     sync::{mpsc, watch},
@@ -632,7 +631,7 @@ async fn initialize_strand_cam_session(
 
     {
         // We have the cookie from Strand Cam now, so store it to disk.
-        let jar = jar.read();
+        let jar = jar.read().unwrap();
         Preferences::save(&*jar, &flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY)?;
         tracing::debug!("saved cookie store {STRAND_CAM_COOKIE_KEY}");
     }

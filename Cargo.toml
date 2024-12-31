@@ -40,7 +40,6 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-parking_lot = "0.12"
 bytes.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "sync", "time"] }
@@ -89,10 +88,10 @@ sbgc-gimbal = { path = "crates/sbgc-gimbal" }
 tilta-dongle-comms = { path = "crates/tilta-dongle-comms" }
 osd-displayport = { path = "crates/osd-displayport" }
 
-flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
-ci2-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
-strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "20b47526b753c082dd897a95c662b2194a921714" }
+flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
+bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
+ci2-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
+strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
 
 # for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
 # sudo apt install librust-alsa-sys-dev
