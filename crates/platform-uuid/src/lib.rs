@@ -1,5 +1,3 @@
-extern crate libc;
-
 #[cfg(target_os = "windows")]
 extern crate winreg;
 

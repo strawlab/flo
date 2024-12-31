@@ -2,7 +2,7 @@
 
 extern "C" {
     // get_platform_uuid is defined in uuid-macos.cpp
-    pub fn get_platform_uuid(buf: *mut u8, buf_size: libc::c_int) -> u8;
+    fn get_platform_uuid(buf: *mut u8, buf_size: libc::c_int) -> u8;
 }
 
 pub fn get_uuid() -> Result<Vec<u8>, crate::Error> {
