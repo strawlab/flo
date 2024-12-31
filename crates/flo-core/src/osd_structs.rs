@@ -29,7 +29,6 @@ pub struct OsdConfig {
 ///defines relation between fpv camera pixels, view directions, and osd character grid
 #[derive(Debug, Clone)]
 pub struct LoadedFpvCameraOSDCalibration {
-    // camera_calibration: Option<std::path::PathBuf>,
     pub camcal: opencv_ros_camera::NamedIntrinsicParameters<f64>,
     ///the rectangle covered by osd char grid (center of top-left char to center of bottom-right char)
     pub osd_area_w: FloatType,
