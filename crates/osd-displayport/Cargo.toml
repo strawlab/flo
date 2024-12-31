@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-multiwii_serial_protocol_v2 = "0.1.12"
+multiwii_serial_protocol_v2.workspace = true
 tokio-util = { workspace = true, features = ["codec"] }
 bytes.workspace = true
 thiserror.workspace = true

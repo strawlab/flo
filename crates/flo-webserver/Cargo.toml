@@ -9,9 +9,9 @@ eyre.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "rt-multi-thread"] }
 http = "1"
 tokio-stream = { workspace = true, features = ["sync"] }
-axum = "0.7.2"
+axum.workspace = true
 axum-token-auth = "0.1.2"
-if-addrs = "0.11"
+if-addrs.workspace = true
 tower = "0.4.13"
 tower-http = { version = "0.5.1", features = ["trace", "fs"] }
 preferences-serde1.workspace = true
@@ -22,7 +22,7 @@ qrcodegen = "1.8.0"
 tower-serve-static = { version = "0.1", optional = true }
 include_dir = { version = "0.7.3", optional = true }
 
-flo-core = { path = "../flo-core" }
+flo-core.workspace = true
 futures.workspace = true
 
 [features]

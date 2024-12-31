@@ -13,5 +13,5 @@ num-traits.workspace = true
 serde_json.workspace = true
 serialport = "4.4.0"
 
-flo-core = { path = "../flo-core" }
-tokio-mavlink = { path = "../tokio-mavlink" }
+flo-core = { workspace = true, default-features = true }
+tokio-mavlink.workspace = true

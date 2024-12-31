@@ -22,6 +22,6 @@ tracing.workspace = true
 
 simplebgc = { path = "../simplebgc" }
 simplebgc-derive = { path = "../simplebgc-derive" }
-flo-core = { path = "../flo-core" }
+flo-core.workspace = true
 
 [dev-dependencies]

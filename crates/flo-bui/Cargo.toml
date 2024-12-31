@@ -26,7 +26,7 @@ serde_path_to_error = "0.1.16"
 
 yew-tincture = "0.2.2"
 
-flo-core = { path = "../flo-core", default-features = false }
+flo-core.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.72"

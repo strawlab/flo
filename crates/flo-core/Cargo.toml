@@ -16,7 +16,7 @@ tokio = { workspace = true, features = [
     "macros",
     "sync",
 ], optional = true }
-if-addrs = { version = "0.10.0", optional = true }
+if-addrs = { workspace = true, optional = true }
 socket2 = { version = "0.5.5", optional = true }
 chrono = { workspace = true, features = ["serde", "clock"] }
 nalgebra.workspace = true
