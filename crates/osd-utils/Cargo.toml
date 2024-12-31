@@ -1,0 +1,19 @@
+[package]
+name = "osd-utils"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eyre.workspace = true
+tracing.workspace = true
+serde.workspace = true
+base64.workspace = true
+flate2.workspace = true
+
+multiwii_serial_protocol_v2.workspace = true
+
+flo-core = { path = "../flo-core" }
+osd-displayport = { path = "../osd-displayport" }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,42 +1,52 @@
-use crate::osd_utils::{self, OsdCache};
+use color_eyre::eyre::{self, Result, WrapErr};
+use futures::{SinkExt, StreamExt};
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
+use tokio_serial::SerialPortBuilderExt;
+
 use flo_core::{
     drone_structs::{DroneEvent, FlightMode},
     elapsed,
     osd_structs::Align,
-    Broadway, DeviceMode as TrackingMode, DroneStatus, OsdConfig, OsdState as FloStatus,
+    Broadway, DeviceMode as TrackingMode, DroneStatus, OsdConfig, OsdState,
 };
 use multiwii_serial_protocol_v2::MspPacket;
 use osd_displayport::{displayport_messages, msp_codec};
-
-use color_eyre::eyre::{self, Result, WrapErr};
-use futures::{SinkExt, StreamExt};
-use tokio_serial::SerialPortBuilderExt;
+use osd_utils::OsdCache;
 
 pub(crate) async fn run_osd_loop(
-    mut flo: tokio::sync::watch::Receiver<FloStatus>,
+    mut flo: tokio::sync::watch::Receiver<OsdState>,
     broadway: Broadway,
     config: OsdConfig,
+    canvas_arc: Arc<Mutex<OsdCache>>,
 ) -> Result<()> {
     let cal: flo_core::osd_structs::FpvCameraOSDCalibration = config
         .cal
         .ok_or_else(|| eyre::eyre!("OSD calibration required"))?;
     let cal: flo_core::osd_structs::LoadedFpvCameraOSDCalibration = cal.try_into()?;
-    const BAUD_RATE: u32 = 115_200;
-    let serial_device = tokio_serial::new(&config.port_path, BAUD_RATE)
-        .open_native_async()
-        .with_context(|| format!("Failed to open OSD serial device {}", config.port_path))?;
-
-    let (mut osd_tx, mut osd_rx) =
-        tokio_util::codec::Framed::new(serial_device, msp_codec::MspCodec::new_v1()).split();
-
     let mut drone_events = broadway.drone_events.subscribe();
+    let (mut osd_tx, mut osd_rx): (_, Pin<Box<dyn futures::Stream<Item = _> + Send>>) =
+        match config.port_path {
+            Some(ser_path) => {
+                const BAUD_RATE: u32 = 115_200;
+                let serial_device = tokio_serial::new(&ser_path, BAUD_RATE)
+                    .open_native_async()
+                    .with_context(|| format!("Failed to open OSD serial device {}", ser_path))?;
 
+                let (osd_tx, osd_rx) =
+                    tokio_util::codec::Framed::new(serial_device, msp_codec::MspCodec::new_v1())
+                        .split();
+                (Some(osd_tx), Box::pin(osd_rx))
+            }
+            None => (None, Box::pin(futures::stream::pending())),
+        };
     let mut heartbeat_tick = tokio::time::interval(std::time::Duration::from_secs_f64(1.0));
     let mut update_tick = tokio::time::interval(std::time::Duration::from_secs_f64(0.05));
     heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     update_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let mut canvas = OsdCache::new(cal.osd_char_w, cal.osd_char_h);
     let mut drone_status: DroneStatus = Default::default();
 
     loop {
@@ -97,30 +107,31 @@ pub(crate) async fn run_osd_loop(
             },
             MyAction::Pass => {}
             MyAction::Heartbeat => {
-                osd_tx
-                    .send(displayport_messages::DisplayportMessage::Heartbeat.make_msp_packet())
-                    .await?;
+                if let Some(osd_tx) = osd_tx.as_mut() {
+                    osd_tx
+                        .send(displayport_messages::DisplayportMessage::Heartbeat.make_msp_packet())
+                        .await?;
 
-                //send arming status message to vtx/goggles to make them go full power and start recording video
-                use multiwii_serial_protocol_v2::MspCommandCode as CC;
-                use packed_struct::prelude::*;
+                    //send arming status message to vtx/goggles to make them go full power and start recording video
+                    use multiwii_serial_protocol_v2::MspCommandCode as CC;
+                    use packed_struct::prelude::*;
 
-                let telemsg = multiwii_serial_protocol_v2::structs::MspStatus {
-                    cycle_time: 0,
-                    i2c_errors: 0,
-                    sensors: multiwii_serial_protocol_v2::structs::MspAvailableSensors {
-                        sonar: false,
-                        gps: false,
-                        mag: false,
-                        baro: false,
-                        acc: false,
-                    },
-                    null1: 0,
-                    flight_mode: if drone_status.armed { 1 } else { 0 },
-                    profile: 0,
-                    system_load: 0,
-                };
-                osd_tx
+                    let telemsg = multiwii_serial_protocol_v2::structs::MspStatus {
+                        cycle_time: 0,
+                        i2c_errors: 0,
+                        sensors: multiwii_serial_protocol_v2::structs::MspAvailableSensors {
+                            sonar: false,
+                            gps: false,
+                            mag: false,
+                            baro: false,
+                            acc: false,
+                        },
+                        null1: 0,
+                        flight_mode: if drone_status.armed { 1 } else { 0 },
+                        profile: 0,
+                        system_load: 0,
+                    };
+                    osd_tx
                     .send(MspPacket {
                         cmd: CC::MSP_STATUS as u16,
                         direction:
@@ -128,98 +139,110 @@ pub(crate) async fn run_osd_loop(
                         data: telemsg.pack().to_vec(),
                     })
                     .await?;
+                }
             }
             MyAction::Render => {
                 let state = {
                     // Only in this scope do we keep the lock on `flo`.
                     flo.borrow_and_update().clone()
                 };
-                canvas.clear();
+                let packets = {
+                    // Lock the canvas while we redraw it.
+                    let mut canvas = canvas_arc.lock().unwrap();
+                    canvas.clear();
 
-                canvas.print(b"FLO", 0, 0, Align::Left);
+                    canvas.print(b"FLO", 0, 0, Align::Left);
 
-                draw_battery(&mut canvas, &drone_status, -1, -1, Align::Right);
+                    draw_battery(&mut canvas, &drone_status, -1, -1, Align::Right);
 
-                let fm_str = match drone_status.flight_mode {
-                    FlightMode::Position => b"POS",
-                    FlightMode::Hold => b"HLD",
-                    FlightMode::Manual => b"MAN",
-                    FlightMode::Altitude => b"ALT",
-                    _ => b"???",
-                };
-                canvas.print(fm_str, -1, 0, Align::Right);
-
-                //display tracking/bee marker
-                if state.tracking_mode == TrackingMode::ClosedLoop {
-                    //render a distance-dependent blob
-                    //FIXME: add parallax correction here
-                    let dist = if state.bee_dist.0.is_nan() || state.bee_dist.0 == 0.0 {
-                        None
-                    } else {
-                        Some(state.bee_dist)
+                    let fm_str = match drone_status.flight_mode {
+                        FlightMode::Position => b"POS",
+                        FlightMode::Hold => b"HLD",
+                        FlightMode::Manual => b"MAN",
+                        FlightMode::Altitude => b"ALT",
+                        _ => b"???",
                     };
-                    let (x, y) = cal.angles_to_px(
-                        state.motor_state.pan_enc,
-                        state.motor_state.tilt_enc,
-                        dist,
-                    );
-                    let ((chx, chy), inscreen) = cal.constrain_charpos_f(cal.px_to_charpos(x, y));
-                    let (chx_i, chy_i) = (chx.round() as i32, chy.round() as i32);
+                    canvas.print(fm_str, -1, 0, Align::Right);
 
-                    let mut n: usize = if state.bee_dist.0.is_nan() || state.bee_dist.0 == 0.0 {
-                        1
-                    } else {
-                        config.blob.convert(state.bee_dist)
-                    };
-                    if inscreen {
-                        n += 1 //compensate for "do not render directly over bee"
-                    };
-                    let chars = osd_utils::char_blob(&cal, cal.charposf_to_px(chx, chy), n);
-                    for (bchx, bchy) in chars {
-                        if inscreen && bchx == chx_i && bchy == chy_i {
-                            continue; //do not render directly over bee
+                    //display tracking/bee marker
+                    if state.tracking_mode == TrackingMode::ClosedLoop {
+                        //render a distance-dependent blob
+                        //FIXME: add parallax correction here
+                        let dist = if state.bee_dist.0.is_nan() || state.bee_dist.0 == 0.0 {
+                            None
+                        } else {
+                            Some(state.bee_dist)
+                        };
+                        let (x, y) = cal.angles_to_px(
+                            state.motor_state.pan_enc,
+                            state.motor_state.tilt_enc,
+                            dist,
+                        );
+                        let ((chx, chy), inscreen) =
+                            cal.constrain_charpos_f(cal.px_to_charpos(x, y));
+                        let (chx_i, chy_i) = (chx.round() as i32, chy.round() as i32);
+
+                        let mut n: usize = if state.bee_dist.0.is_nan() || state.bee_dist.0 == 0.0 {
+                            1
+                        } else {
+                            config.blob.convert(state.bee_dist)
+                        };
+                        if inscreen {
+                            n += 1 //compensate for "do not render directly over bee"
+                        };
+                        let chars = osd_utils::char_blob(&cal, cal.charposf_to_px(chx, chy), n);
+                        for (bchx, bchy) in chars {
+                            if inscreen && bchx == chx_i && bchy == chy_i {
+                                continue; //do not render directly over bee
+                            }
+                            let ch = osd_utils::arrow_towards(&cal, (bchx, bchy), (x, y));
+                            canvas.draw_char(ch, bchx, bchy);
                         }
-                        let ch = osd_utils::arrow_towards(&cal, (bchx, bchy), (x, y));
-                        canvas.draw_char(ch, bchx, bchy);
+
+                        //draw numerical distance
+                        let mut s = format!("{:.2}", state.bee_dist.0.clamp(-99.99, 99.99))
+                            .to_ascii_uppercase()
+                            .as_bytes()
+                            .to_vec();
+                        s.push(osd_utils::SYM_M); // add "m" for meters
+                        canvas.print(&s, 0, cal.osd_char_h - 1, Align::Left);
+                    } else {
+                        //render a character indicating where flo is pointing
+                        let ((chx, chy), _) = cal.constrain_charpos(cal.angles_to_charpos(
+                            state.motor_state.pan_enc,
+                            state.motor_state.tilt_enc,
+                            None,
+                        ));
+
+                        let ch = match state.tracking_mode {
+                            TrackingMode::AcquiringLock => b'?',
+                            TrackingMode::ClosedLoop => unreachable!(),
+                            TrackingMode::ManualOpenLoop => b'#',
+                            TrackingMode::SuspendedClosedLoop => b'?',
+                        };
+                        canvas.draw_char(ch, chx, chy);
                     }
 
-                    //draw numerical distance
-                    let mut s = format!("{:.2}", state.bee_dist.0.clamp(-99.99, 99.99))
-                        .to_ascii_uppercase()
-                        .as_bytes()
-                        .to_vec();
-                    s.push(osd_utils::SYM_M); // add "m" for meters
-                    canvas.print(&s, 0, cal.osd_char_h - 1, Align::Left);
-                } else {
-                    //render a character indicating where flo is pointing
-                    let ((chx, chy), _) = cal.constrain_charpos(cal.angles_to_charpos(
-                        state.motor_state.pan_enc,
-                        state.motor_state.tilt_enc,
-                        None,
-                    ));
+                    if osd_tx.is_some() {
+                        // In case of true OSD, build the packets to send.
+                        Some(canvas.make_packets())
+                    } else {
+                        // No need to compute packets for emulated OSD.
+                        None
+                    }
+                };
 
-                    let ch = match state.tracking_mode {
-                        TrackingMode::AcquiringLock => b'?',
-                        TrackingMode::ClosedLoop => unreachable!(),
-                        TrackingMode::ManualOpenLoop => b'#',
-                        TrackingMode::SuspendedClosedLoop => b'?',
-                    };
-                    canvas.draw_char(ch, chx, chy);
+                // We have now finished rendering the canvas.
+
+                // In case of true OSD, finalize the packets and send out the serial port.
+                if let Some(osd_tx) = osd_tx.as_mut() {
+                    if let Some(ser_packets) = packets {
+                        for pkt in ser_packets.into_iter() {
+                            osd_tx.feed(pkt).await?;
+                        }
+                        osd_tx.flush().await?;
+                    }
                 }
-
-                let mut packets = vec![];
-                packets
-                    .push(displayport_messages::DisplayportMessage::ClearScreen.make_msp_packet());
-
-                packets.append(&mut canvas.make_packets());
-
-                packets
-                    .push(displayport_messages::DisplayportMessage::DrawScreen.make_msp_packet());
-
-                for pkt in packets.into_iter() {
-                    osd_tx.feed(pkt).await?;
-                }
-                osd_tx.flush().await?;
             }
             MyAction::MessageFromGoggles(_) => {} //FIXME: parse and listen for canvas size
         }

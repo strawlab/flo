@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use flo_core::{osd_structs::Align, sq, Angle, FloatType};
 use osd_displayport::displayport_messages;
 
@@ -5,28 +7,23 @@ use osd_displayport::displayport_messages;
 mod osd_symbols {
     //see https://betaflight.com/docs/development/osd-glyps
 
+    pub const SYM_M: u8 = 0x0c;
+    pub const SYM_STICK_OVERLAY_VERTICAL: u8 = 0x16;
+    pub const SYM_STICK_OVERLAY_HORIZONTAL: u8 = 0x17;
     ///also the first in a total of 16 arrows (ccw)
-    pub(crate) const SYM_OVER_HOME: u8 = 0x05;
-    pub(crate) const SYM_STICK_OVERLAY_SPRITE_MID: u8 = 0x09;
-    pub(crate) const SYM_M: u8 = 0x0c;
-    pub(crate) const SYM_ARROW_SOUTH: u8 = 0x60;
-    /// a crosshair
-    pub(crate) const SYM_AH_CENTER: u8 = 0x73;
-    ///progress bar pieces
-    pub(crate) const SYM_PB_START: u8 = 0x8A;
-    pub(crate) const SYM_PB_FULL: u8 = 0x8B;
-    pub(crate) const SYM_PB_HALF: u8 = 0x8C;
-    pub(crate) const SYM_PB_EMPTY: u8 = 0x8D;
-    pub(crate) const SYM_PB_END: u8 = 0x8E;
-    pub(crate) const SYM_PB_CLOSE: u8 = 0x8F;
+    pub const SYM_ARROW_SOUTH: u8 = 0x60;
+    pub const X75: u8 = 0x75;
+    pub const X76: u8 = 0x76;
+    pub const X77: u8 = 0x77;
+    pub const X78: u8 = 0x78;
     ///total 7 symbols, from full to empty
-    pub(crate) const SYM_BATT_FULL: u8 = 0x90;
+    pub const SYM_BATT_FULL: u8 = 0x90;
 }
 use multiwii_serial_protocol_v2::MspPacket;
-pub(crate) use osd_symbols::*;
+pub use osd_symbols::*;
 
 ///return arrow character closest to the given direction (0 angle ls ccw from rightward)
-pub(crate) fn arrow_char(dir: Angle) -> u8 {
+fn arrow_char(dir: Angle) -> u8 {
     let turn = core::f64::consts::TAU as FloatType;
     let dir_rel_south = Angle(dir.0 + turn / 4.0).constrained_unsigned().0 + turn; //+turn to be super duper sure it's positive, because remainder operator has stupid habit of being negative for negative numbers
     let char_index = (dir_rel_south / turn * 16.0).round() as u32;
@@ -34,7 +31,7 @@ pub(crate) fn arrow_char(dir: Angle) -> u8 {
 }
 
 ///returns arrow character pointing towards a given screen point
-pub(crate) fn arrow_towards(
+pub fn arrow_towards(
     cal: &flo_core::osd_structs::LoadedFpvCameraOSDCalibration,
     charpos: (i32, i32),
     screenpos: (FloatType, FloatType),
@@ -45,7 +42,7 @@ pub(crate) fn arrow_towards(
 }
 
 ///creates a list of character coordinates sorted by proximity to given screen coordinates
-pub(crate) fn char_blob(
+pub fn char_blob(
     cal: &flo_core::osd_structs::LoadedFpvCameraOSDCalibration,
     screenpos: (FloatType, FloatType),
     n: usize,
@@ -70,30 +67,64 @@ pub(crate) fn char_blob(
     chars
 }
 
-#[derive(Clone)]
-pub(crate) struct OsdCache {
-    pub(crate) chars: Vec<u8>,
-    w: i32,
-    h: i32,
+fn serialize_chars<S>(chars: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    // use serde::ser::Error;
+
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(chars).unwrap();
+    let compressed = enc.finish().unwrap();
+    let base64_buf = base64::encode(&compressed);
+    serializer.serialize_str(&base64_buf)
+}
+
+fn deserialize_chars<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::{de::Error, Deserialize};
+
+    let base64_encoded = String::deserialize(deserializer)?;
+    let compressed = base64::decode(&base64_encoded).map_err(|_decode_error| {
+        D::Error::invalid_value(
+            serde::de::Unexpected::Str(&base64_encoded),
+            &"base64 encoded string",
+        )
+    })?;
+
+    let mut writer = Vec::new();
+    let mut deflater = flate2::write::DeflateDecoder::new(writer);
+    deflater.write_all(&compressed[..]).unwrap();
+    writer = deflater.finish().unwrap();
+
+    Ok(writer)
+}
+
+#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OsdCache {
+    #[serde(
+        serialize_with = "serialize_chars",
+        deserialize_with = "deserialize_chars"
+    )]
+    pub chars: Vec<u8>,
+    pub w: i32,
+    pub h: i32,
 }
 
 ///a character canvas that can then group adjacent characters into strings to send them efficiently
 impl OsdCache {
-    pub(crate) fn new(w: i32, h: i32) -> Self {
-        let mut me = Self {
-            chars: Vec::with_capacity((w * h) as usize),
-            w,
-            h,
-        };
-        me.chars.resize((w * h) as usize, 0_u8);
-        me
+    pub fn new(w: i32, h: i32) -> Self {
+        let chars = vec![0; (w * h) as usize];
+        Self { chars, w, h }
     }
 
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.chars.fill(0_u8);
     }
 
-    pub(crate) fn draw_char(&mut self, ch: u8, mut x: i32, mut y: i32) {
+    pub fn draw_char(&mut self, ch: u8, mut x: i32, mut y: i32) {
         //support for negative indexing like python
         if x < 0 {
             x += self.w
@@ -109,7 +140,7 @@ impl OsdCache {
     }
 
     ///supports negative indexing like python
-    pub(crate) fn print(&mut self, s: &[u8], mut x: i32, y: i32, align: Align) {
+    pub fn print(&mut self, s: &[u8], mut x: i32, y: i32, align: Align) {
         if align == Align::Right {
             x -= s.len() as i32 - 1;
         }
@@ -119,10 +150,12 @@ impl OsdCache {
         }
     }
 
-    pub(crate) fn make_packets(&mut self) -> Vec<MspPacket> {
+    pub fn make_packets(&mut self) -> Vec<MspPacket> {
         const MSP_OVERHEAD: i32 = 9; //how many extra bytes have to be sent in addition to the characters
 
         let mut packets = Vec::<MspPacket>::new();
+
+        packets.push(displayport_messages::DisplayportMessage::ClearScreen.make_msp_packet());
 
         let mut push_packet = |x0: i32, x1: i32, y: i32| {
             let ch0 = x0 + y * self.w;
@@ -161,6 +194,37 @@ impl OsdCache {
             }
         }
 
+        packets.push(displayport_messages::DisplayportMessage::DrawScreen.make_msp_packet());
+
         packets
     }
+}
+
+#[test]
+fn test_serde_rt() {
+    let mut canvas = OsdCache::new(30, 16);
+    canvas.print(b"TOP LEFT", 0, 0, flo_core::osd_structs::Align::Left);
+    let arrows: Vec<u8> = (SYM_ARROW_SOUTH..SYM_ARROW_SOUTH + 16).collect();
+    canvas.print(&arrows, 0, 1, flo_core::osd_structs::Align::Left);
+    let batts: Vec<u8> = (SYM_BATT_FULL..SYM_BATT_FULL + 6).collect();
+    canvas.print(&batts, 0, 2, flo_core::osd_structs::Align::Left);
+    canvas.print(
+        &[SYM_STICK_OVERLAY_VERTICAL, SYM_STICK_OVERLAY_HORIZONTAL],
+        0,
+        3,
+        flo_core::osd_structs::Align::Left,
+    );
+    canvas.print(
+        &[X75, X76, X77, X78],
+        0,
+        4,
+        flo_core::osd_structs::Align::Left,
+    );
+    canvas.print(b"TOP RIGHT", -1, 0, flo_core::osd_structs::Align::Right);
+    canvas.print(b"BOTTOM LEFT", 0, -1, flo_core::osd_structs::Align::Left);
+    canvas.print(b"BOTTOM RIGHT", -1, -1, flo_core::osd_structs::Align::Right);
+
+    let encoded = serde_json::to_string(&canvas).unwrap();
+    let decoded = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(canvas, decoded);
 }

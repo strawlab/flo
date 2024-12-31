@@ -7,6 +7,7 @@ members = [
   "crates/flo-mavlink/mavlink-dump",
   "crates/flo-webserver",
   "crates/osd-displayport",
+  "crates/osd-utils",
   "crates/platform-uuid",
   "crates/pwm-motor-types",
   "crates/sbgc-gimbal",
@@ -82,6 +83,7 @@ multiwii_serial_protocol_v2.workspace = true
 flo-core.workspace = true
 flo-mavlink.workspace = true
 flo-webserver = { path = "crates/flo-webserver", default-features = false }
+osd-utils = { path = "crates/osd-utils" }
 platform-uuid = { path = "crates/platform-uuid" }
 trinamic = { path = "crates/trinamic" }
 sbgc-gimbal = { path = "crates/sbgc-gimbal" }
@@ -128,6 +130,8 @@ tokio-stream = "0.1.15"
 tokio-util = "0.7.4"
 tracing = "0.1.40"
 tracing-panic = "0.1.1"
+base64 = "0.6"
+flate2 = "1.0"
 
 
 flo-core = { path = "crates/flo-core", default-features = false }

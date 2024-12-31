@@ -20,7 +20,10 @@ pub struct OsdState {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OsdConfig {
-    pub port_path: String,
+    /// The path to the virtual com port of the DJI O3 air unit.
+    ///
+    /// If None, emulate an OSD, but do not draw anything.
+    pub port_path: Option<String>,
     pub cal: Option<FpvCameraOSDCalibration>,
     #[serde(default)]
     pub blob: BlobConfig,

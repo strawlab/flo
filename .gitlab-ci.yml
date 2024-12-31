@@ -88,6 +88,11 @@ test-crates:
 
     - cd crates/flo-core
     - cargo test
+    - cd ../..
+
+    - cd crates/osd-utils
+    - cargo test
+    - cd ../..
 
 flo-mavlink:
   image: rust

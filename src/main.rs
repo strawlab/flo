@@ -27,7 +27,6 @@ use tracking::{centroid_to_sensor_angles, compute_motor_output, kalman_step};
 mod codec;
 mod json_lines_writer;
 mod osd;
-mod osd_utils;
 mod pwm_serial_io;
 mod tilta_io;
 mod tracking;
@@ -858,17 +857,12 @@ async fn main() -> Result<()> {
     if let Some(port_path) = cli.osd.as_ref() {
         if device_config.osd_config.is_none() {
             device_config.osd_config = Some(flo_core::OsdConfig {
-                port_path: port_path.clone(),
+                port_path: Some(port_path.clone()),
                 cal: None,
                 blob: Default::default(),
             });
         };
-        device_config
-            .osd_config
-            .as_mut()
-            .unwrap()
-            .port_path
-            .clone_from(port_path);
+        device_config.osd_config.as_mut().unwrap().port_path = Some(port_path.clone());
     };
     if let Some(cfg) = device_config.osd_config.as_mut() {
         if cfg.cal.is_none() {
@@ -910,6 +904,21 @@ async fn main() -> Result<()> {
     // after we display the config because it may show errors, which we want to
     // be after the config.
     device_config.fix_deprecations();
+
+    // Find correct OSD canvas size.
+    let (canv_w, canv_h) = match &device_config.osd_config {
+        Some(osd_config) => {
+            let cal: flo_core::osd_structs::FpvCameraOSDCalibration = osd_config
+                .cal
+                .as_ref()
+                .ok_or_else(|| eyre::eyre!("OSD calibration required"))?
+                .clone();
+            (cal.osd_char_w, cal.osd_char_h)
+        }
+        None => (30, 16),
+    };
+
+    let canvas = Arc::new(Mutex::new(osd_utils::OsdCache::new(canv_w, canv_h)));
 
     // First we match candidates with glob, then we get more specific with regex.
     let pattern = data_dir
@@ -1190,9 +1199,12 @@ async fn main() -> Result<()> {
     let (osd_tx, mut osd_task): (_, Pin<Box<dyn Future<Output = _>>>) =
         if let Some(osd_config) = device_config.osd_config.clone() {
             let (osd_tx, osd_rx) = watch::channel(OsdState::default());
-            let broadway = broadway.clone();
-            let osd_join_handle =
-                tokio::spawn(async move { osd::run_osd_loop(osd_rx, broadway, osd_config).await });
+            let osd_join_handle = {
+                let broadway = broadway.clone();
+                tokio::spawn(async move {
+                    osd::run_osd_loop(osd_rx, broadway, osd_config, canvas).await
+                })
+            };
             (Some(osd_tx), Box::pin(osd_join_handle))
         } else {
             let fut = pending(); // future never completes
