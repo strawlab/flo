@@ -13,6 +13,6 @@ num-traits.workspace = true
 num-derive.workspace = true
 paste = "1.0.7"
 thiserror.workspace = true
-simplebgc-derive = { path = "../simplebgc-derive" }
+simplebgc-derive.workspace = true
 tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true

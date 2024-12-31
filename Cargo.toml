@@ -132,6 +132,7 @@ tracing-panic = "0.1.1"
 
 flo-core = { path = "crates/flo-core", default-features = false }
 flo-mavlink = { path = "crates/flo-mavlink" }
+simplebgc-derive = { path = "crates/simplebgc-derive" }
 tokio-mavlink = { path = "crates/tokio-mavlink" }
 
 [features]
