@@ -296,7 +296,10 @@ impl<'a> FloCoordinator<'a> {
                     let this_offset: i64 = i64::from(c2.framenumber) - i64::from(c1.framenumber);
                     if let Some(ref expected_offset) = &self.stereo_cam_framenumber_offset {
                         if *expected_offset != this_offset {
-                            tracing::error!("stereo camera offset not expected");
+                            tracing::error!(
+                                "stereo camera offset error: off by {}",
+                                this_offset - *expected_offset
+                            );
                             use_stereo = false;
                         }
                     } else {
@@ -1298,7 +1301,7 @@ fn play_sound(
         Ok(()) => {}
         Err(e) => {
             // log error and then drop it.
-            log::error!("{}", e);
+            log::error!("{} {}:{}", e, file!(), line!());
         }
     }
 }
