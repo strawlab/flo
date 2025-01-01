@@ -815,7 +815,7 @@ async fn main() -> Result<()> {
     // Create our device state.
     let mut my_state = flo_core::DeviceState::new(device_id);
 
-    let mut device_config = if let Some(device_config_fname) = cli.config {
+    let mut device_config = if let Some(device_config_fname) = &cli.config {
         log::info!("Reading initial device config from: {device_config_fname}");
         let cfg_buf = std::fs::read_to_string(&device_config_fname)
             .with_context(|| format!("opening file {device_config_fname}"))?;
@@ -873,25 +873,25 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(gimbal_port) = cli.gimbal {
+    if let Some(gimbal_port) = &cli.gimbal {
         if device_config.gimbal_config.is_none() {
             log::warn!(
                 "gimbal port provided but gimbal config is missing. Using built-in defaults."
             );
             device_config.gimbal_config = Some(GimbalConfig::default());
         }
-        device_config.gimbal_config.as_mut().unwrap().port_path = gimbal_port;
+        device_config.gimbal_config.as_mut().unwrap().port_path = gimbal_port.clone();
     }
 
     //make sure some focus config is present, so that we can unwrap() everywhere
     if device_config.focus_motor_config.is_none() {
         device_config.focus_motor_config = Some(Default::default());
     }
-    if let Some(trinamic_motor) = cli.trinamic_focus {
+    if let Some(trinamic_motor) = &cli.trinamic_focus {
         if let FocusMotorType::Trinamic(tcfg) =
             &mut device_config.focus_motor_config.as_mut().unwrap().motor
         {
-            tcfg.port = trinamic_motor;
+            tcfg.port = trinamic_motor.clone();
         } else {
             anyhow::bail!("focus motor type conflict");
         };
