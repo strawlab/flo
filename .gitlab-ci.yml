@@ -72,7 +72,7 @@ flo:
   image: rust
   script:
     - apt-get update
-    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev libclang-dev
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev libclang-dev librust-alsa-sys-dev
 
     - export RUSTFLAGS="-D warnings"
 
@@ -82,8 +82,6 @@ flo:
     - ./build.sh
     - cd ${CI_PROJECT_DIR}
 
-    - apt-get update
-    - DEBIAN_FRONTEND=noninteractive apt-get install -y librust-alsa-sys-dev
     - cargo test
     - cargo run -- --config config-byo.yaml show-config
     - cargo run -- --config config-drone.yaml show-config
