@@ -72,7 +72,7 @@ flo:
     - curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
     - cd crates/flo-bui
     - ./build.sh
-    - cd ../..
+    - cd ${CI_PROJECT_DIR}
 
     - apt-get update
     - DEBIAN_FRONTEND=noninteractive apt-get install -y librust-alsa-sys-dev
@@ -80,6 +80,14 @@ flo:
     - cargo run -- --config config-byo.yaml show-config
     - cargo run -- --config config-drone.yaml show-config
     - cargo run -- --config config-mini.yaml show-config
+
+    # Also run flo-mavlink tests
+    - cd ${CI_PROJECT_DIR}/crates/flo-mavlink
+    - cargo test
+
+    # And mavlink-dump tests
+    - cd ${CI_PROJECT_DIR}/crates/flo-mavlink/mavlink-dump
+    - cargo test
 
 test-crates:
   image: rust
@@ -93,20 +101,6 @@ test-crates:
     - cd crates/osd-utils
     - cargo test
     - cd ../..
-
-flo-mavlink:
-  image: rust
-  script:
-    - apt-get update
-    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
-
-    - export RUSTFLAGS="-D warnings"
-
-    - cd crates/flo-mavlink
-    - cargo test
-
-    - cd mavlink-dump
-    - cargo test
 
 simplebgc:
   image: rust
