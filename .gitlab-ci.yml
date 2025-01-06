@@ -48,6 +48,14 @@ rpipico-pantilt-firmware:
       - rpipico-pantilt-${CI_COMMIT_SHA}.uf2
     name: "rpipico-pantilt-${CI_COMMIT_SHA}"
 
+flo-tilta-dongle:
+  image: rust
+  script:
+    # Build firmware
+    - cd firmware/flo-tilta-dongle
+    - rustup target install thumbv7em-none-eabihf
+    - cargo build --release
+
 pwm-motor-types:
   image: rust
   script:
