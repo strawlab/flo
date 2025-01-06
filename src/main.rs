@@ -941,6 +941,15 @@ async fn main() -> Result<()> {
     // be after the config.
     device_config.fix_deprecations();
 
+    match cli.command {
+        Some(Commands::ShowConfig) => {
+            return Ok(());
+        }
+        Some(Commands::Run) | None => {} // continue
+    };
+
+    clean_up_old_flo_dirs(&data_dir)?;
+
     // Find correct OSD canvas size.
     let (canv_w, canv_h) = match &device_config.osd_config {
         Some(osd_config) => {
@@ -952,15 +961,6 @@ async fn main() -> Result<()> {
             (cal.osd_char_w, cal.osd_char_h)
         }
         None => (30, 16),
-    };
-
-    clean_up_old_flo_dirs(&data_dir)?;
-
-    match cli.command {
-        Some(Commands::ShowConfig) => {
-            return Ok(());
-        }
-        Some(Commands::Run) | None => {} // continue
     };
 
     let canvas = Arc::new(Mutex::new(osd_utils::OsdCache::new(canv_w, canv_h)));
