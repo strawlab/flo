@@ -78,7 +78,7 @@ pub struct MavlinkConfig {
     pub loss_timeout: FloatType,
     ///how many cells in series in the drone battery
     #[serde(default = "default_mavlink_batt_s")]
-    pub batt_s: FloatType,
+    pub batt_s: u8,
 }
 
 fn default_mavlink_system_id() -> u8 {
@@ -93,8 +93,8 @@ fn default_mavlink_loss_timeout() -> FloatType {
     1.0
 }
 
-fn default_mavlink_batt_s() -> FloatType {
-    1.0
+fn default_mavlink_batt_s() -> u8 {
+    1
 }
 
 impl Default for MavlinkConfig {

@@ -1,7 +1,7 @@
 geometry: MovingCamera
 mavlink:
   port_path: serial:/dev/serial/by-id/usb-FTDI_TTL232R-3V3_FTGBISCC-if00-port0:1000000
-  batt_s: 4.0
+  batt_s: 4
 kalman_filter_parameters:
   motion_noise: 3.0
   observation_noise: 0.0001
