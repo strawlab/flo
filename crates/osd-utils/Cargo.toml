@@ -12,8 +12,8 @@ flate2.workspace = true
 
 multiwii_serial_protocol_v2.workspace = true
 
-flo-core = { path = "../flo-core" }
-osd-displayport = { path = "../osd-displayport" }
+flo-core.workspace = true
+osd-displayport.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

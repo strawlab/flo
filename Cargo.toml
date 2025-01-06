@@ -136,6 +136,9 @@ flate2 = "1.0"
 
 flo-core = { path = "crates/flo-core", default-features = false }
 flo-mavlink = { path = "crates/flo-mavlink" }
+osd-displayport = { path = "crates/osd-displayport" }
+pwm-motor-types = { path = "crates/pwm-motor-types" }
+simplebgc = { path = "crates/simplebgc" }
 simplebgc-derive = { path = "crates/simplebgc-derive" }
 tokio-mavlink = { path = "crates/tokio-mavlink" }
 

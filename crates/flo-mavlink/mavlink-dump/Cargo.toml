@@ -18,7 +18,7 @@ tokio = { workspace = true, features = [
 ] }
 
 flo-core.workspace = true
-flo-mavlink = { path = ".." }
+flo-mavlink.workspace = true
 chrono = { workspace = true, default-features = true }
 num-traits.workspace = true
 serde_json.workspace = true

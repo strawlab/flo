@@ -20,6 +20,6 @@ num-traits.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 
-simplebgc = { path = "../simplebgc" }
+simplebgc.workspace = true
 simplebgc-derive.workspace = true
 flo-core.workspace = true
