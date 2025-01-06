@@ -1,5 +1,6 @@
 use crate::{
-    sq, Angle, DeviceMode as TrackingMode, FloatType, MotorPositionResult, RadialDistance,
+    is_default, is_none_or_default, sq, Angle, DeviceMode as TrackingMode, FloatType,
+    MotorPositionResult, RadialDistance,
 };
 
 use eyre::Context;
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_FPV_CAL_YAML: &str = include_str!("../../../dji-o3-goggles2-calibration.yaml");
 
 ///realtime data passed from flo to osd task
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Clone, Default)]
 pub struct OsdState {
     pub motor_state: MotorPositionResult,
     pub bee_dist: RadialDistance,
@@ -17,15 +18,17 @@ pub struct OsdState {
     pub tracking_mode: TrackingMode,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OsdConfig {
     /// The path to the virtual com port of the DJI O3 air unit.
     ///
     /// If None, emulate an OSD, but do not draw anything.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub port_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub cal: Option<FpvCameraOSDCalibration>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub blob: BlobConfig,
 }
 
@@ -68,6 +71,7 @@ impl TryFrom<FpvCameraOSDCalibration> for LoadedFpvCameraOSDCalibration {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct FpvCameraOSDCalibration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_calibration: Option<std::path::PathBuf>,
     ///the rectangle covered by osd char grid (center of top-left char to center of bottom-right char)
     pub osd_area_w: FloatType,

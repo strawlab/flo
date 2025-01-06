@@ -36,6 +36,27 @@ pub use pwm_motor_types::{
     FloatType, PwmDuration, PwmSerial, PwmState, DATATYPES_VERSION, VERSION_RESPONSE_JSON_NEWLINE,
 };
 
+/// returns `true` if the value is `None` or equal to
+/// `Some(Default::default())`.
+fn is_none_or_default<T>(value: &Option<T>) -> bool
+where
+    T: PartialEq + Default,
+{
+    match value.as_ref() {
+        None => true,
+        Some(inner) => inner == &T::default(),
+    }
+}
+
+/// returns `true` if the value is equal to
+/// `Default::default()`.
+fn is_default<T>(value: &T) -> bool
+where
+    T: PartialEq + Default,
+{
+    value == &T::default()
+}
+
 // --------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -203,10 +224,13 @@ fn is_false(val: &bool) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct FloControllerConfig {
     pub geometry: SystemGeometry,
+
     #[serde(default, skip_serializing_if = "is_false")]
     pub pwm_output_enabled: bool,
+
     /// Kalman filter parameters for pan and tilt estimation
     pub kalman_filter_parameters: KalmanFilterParameters,
+
     /// Kalman filter parameters for distance estimation
     ///
     /// motion_noise: Motion noise [m/s2] for constant-speed dynamic model is
@@ -216,86 +240,116 @@ pub struct FloControllerConfig {
     ///
     /// observation_noise: rms measurement noise at 1 meter; this is internally
     /// scaled according to stereopsis law (i.e., multiplied by r^2)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub kalman_filter_dist_parameters: Option<KalmanFilterParameters>,
+
     #[serde(default)]
     pub control_loop_timestep_secs: FloatType,
+
     pub kp_pan_angle: FloatType,
+
     pub kp_tilt_angle: FloatType,
+
     pub ki_pan_angle: FloatType,
+
     pub ki_tilt_angle: FloatType,
+
     ///d terms: add speed*kd to position commands. Speed comes from global-coordinate kalman filter
     #[serde(default)]
     pub kd_pan: FloatType,
+
     #[serde(default)]
     pub kd_tilt: FloatType,
+
     /// Coefficients to find "sensor x error angle" from centroid
     pub centroid_to_sensor_x_angle_func: CentroidToAngleCalibration,
+
     /// Coefficients to find "sensor y error angle" from centroid
     pub centroid_to_sensor_y_angle_func: CentroidToAngleCalibration,
+
     /// lag between flash firing and centroid data arriving
     #[serde(default)]
     pub centroid_lag: FloatType,
+
     /// Coefficients for stereopsis calibration
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub stereopsis_calib: Option<StereopsisCalibration>,
+
     /// Pan axis endpoints and "neutral position", which is used as the initial home position.
     pub pan_motor_config: MotorConfig,
-    /// pan axis endpoints and "neutral position", which is used as the initial home position.
+
+    /// Tilt axis endpoints and "neutral position", which is used as the initial home position.
     pub tilt_motor_config: MotorConfig,
+
     /// focus axis endpoints and "neutral position", which is used as the initial home position.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub focus_motor_config: Option<FocusMotorConfig>,
-    #[serde(default, skip_serializing_if = "PwmConfig::is_default")]
-    /// tilt axis PWM pulse widths corresponding to motor endpoints. Used only in PWM mode.
+
+    /// Pan axis PWM pulse widths corresponding to motor endpoints. Used only in PWM mode.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub pan_pwm_config: PwmConfig,
-    #[serde(default, skip_serializing_if = "PwmConfig::is_default")]
+
     /// Tilt axis PWM pulse widths corresponding to motor endpoints. Used only in PWM mode.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub tilt_pwm_config: PwmConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
     /// Pan axis Trinamic motor configuration. Used only with Trinamic motors.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub pan_trinamic_config: Option<TrinamicAxisConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
     /// Tilt axis Trinamic motor configuration. Used only with Trinamic motors.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub tilt_trinamic_config: Option<TrinamicAxisConfig>,
+
     /// Focus axis Trinamic motor configuration. Used only with Trinamic motors.
     ///  Also contains lens-specific parameters
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub focus_trinamic_config: Option<TrinamicFocusConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub pan_thorlabs_galvo_config: Option<ThorlabsGalvoConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub tilt_thorlabs_galvo_config: Option<ThorlabsGalvoConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub gimbal_config: Option<GimbalConfig>,
+
     /// Time thresholds for suspend/acquire lock modes.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub tracking_thresholds: TrackingThresholds,
+
     /// Time constant of the motor step response.
     pub motor_timeconstant_secs: FloatType,
-    #[serde(default)]
+
+    #[serde(default, skip_serializing_if = "is_default")]
     pub encoder_lag: FloatType,
+
     /// Name of second camera used for stereopsis.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub secondary_cam_name: Option<CamNameString>,
+
     /// URL for Strand Cam instance connected to primary camera
     ///
     /// If this is the first connection, the token will be required here.
     /// Otherwise, a saved cookie can be used and the token is not required.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub strand_cam_main: Option<StrandCamConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub strand_cam_secondary: Option<StrandCamConfig>,
-    #[serde(default)]
+
+    #[serde(default, skip_serializing_if = "is_default")]
     pub sounds_filenames: SoundsFilenames,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub osd_config: Option<OsdConfig>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub rc_config: Option<RcConfig>,
 
     /// MAVLink configuration
-    #[serde(rename = "mavlink", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "mavlink", skip_serializing_if = "is_none_or_default")]
     pub mavlink_config: Option<crate::drone_structs::MavlinkConfig>,
 
     // The following definitions are kept for backwards compatibility.
@@ -330,7 +384,7 @@ pub struct MotorConfig {
     pub endpoint_high: Angle,
     pub neutral_position: Angle,
     ///lag in seconds from computed motor command to motor starting to move (but not to reaching the commanded position)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub control_lag: FloatType,
 }
 
@@ -354,9 +408,6 @@ pub struct PwmConfig {
 }
 
 impl PwmConfig {
-    pub fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
     pub fn pwm(&self, target_angle: Angle, motor_config: &MotorConfig) -> PwmDuration {
         let motor_range = motor_config.endpoint_high.0 - motor_config.endpoint_low.0;
         let pwm_range: FloatType = self.high_value.duration_usec - self.low_value.duration_usec;
@@ -554,9 +605,9 @@ impl Default for MotorValueCache {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct TrinamicAxisConfig {
     pub microsteps_per_radian: FloatType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_limit: Option<FloatType>, // [microstep/s]
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceleration: Option<FloatType>, // [microstep/s^2]
 }
 
@@ -582,7 +633,7 @@ impl Default for TrinamicAxisConfig {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct StrandCamConfig {
     pub url: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub on_attach_json_commands: Vec<String>,
 }
 
@@ -614,9 +665,8 @@ impl Default for ThorlabsGalvoConfig {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-#[derive(Default)]
 pub struct SoundsFilenames {
     pub enter_manual_open_loop: Option<String>,
     pub enter_closed_loop: Option<String>,
@@ -724,7 +774,7 @@ pub struct MomentCentroid {
     pub mu10: FloatType,
     pub center_x: u32,
     pub center_y: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cam_name: CamNameString,
 }
 

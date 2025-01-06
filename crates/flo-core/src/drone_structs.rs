@@ -1,5 +1,8 @@
-use crate::utils::{elapsed, ChangeDetector, NoiseGate, NoiseGateParameters};
-use crate::{FloatType, MyTimestamp};
+use crate::{
+    is_default,
+    utils::{elapsed, ChangeDetector, NoiseGate, NoiseGateParameters},
+    FloatType, MyTimestamp,
+};
 
 use num_derive::FromPrimitive;
 use serde::{Deserialize, Serialize};
@@ -70,14 +73,30 @@ pub struct MavlinkConfig {
     /// source of MAVLink data when running on drone
     /// (tcpout|tcpin|udpout|udpin|udpbcast|serial|file):(ip|dev|path):(port|baud)
     pub port_path: String,
-    #[serde(default = "default_mavlink_system_id")]
+
+    #[serde(
+        default = "default_mavlink_system_id",
+        skip_serializing_if = "is_default_mavlink_system_id"
+    )]
     pub system_id: u8,
-    #[serde(default = "default_mavlink_component_id")]
+
+    #[serde(
+        default = "default_mavlink_component_id",
+        skip_serializing_if = "is_default_mavlink_component_id"
+    )]
     pub component_id: u8,
-    #[serde(default = "default_mavlink_loss_timeout")]
+
+    #[serde(
+        default = "default_mavlink_loss_timeout",
+        skip_serializing_if = "is_default_mavlink_loss_timeout"
+    )]
     pub loss_timeout: FloatType,
+
     ///how many cells in series in the drone battery
-    #[serde(default = "default_mavlink_batt_s")]
+    #[serde(
+        default = "default_mavlink_batt_s",
+        skip_serializing_if = "is_default_mavlink_batt_s"
+    )]
     pub batt_s: u8,
 }
 
@@ -85,16 +104,32 @@ fn default_mavlink_system_id() -> u8 {
     1 // default autopilot
 }
 
+fn is_default_mavlink_system_id(val: &u8) -> bool {
+    *val == default_mavlink_system_id()
+}
+
 fn default_mavlink_component_id() -> u8 {
     191 // mavlink::ardupilotmega::MavComponent::MAV_COMP_ID_ONBOARD_COMPUTER
+}
+
+fn is_default_mavlink_component_id(val: &u8) -> bool {
+    *val == default_mavlink_component_id()
 }
 
 fn default_mavlink_loss_timeout() -> FloatType {
     1.0
 }
 
+fn is_default_mavlink_loss_timeout(val: &FloatType) -> bool {
+    *val == default_mavlink_loss_timeout()
+}
+
 fn default_mavlink_batt_s() -> u8 {
     1
+}
+
+fn is_default_mavlink_batt_s(val: &u8) -> bool {
+    *val == default_mavlink_batt_s()
 }
 
 impl Default for MavlinkConfig {
@@ -110,25 +145,28 @@ impl Default for MavlinkConfig {
 }
 
 /// Remote Control configuration
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RcConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub us_mapping: ChannelRange,
+
     /// State to wait for as a command to start tracking.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_start: Option<ChannelCondition>,
+
     /// State to wait for as a command to stop tracking and return to home position.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_stop: Option<ChannelCondition>,
+
     /// State to wait for as a command to set current position as home
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_home: Option<ChannelCondition>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pan_knob: Option<AngleKnobConfig>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tilt_knob: Option<AngleKnobConfig>,
 }
 

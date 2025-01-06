@@ -25,6 +25,7 @@ struct StampedMomentCentroid {
     mu10: FloatType,
     center_x: u32,
     center_y: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     cam_name: String,
 }
 
