@@ -5,8 +5,8 @@ use std::{
 
 use color_eyre::eyre::{self, Result};
 use flo_core::{
-    FloatType, GimbalEncoderData, GimbalEncoderOffsets, MomentCentroid, RadialDistance,
-    SaveToDiskMsg, StampedBMsg, StampedJson, StampedTrackingState, TimestampSource,
+    FloControllerConfig, FloatType, GimbalEncoderData, GimbalEncoderOffsets, MomentCentroid,
+    RadialDistance, SaveToDiskMsg, StampedBMsg, StampedJson, StampedTrackingState, TimestampSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +104,7 @@ impl Drop for WriteCloser {
 #[tracing::instrument(skip_all)]
 pub(crate) fn writer_task_main(
     mut flo_write_rx: tokio::sync::mpsc::UnboundedReceiver<SaveToDiskMsg>,
+    config: &FloControllerConfig,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use SaveToDiskMsg::*;
@@ -150,6 +151,7 @@ pub(crate) fn writer_task_main(
                             creation_time,
                             output_dirname,
                             encoder_offsets.as_ref(),
+                            &config,
                         )?);
                     }
                 } else {
@@ -320,6 +322,7 @@ impl WritingState {
         creation_time_local: chrono::DateTime<chrono::Local>,
         output_dirname: PathBuf,
         encoder_offsets: Option<&GimbalEncoderOffsets>,
+        config: &FloControllerConfig,
     ) -> Result<Self> {
         let creation_time = creation_time_local.with_timezone(creation_time_local.offset());
         let git_revision = env!("GIT_HASH").to_string();
@@ -337,7 +340,7 @@ impl WritingState {
 
             // Start and end it with some newlines so the text is more
             // readable.
-            fd.write_all(readme_contents().as_bytes()).unwrap();
+            fd.write_all(readme_contents().as_bytes())?;
             Some(fd)
         };
 
@@ -349,10 +352,19 @@ impl WritingState {
                 creation_time,
                 timezone: iana_time_zone::get_timezone()?,
             };
-            let metadata_buf = serde_yaml::to_string(&metadata).unwrap();
+            let metadata_buf = serde_yaml::to_string(&metadata)?;
 
             let mut fd = std::fs::File::create(flo_metadata_path)?;
-            fd.write_all(metadata_buf.as_bytes()).unwrap();
+            fd.write_all(metadata_buf.as_bytes())?;
+        }
+
+        {
+            let flo_config_path = output_dirname.join("flo-config.yaml");
+
+            let config_buf = serde_yaml::to_string(config)?;
+
+            let mut fd = std::fs::File::create(flo_config_path)?;
+            fd.write_all(config_buf.as_bytes())?;
         }
 
         let centroid_wtr = {

@@ -1055,8 +1055,12 @@ async fn main() -> Result<()> {
             }
         })
     };
-    let mut saver_handle =
-        tokio::task::spawn_blocking(move || writing_state::writer_task_main(flo_saver_rx));
+    let mut saver_handle = {
+        let device_config = device_config.clone();
+        tokio::task::spawn_blocking(move || {
+            writing_state::writer_task_main(flo_saver_rx, &device_config)
+        })
+    };
 
     // Launch task to run serial IO for rpi pico pantilt PWM motors
     let mut motor_task_join_handle = if let Some(pwm_serial) = cli.pwm_serial {
