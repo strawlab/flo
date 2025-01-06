@@ -617,6 +617,39 @@ impl<'a> FloCoordinator<'a> {
     }
 }
 
+/// Clean up any existing FLO directories.
+fn clean_up_old_flo_dirs(data_dir: &std::path::PathBuf) -> Result<()> {
+    // First we match candidates with glob, then we get more specific with regex.
+    let pattern = data_dir
+        .join(FLO_DIRNAME_GLOB)
+        .into_os_string()
+        .into_string()
+        .unwrap();
+    let re_flo = regex::Regex::new(FLO_DIRNAME_RE).unwrap();
+    for existing_flo_dir in glob::glob(&pattern)? {
+        let existing_flo_dir = existing_flo_dir?;
+        let existing_flo_dir_str = existing_flo_dir
+            .file_name()
+            .ok_or_else(|| eyre::eyre!("no filename"))?
+            .to_str()
+            .ok_or_else(|| eyre::eyre!("path not unicode"))?;
+        if !re_flo.is_match(existing_flo_dir_str) {
+            // Name does not match our more-specific regex, skip it.
+            continue;
+        }
+        if existing_flo_dir.is_dir() {
+            tracing::info!(
+                "cleaning up existing FLO directory: {}",
+                existing_flo_dir.display()
+            );
+            writing_state::repair_unfinished_flo(existing_flo_dir)?;
+        }
+    }
+
+    tracing::info!("done cleaning up FLO directories with pattern {pattern}");
+    Ok(())
+}
+
 async fn initialize_strand_cam_session(
     cfg: &StrandCamConfig,
     jar: Arc<RwLock<cookie_store::CookieStore>>,
@@ -921,36 +954,7 @@ async fn main() -> Result<()> {
         None => (30, 16),
     };
 
-    let canvas = Arc::new(Mutex::new(osd_utils::OsdCache::new(canv_w, canv_h)));
-
-    // First we match candidates with glob, then we get more specific with regex.
-    let pattern = data_dir
-        .join(FLO_DIRNAME_GLOB)
-        .into_os_string()
-        .into_string()
-        .unwrap();
-    let re_flo = regex::Regex::new(FLO_DIRNAME_RE).unwrap();
-    for existing_flo_dir in glob::glob(&pattern)? {
-        let existing_flo_dir = existing_flo_dir?;
-        let existing_flo_dir_str = existing_flo_dir
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("no filename"))?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("path not unicode"))?;
-        if !re_flo.is_match(existing_flo_dir_str) {
-            // Name does not match our more-specific regex, skip it.
-            continue;
-        }
-        if existing_flo_dir.is_dir() {
-            tracing::info!(
-                "cleaning up existing FLO directory: {}",
-                existing_flo_dir.display()
-            );
-            writing_state::repair_unfinished_flo(existing_flo_dir)?;
-        }
-    }
-
-    tracing::info!("done cleaning up FLO directories with pattern {pattern}");
+    clean_up_old_flo_dirs(&data_dir)?;
 
     match cli.command {
         Some(Commands::ShowConfig) => {
@@ -958,6 +962,8 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Run) | None => {} // continue
     };
+
+    let canvas = Arc::new(Mutex::new(osd_utils::OsdCache::new(canv_w, canv_h)));
 
     let (flo_saver_tx, flo_saver_rx) = mpsc::unbounded_channel();
 
