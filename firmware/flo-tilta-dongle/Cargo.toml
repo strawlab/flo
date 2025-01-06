@@ -52,3 +52,7 @@ embassy-nrf = { version = "0.2.0", features = [
     "unstable-pac",
     "time",
 ] }
+
+# This crate should not be in a workspace because we have a `.cargo/config`
+# file.
+[workspace]
