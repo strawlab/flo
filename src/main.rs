@@ -827,6 +827,10 @@ async fn main() -> Result<()> {
             Iso8601::DEFAULT,
         );
 
+        #[cfg(target_os = "windows")]
+        ansi_term::enable_ansi_support()
+            .map_err(|code| eyre::eyre!("Failed setting windows ansi: {code}"))?;
+
         let file = std::fs::File::create(&full_log_file_name)
             .with_context(|| format!("While creating file {full_log_file_name}"))?;
         let file_writer = Mutex::new(file);
@@ -840,9 +844,6 @@ async fn main() -> Result<()> {
             .with_timer(timer)
             .with_file(true)
             .with_line_number(true);
-        // ANSI color does not work in CMD.EXE
-        #[cfg(target_os = "windows")]
-        let console_layer = console_layer.with_ansi(false);
         let collector = tracing_subscriber::registry()
             .with(file_layer)
             .with(console_layer)

@@ -98,6 +98,9 @@ strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev =
 # for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
 # sudo apt install librust-alsa-sys-dev
 
+[target.'cfg(target_os = "windows")'.dependencies]
+ansi_term = "0.12.1"
+
 [dev-dependencies]
 tempfile = "3"
 
