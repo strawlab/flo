@@ -50,13 +50,13 @@ focus_motor_config:
   backlash: 80.0
   noise_gate: 10.0
   cal:
-    distance_offset: 0.082
+    distance_offset: 0.114
     #mot_pos = a0 + a1/r^1 + a2/r^2 + a3/r^3
-    a0: -21780.2
-    a1: 4442.69
+    a0: -21780
+    a1: 4361.1
     a2: 0.0
-    a3: 95.928
-    min_dist: 0.5
+    a3: 178.82
+    min_dist: 0.6
     max_dist: 1e6
 tracking_thresholds:
   msecs_to_suspend: 1000 # how long to keep tracking the lost animal with estimated velocity, before switching to SuspendedClosedLoop (staring at the last observation)
@@ -68,8 +68,8 @@ motor_timeconstant_secs: .01
 #stereopsis parameters
 secondary_cam_name: Basler-40300216
 stereopsis_calib:
-  r1_m: 0.914
-  x_offset_1_px: 154.16
-  r2_m: 3.624
-  x_offset_2_px: -55.95
+  r1_m: 0.918
+  x_offset_1_px: 191.7
+  r2_m: 14.41
+  x_offset_2_px: -65.9
   pixel_size_um: 3.4
