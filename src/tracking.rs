@@ -688,14 +688,19 @@ pub(crate) fn compute_motor_output(
                     tcfg.acceleration.unwrap(),
                     dt_secs,
                 );
+                //clamp, but let pos_offet bypass it to allow using it to correct the improper homing (which we do all the time)
+                focus_command_motpos = focus_cfg.pos_offset
+                    + (focus_command_motpos - focus_cfg.pos_offset)
+                        .clamp(focus_cfg.min_pos, focus_cfg.max_pos);
             }
             FocusMotorType::Tilta(_) | FocusMotorType::NoMotor => {
                 //for now, no corrections
+                focus_command_motpos =
+                    focus_command_motpos.clamp(focus_cfg.min_pos, focus_cfg.max_pos);
             }
         }
 
-        tracking_state.focus_command_motpos =
-            focus_command_motpos.clamp(focus_cfg.min_pos, focus_cfg.max_pos);
+        tracking_state.focus_command_motpos = focus_command_motpos;
     }
     // estimate actual motor positions
 
