@@ -1101,8 +1101,11 @@ async fn main() -> Result<()> {
         let baud_rate = 115_200;
 
         let mot_cfg = trinamic::MotorParameters::TMCM1240(trinamic::TMCM1240Parameters::default());
+        tracing::info!("Connecting to trinamic motor for pan axis at {trinamic_pan}");
         let pan_device = trinamic::Motor::new(&trinamic_pan, baud_rate, mot_cfg.clone()).await?;
+        tracing::info!("Connecting to trinamic motor for tilt axis at {trinamic_tilt}");
         let tilt_device = trinamic::Motor::new(&trinamic_tilt, baud_rate, mot_cfg.clone()).await?;
+        tracing::info!("Successfully connected to trinamic motors for pan and tilt.");
         pan_trinamic_config.acceleration = Some(pan_device.config.acceleration());
         tilt_trinamic_config.acceleration = Some(tilt_device.config.acceleration());
         let mut focus_device = None;
