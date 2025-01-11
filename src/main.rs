@@ -642,7 +642,15 @@ fn clean_up_old_flo_dirs(data_dir: &std::path::PathBuf) -> Result<()> {
                 "cleaning up existing FLO directory: {}",
                 existing_flo_dir.display()
             );
-            writing_state::repair_unfinished_flo(existing_flo_dir)?;
+            match writing_state::repair_unfinished_flo(&existing_flo_dir) {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not cleanup dir {}: {e}. Ignoring.",
+                        existing_flo_dir.display()
+                    );
+                }
+            }
         }
     }
 
