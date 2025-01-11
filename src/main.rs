@@ -1025,8 +1025,6 @@ async fn main() -> Result<()> {
     // Create channel for motor position feedback.
     let (motor_position_tx, mut motor_position_rx) = mpsc::channel::<MotorPositionResult>(10);
 
-    // Spawn task for saving data to disk
-
     let mut converter_handle: JoinHandle<eyre::Result<()>> = {
         let mut rx1 = broadway.flo_events.subscribe();
         let mut rx2 = broadway.flo_detections.subscribe();
@@ -1055,7 +1053,9 @@ async fn main() -> Result<()> {
             }
         })
     };
+
     let mut saver_handle = {
+        // Spawn task for saving data to disk
         let device_config = device_config.clone();
         tokio::task::spawn_blocking(move || {
             writing_state::writer_task_main(flo_saver_rx, &device_config)
