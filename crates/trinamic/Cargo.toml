@@ -7,7 +7,7 @@ edition = "2021"
 eyre.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "sync", "io-util"] }
 tokio-util = { workspace = true, features = ["net", "codec", "time"] }
-tokio-serial = { package = "kioto-serial", version = "0.1.0" }
+tokio-serial.workspace = true
 structure = "0.1.2"
 
 [dev-dependencies]
