@@ -28,7 +28,7 @@ blue = rf transmission
 ## Prerequisites
 
 ```
-cargo install probe-rs --locked --features cli
+cargo install probe-rs-tools --locked
 ```
 
 ## Programmer/debugger hardware
@@ -46,16 +46,16 @@ cargo flash --release --chip nRF52840_xxAA
 Connect the probe, then cd to flo-tilta-dongle and `cargo run`.
 
 To see `defmt` messages, compile with the `DEFMT_LOG` environment variable
-set appropriately. (By default, `defmt` will show only error level messages.)
+set appropriately.
 
 Powershell (Windows)
 
 ```
-$Env:DEFMT_LOG="trace"
+$Env:DEFMT_LOG="debug"
 ```
 
 Bash (Linux/macOS)
 
 ```
-export DEFMT_LOG=trace
+export DEFMT_LOG=debug
 ```
