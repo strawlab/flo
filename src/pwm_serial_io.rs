@@ -83,12 +83,15 @@ pub(crate) async fn run_rpi_pico_pwm_serial_loop(
         let tilt = pwm_tilt_config.pwm(current_motors.tilt, &tilt_motor_config);
 
         log::trace!("serial loop got message {current_motors:?}");
-        device_tx
-            .send(PwmSerial::Set(PwmState {
+        // Send message, but timeout with error if it is not sent within one second.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            device_tx.send(PwmSerial::Set(PwmState {
                 pan,
                 tilt,
                 enabled: true,
-            }))
-            .await?;
+            })),
+        )
+        .await??;
     }
 }
