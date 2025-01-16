@@ -1074,6 +1074,10 @@ async fn main() -> Result<()> {
         })
     };
 
+    if device_config.pwm_output_enabled && cli.pwm_serial.is_none() {
+        tracing::error!("PWM output enabled, but no PWM serial device specified");
+    }
+
     // Launch task to run serial IO for rpi pico pantilt PWM motors
     let mut motor_task_join_handle = if let Some(pwm_serial) = cli.pwm_serial {
         my_state.motor_type = MotorType::PwmServo;
