@@ -10,10 +10,10 @@ tokio = { workspace = true, features = ["net", "sync", "rt-multi-thread"] }
 http = "1"
 tokio-stream = { workspace = true, features = ["sync"] }
 axum.workspace = true
-axum-token-auth = "0.1.2"
+axum-token-auth = "0.2.0"
 if-addrs.workspace = true
-tower = "0.4.13"
-tower-http = { version = "0.5.1", features = ["trace", "fs"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.2", features = ["trace", "fs"] }
 preferences-serde1.workspace = true
 cookie = "0.18.0"
 base64 = "0.12"

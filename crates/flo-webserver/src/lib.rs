@@ -38,8 +38,10 @@ compile_error!(
 /// header extractor for "Accept: text/event-stream" --------------------------
 pub struct AcceptsEventStream;
 
-#[axum::async_trait]
-impl<S> axum::extract::FromRequestParts<S> for AcceptsEventStream {
+impl<S> axum::extract::FromRequestParts<S> for AcceptsEventStream
+where
+    S: Send + Sync,
+{
     type Rejection = (StatusCode, &'static str);
     async fn from_request_parts(p: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         const ES: &[u8] = b"text/event-stream";
@@ -266,7 +268,7 @@ pub async fn main_loop(
     let router = axum::Router::new()
         .route(&format!("/{}", flo_core::EVENTS_PATH), get(events_handler))
         .route("/callback", post(callback_handler))
-        .nest_service("/", serve_dir)
+        .fallback_service(serve_dir)
         .layer(
             tower::ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())

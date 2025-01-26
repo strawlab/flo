@@ -48,7 +48,7 @@ tokio-util = { workspace = true, features = ["net", "codec", "time"] }
 tokio-serial.workspace = true
 tokio-stream = { workspace = true, features = ["sync"] }
 preferences-serde1.workspace = true
-cookie_store = "0.20.0"
+cookie_store = "0.21.0"
 clap = { workspace = true, features = ["derive"] }
 memchr = "2.5.0"
 sha2 = "0.10.6"
@@ -69,7 +69,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
 tracing-panic.workspace = true
 serde_cbor = "0.11.1"
-packed_struct = "0.3"
+packed_struct = "0.3" # required by multiwii_serial_protocol_v2 0.1.12
 glob = "0.3.1"
 regex = "1.10.5"
 http-body-util = "0.1.0"
@@ -90,10 +90,10 @@ sbgc-gimbal = { path = "crates/sbgc-gimbal" }
 tilta-dongle-comms = { path = "crates/tilta-dongle-comms" }
 osd-displayport = { path = "crates/osd-displayport" }
 
-flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
-ci2-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
-strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "f22fef3211c6224041b80a0813eda2c9079039b4" }
+flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
+bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
+ci2-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
+strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
 
 # for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
 # sudo apt install librust-alsa-sys-dev
@@ -106,7 +106,7 @@ tempfile = "3"
 
 [workspace.dependencies]
 adskalman = { version = "0.16.0", default-features = false }
-axum = "0.7.4"
+axum = "0.8.1"
 bytes = "1"
 cam-geom = "0.15.1"
 chrono = { version = "0.4.38", default-features = false }
