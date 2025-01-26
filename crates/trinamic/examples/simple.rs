@@ -15,9 +15,6 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Enable logging to console.
-    env_logger::init();
-
     let cli = Cli::parse();
 
     let mut pan_device = trinamic::Motor::new(
