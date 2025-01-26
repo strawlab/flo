@@ -658,7 +658,7 @@ impl Drop for WritingState {
                 }
 
                 let mut zip_wtr = zip::ZipWriter::new(file);
-                let options = zip::write::FileOptions::default()
+                let options = zip::write::SimpleFileOptions::default()
                     .large_file(true)
                     .unix_permissions(0o755);
 

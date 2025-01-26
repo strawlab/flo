@@ -54,7 +54,7 @@ memchr = "2.5.0"
 sha2 = "0.10.6"
 rand = "0.8.5"
 chrono = { workspace = true, default-features = true, features = ["serde"] }
-zip = { version = "0.6.3", default-features = false, features = ["time"] }
+zip = { version = "2.2.2", default-features = false, features = ["time"] }
 walkdir = "2.2"
 csv = "1.1"
 home = "0.5.4"
