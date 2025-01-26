@@ -783,8 +783,16 @@ impl BroadwaySend for mpsc::UnboundedSender<SaveToDiskMsg> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let handle = tokio_rt.handle();
+    tokio_rt.block_on(run_all(handle))
+}
+
+async fn run_all(handle: &tokio::runtime::Handle) -> Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
         let envstr = format!("{}=info,info", env!("CARGO_PKG_NAME")).replace('-', "_");
         std::env::set_var("RUST_LOG", envstr);
@@ -1002,6 +1010,7 @@ async fn main() -> Result<()> {
         if let Some(ref mavlink_cfg) = &device_config.mavlink_config {
             tracing::info!("mavlink at {}", &mavlink_cfg.port_path);
             let tasks = flo_mavlink::spawn_mavlink(
+                handle,
                 mavlink_cfg,
                 broadway.clone(),
                 flo_saver_tx.clone(),
@@ -1045,7 +1054,7 @@ async fn main() -> Result<()> {
         let mut rx5 = broadway.drone_realtime.subscribe();
 
         let flo_saver_tx = flo_saver_tx.clone();
-        tokio::spawn(async move {
+        handle.spawn(async move {
             use flo_core::BMsg::*;
             loop {
                 tokio::select! {
@@ -1069,9 +1078,7 @@ async fn main() -> Result<()> {
     let mut saver_handle = {
         // Spawn task for saving data to disk
         let device_config = device_config.clone();
-        tokio::task::spawn_blocking(move || {
-            writing_state::writer_task_main(flo_saver_rx, &device_config)
-        })
+        handle.spawn_blocking(move || writing_state::writer_task_main(flo_saver_rx, &device_config))
     };
 
     if device_config.pwm_output_enabled && cli.pwm_serial.is_none() {
@@ -1094,17 +1101,21 @@ async fn main() -> Result<()> {
         let tilt_motor_config = device_config.tilt_motor_config.clone();
 
         let motors_rx = motors_rx.clone();
-        tokio::spawn(async move {
-            pwm_serial_io::run_rpi_pico_pwm_serial_loop(
-                motors_rx,
-                serial_device,
-                pan_pwm_config,
-                pan_motor_config,
-                tilt_pwm_config,
-                tilt_motor_config,
-            )
-            .await
-        })
+        {
+            let handle2 = handle.clone();
+            handle.spawn(async move {
+                pwm_serial_io::run_rpi_pico_pwm_serial_loop(
+                    &handle2,
+                    motors_rx,
+                    serial_device,
+                    pan_pwm_config,
+                    pan_motor_config,
+                    tilt_pwm_config,
+                    tilt_motor_config,
+                )
+                .await
+            })
+        }
     } else if let Some(trinamic_pan) = cli.trinamic_pan {
         my_state.motor_type = MotorType::Trinamic;
         let pan_trinamic_config = device_config.pan_trinamic_config.as_mut().unwrap();
@@ -1138,7 +1149,7 @@ async fn main() -> Result<()> {
         let tilt_trinamic_config = tilt_trinamic_config.clone();
 
         let motors_rx = motors_rx.clone();
-        tokio::spawn(async move {
+        handle.spawn(async move {
             trinamic_io::run_trinamic_loop(
                 motors_rx,
                 motor_position_tx,
@@ -1154,12 +1165,12 @@ async fn main() -> Result<()> {
         my_state.motor_type = MotorType::Gimbal;
         let flo_saver_tx = flo_saver_tx.clone();
         let motors_rx = motors_rx.clone();
-        tokio::spawn(async move {
+        handle.spawn(async move {
             sbgc_gimbal::run_gimbal_loop(motors_rx, motor_position_tx, flo_saver_tx, cfg).await
         })
     } else {
         tracing::warn!("No motor control method specified.");
-        tokio::spawn(async {
+        handle.spawn(async {
             loop {
                 futures::future::pending().await
             }
@@ -1180,9 +1191,12 @@ async fn main() -> Result<()> {
                 //let task = tilta_io::run_tilta_loop();
                 //(Some(task), true)
                 let port = tcfg.port.clone();
-                let jh = tokio::spawn(async move {
-                    tilta_io::run_tilta_loop(port.as_str(), motors_rx).await
-                });
+                let jh = {
+                    let handle2 = handle.clone();
+                    handle.spawn(async move {
+                        tilta_io::run_tilta_loop(&handle2, port.as_str(), motors_rx).await
+                    })
+                };
                 (Box::pin(jh), true)
             }
         };
@@ -1203,7 +1217,7 @@ async fn main() -> Result<()> {
     let _http_server_join_handle = {
         let device_config = device_config.clone();
         let event_tx = broadway.flo_events.clone();
-        tokio::spawn(async move {
+        handle.spawn(async move {
             flo_webserver::main_loop(
                 tcp_listener,
                 token_config,
@@ -1228,20 +1242,20 @@ async fn main() -> Result<()> {
     };
 
     //start up OSD
-    let (osd_tx, mut osd_task): (_, Pin<Box<dyn Future<Output = _>>>) =
-        if let Some(osd_config) = device_config.osd_config.clone() {
-            let (osd_tx, osd_rx) = watch::channel(OsdState::default());
-            let osd_join_handle = {
-                let broadway = broadway.clone();
-                tokio::spawn(async move {
-                    osd::run_osd_loop(osd_rx, broadway, osd_config, canvas).await
-                })
-            };
-            (Some(osd_tx), Box::pin(osd_join_handle))
-        } else {
-            let fut = pending(); // future never completes
-            (None, Box::pin(fut))
+    let (osd_tx, mut osd_task): (_, Pin<Box<dyn Future<Output = _>>>) = if let Some(osd_config) =
+        device_config.osd_config.clone()
+    {
+        let (osd_tx, osd_rx) = watch::channel(OsdState::default());
+        let osd_join_handle = {
+            let broadway = broadway.clone();
+            handle
+                .spawn(async move { osd::run_osd_loop(osd_rx, broadway, osd_config, canvas).await })
         };
+        (Some(osd_tx), Box::pin(osd_join_handle))
+    } else {
+        let fut = pending(); // future never completes
+        (None, Box::pin(fut))
+    };
 
     let fast_interval =
         std::time::Duration::from_secs_f64(device_config.control_loop_timestep_secs);

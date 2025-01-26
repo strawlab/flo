@@ -378,6 +378,7 @@ async fn main_loop(
 }
 
 pub fn spawn_mavlink(
+    handle: &tokio::runtime::Handle,
     mavlink_cfg: &flo_core::drone_structs::MavlinkConfig,
     broadway: Broadway,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
@@ -412,7 +413,7 @@ pub fn spawn_mavlink(
     let mavconn = tokio_mavlink::open(read_port, write_port, 10, 10, mavlink::MavlinkVersion::V1)?;
     let (mavconn_tx, mavconn_rx) = mavconn.split();
 
-    let main_jh = tokio::spawn(async move {
+    let main_jh = handle.spawn(async move {
         main_loop(
             mavlink_cfg,
             mavconn_rx,

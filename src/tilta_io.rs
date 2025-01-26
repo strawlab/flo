@@ -10,6 +10,7 @@ use tilta_dongle_comms::TitlaFocusDongleMessage as MyMessage;
 type MyCodec = json_lines::codec::JsonLinesCodec<MyMessage, MyMessage>;
 
 pub(crate) async fn run_tilta_loop(
+    handle: &tokio::runtime::Handle,
     port: &str,
     mut rx: watch::Receiver<MotorValueCache>,
 ) -> Result<()> {
@@ -26,7 +27,7 @@ pub(crate) async fn run_tilta_loop(
     let (start_tx, mut start_rx) = tokio::sync::oneshot::channel();
 
     // Send request for the firmware version.
-    let jh = tokio::spawn(async move {
+    let jh = handle.spawn(async move {
         use tokio::sync::oneshot::error::TryRecvError;
         loop {
             match start_rx.try_recv() {

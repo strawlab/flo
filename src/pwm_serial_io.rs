@@ -9,6 +9,7 @@ use flo_core::{MotorConfig, MotorDriveMode, MotorValueCache, PwmConfig, PwmSeria
 use super::codec::JsonLinesCodec;
 
 pub(crate) async fn run_rpi_pico_pwm_serial_loop(
+    handle: &tokio::runtime::Handle,
     mut rx: watch::Receiver<MotorValueCache>,
     serial_device: SerialStream,
     pwm_pan_config: PwmConfig,
@@ -23,7 +24,7 @@ pub(crate) async fn run_rpi_pico_pwm_serial_loop(
     let (start_tx, mut start_rx) = tokio::sync::oneshot::channel();
 
     // Send request for the firmware version.
-    let jh = tokio::spawn(async move {
+    let jh = handle.spawn(async move {
         use tokio::sync::oneshot::error::TryRecvError;
         loop {
             match start_rx.try_recv() {

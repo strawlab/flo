@@ -39,8 +39,9 @@ async fn main() -> color_eyre::eyre::Result<()> {
     };
 
     tracing::info!("mavlink at {}", &cfg.port_path);
+    let handle = tokio::runtime::Handle::try_current()?;
     let mut mavlink_tasks =
-        flo_mavlink::spawn_mavlink(&cfg, broadway.clone(), flo_saver_tx.clone(), None)?;
+        flo_mavlink::spawn_mavlink(&handle, &cfg, broadway.clone(), flo_saver_tx.clone(), None)?;
 
     loop {
         tokio::select! {
