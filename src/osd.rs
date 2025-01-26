@@ -114,7 +114,7 @@ pub(crate) async fn run_osd_loop(
 
                     //send arming status message to vtx/goggles to make them go full power and start recording video
                     use multiwii_serial_protocol_v2::MspCommandCode as CC;
-                    use packed_struct::prelude::*;
+                    use packed_struct::prelude::PackedStruct;
 
                     let telemsg = multiwii_serial_protocol_v2::structs::MspStatus {
                         cycle_time: 0,
@@ -282,4 +282,49 @@ fn draw_battery(
     };
 
     canvas.print(&s, chx, chy, align)
+}
+
+#[test]
+fn test_packed_msp_status() {
+    use packed_struct::prelude::PackedStruct;
+
+    let telemsg_armed = multiwii_serial_protocol_v2::structs::MspStatus {
+        cycle_time: 0,
+        i2c_errors: 0,
+        sensors: multiwii_serial_protocol_v2::structs::MspAvailableSensors {
+            sonar: false,
+            gps: false,
+            mag: false,
+            baro: false,
+            acc: false,
+        },
+        null1: 0,
+        flight_mode: 1, // armed
+        profile: 0,
+        system_load: 0,
+    };
+    let data_armed = telemsg_armed.pack();
+    assert_eq!(&data_armed[..], &[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+
+    // flight_mode 0
+    let telemsg_not_armed = multiwii_serial_protocol_v2::structs::MspStatus {
+        cycle_time: 0,
+        i2c_errors: 0,
+        sensors: multiwii_serial_protocol_v2::structs::MspAvailableSensors {
+            sonar: false,
+            gps: false,
+            mag: false,
+            baro: false,
+            acc: false,
+        },
+        null1: 0,
+        flight_mode: 0, // not armed
+        profile: 0,
+        system_load: 0,
+    };
+    let data_not_armed = telemsg_not_armed.pack();
+    assert_eq!(
+        &data_not_armed[..],
+        &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
 }
