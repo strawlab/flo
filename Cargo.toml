@@ -59,7 +59,7 @@ walkdir = "2.2"
 csv = "1.1"
 home = "0.5.4"
 iana-time-zone = "0.1.57"
-rodio = { version = "0.17.3", default-features = false, features = [
+rodio = { version = "0.20", default-features = false, features = [
   "wav",
   "vorbis",
 ] }
