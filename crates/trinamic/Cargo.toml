@@ -12,4 +12,4 @@ structure = "0.1.2"
 
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
