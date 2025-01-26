@@ -13,11 +13,8 @@ use adskalman::ObservationModel;
 
 pub struct PositionObservationModel<R: RealField>
 where
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1>,
+    DefaultAllocator: Allocator<U1, U1>,
+    DefaultAllocator: Allocator<U1>,
 {
     pub observation_matrix: OMatrix<R, U1, U1>,
     pub observation_matrix_transpose: OMatrix<R, U1, U1>,
@@ -43,13 +40,8 @@ impl<R: RealField> PositionObservationModel<R> {
 
 impl<R: RealField> ObservationModel<R, U1, U1> for PositionObservationModel<R>
 where
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1>,
-    DefaultAllocator: Allocator<R, U1>,
-    DefaultAllocator: Allocator<(usize, usize), U1>,
+    DefaultAllocator: Allocator<U1, U1>,
+    DefaultAllocator: Allocator<U1>,
     U1: DimMin<U1, Output = U1>,
 {
     fn H(&self) -> &OMatrix<R, U1, U1> {
@@ -72,11 +64,8 @@ where
 pub struct DynamicPositionObservationModel1D<R>
 where
     // not sure at all about all what all these allocators are for and if the dimensions are right
-    DefaultAllocator: Allocator<R, U1, U2>,
-    DefaultAllocator: Allocator<R, U1, U2>,
-    DefaultAllocator: Allocator<R, U1, U2>,
-    DefaultAllocator: Allocator<R, U1, U2>,
-    DefaultAllocator: Allocator<R, U1>,
+    DefaultAllocator: Allocator<U1, U2>,
+    DefaultAllocator: Allocator<U1>,
     R: RealField + Copy,
 {
     pub observation_matrix: OMatrix<R, U1, U2>,
@@ -109,13 +98,12 @@ impl<R: RealField + Copy> DynamicPositionObservationModel1D<R> {
 
 impl<R: RealField + Copy> ObservationModel<R, U2, U1> for DynamicPositionObservationModel1D<R>
 where
-    DefaultAllocator: Allocator<R, U2, U2>,
-    DefaultAllocator: Allocator<R, U1, U2>,
-    DefaultAllocator: Allocator<R, U2, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U2>,
-    DefaultAllocator: Allocator<R, U1>,
-    DefaultAllocator: Allocator<(usize, usize), U1>,
+    DefaultAllocator: Allocator<U2, U2>,
+    DefaultAllocator: Allocator<U1, U2>,
+    DefaultAllocator: Allocator<U2, U1>,
+    DefaultAllocator: Allocator<U1, U1>,
+    DefaultAllocator: Allocator<U2>,
+    DefaultAllocator: Allocator<U1>,
     // not sure about this allocation, maybe use this format instead https://docs.rs/adskalman/latest/adskalman/trait.ObservationModel.html
     U1: DimMin<U2, Output = U1>,
 {
@@ -138,11 +126,8 @@ where
 pub struct DynamicPositionObservationModel2D<R: RealField>
 where
     // not sure at all about all what all these allocators are for and if the dimensions are right
-    DefaultAllocator: Allocator<R, U2, U4>,
-    DefaultAllocator: Allocator<R, U2, U4>,
-    DefaultAllocator: Allocator<R, U2, U4>,
-    DefaultAllocator: Allocator<R, U2, U4>,
-    DefaultAllocator: Allocator<R, U2>,
+    DefaultAllocator: Allocator<U2, U4>,
+    DefaultAllocator: Allocator<U2>,
 {
     pub observation_matrix: OMatrix<R, U2, U4>,
     pub observation_matrix_transpose: OMatrix<R, U4, U2>,
@@ -184,13 +169,12 @@ impl<R: RealField> DynamicPositionObservationModel2D<R> {
 
 impl<R: RealField> ObservationModel<R, U4, U2> for DynamicPositionObservationModel2D<R>
 where
-    DefaultAllocator: Allocator<R, U4, U4>,
-    DefaultAllocator: Allocator<R, U2, U4>,
-    DefaultAllocator: Allocator<R, U4, U2>,
-    DefaultAllocator: Allocator<R, U2, U2>,
-    DefaultAllocator: Allocator<R, U4>,
-    DefaultAllocator: Allocator<R, U2>,
-    DefaultAllocator: Allocator<(usize, usize), U2>,
+    DefaultAllocator: Allocator<U4, U4>,
+    DefaultAllocator: Allocator<U2, U4>,
+    DefaultAllocator: Allocator<U4, U2>,
+    DefaultAllocator: Allocator<U2, U2>,
+    DefaultAllocator: Allocator<U4>,
+    DefaultAllocator: Allocator<U2>,
     // not sure about this allocation, maybe use this format instead https://docs.rs/adskalman/latest/adskalman/trait.ObservationModel.html
     U2: DimMin<U4, Output = U2>,
 {

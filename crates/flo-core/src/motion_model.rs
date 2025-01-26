@@ -12,8 +12,8 @@ use adskalman::TransitionModelLinearNoControl;
 pub struct Static1DModel<R>
 where
     R: RealField + Copy,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1>,
+    DefaultAllocator: Allocator<U1, U1>,
+    DefaultAllocator: Allocator<U1>,
 {
     pub transition_model: OMatrix<R, U1, U1>,
     pub transition_model_transpose: OMatrix<R, U1, U1>,
@@ -44,11 +44,8 @@ where
 impl<R> TransitionModelLinearNoControl<R, U1> for Static1DModel<R>
 where
     R: RealField + Copy,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1, U1>,
-    DefaultAllocator: Allocator<R, U1>,
+    DefaultAllocator: Allocator<U1, U1>,
+    DefaultAllocator: Allocator<U1>,
 {
     fn F(&self) -> &OMatrix<R, U1, U1> {
         &self.transition_model
@@ -64,8 +61,7 @@ where
 pub struct Dynamic1DModel<R>
 where
     R: RealField + Copy,
-    DefaultAllocator: Allocator<R, U2, U2>,
-    DefaultAllocator: Allocator<R, U2, U2>,
+    DefaultAllocator: Allocator<U2, U2>,
 {
     pub transition_model: OMatrix<R, U2, U2>,
     pub transition_model_transpose: OMatrix<R, U2, U2>,
@@ -116,11 +112,8 @@ where
 impl<R> TransitionModelLinearNoControl<R, U2> for Dynamic1DModel<R>
 where
     R: RealField + Copy,
-    DefaultAllocator: Allocator<R, U2, U2>,
-    DefaultAllocator: Allocator<R, U2, U2>,
-    DefaultAllocator: Allocator<R, U2, U2>,
-    DefaultAllocator: Allocator<R, U2, U2>,
-    DefaultAllocator: Allocator<R, U2>,
+    DefaultAllocator: Allocator<U2, U2>,
+    DefaultAllocator: Allocator<U2>,
 {
     fn F(&self) -> &OMatrix<R, U2, U2> {
         &self.transition_model
@@ -137,8 +130,7 @@ where
 pub struct Dynamic2DModel<R>
 where
     R: RealField,
-    DefaultAllocator: Allocator<R, U4, U4>,
-    DefaultAllocator: Allocator<R, U4, U4>,
+    DefaultAllocator: Allocator<U4, U4>,
 {
     pub transition_model: OMatrix<R, U4, U4>,
     pub transition_model_transpose: OMatrix<R, U4, U4>,
@@ -193,11 +185,8 @@ where
 impl<R> TransitionModelLinearNoControl<R, U4> for Dynamic2DModel<R>
 where
     R: RealField,
-    DefaultAllocator: Allocator<R, U4, U4>,
-    DefaultAllocator: Allocator<R, U4, U4>,
-    DefaultAllocator: Allocator<R, U4, U4>,
-    DefaultAllocator: Allocator<R, U4, U4>,
-    DefaultAllocator: Allocator<R, U4>,
+    DefaultAllocator: Allocator<U4, U4>,
+    DefaultAllocator: Allocator<U4>,
 {
     fn F(&self) -> &OMatrix<R, U4, U4> {
         &self.transition_model
