@@ -90,10 +90,10 @@ sbgc-gimbal = { path = "crates/sbgc-gimbal" }
 tilta-dongle-comms = { path = "crates/tilta-dongle-comms" }
 osd-displayport = { path = "crates/osd-displayport" }
 
-flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
-ci2-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
-strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "08dfa526861e4ab38a39688a3699883b8213d557" }
+flydra-types = { git = "https://github.com/strawlab/strand-braid", rev = "583172e2e7bf631192350c745b91026037d2595b" }
+bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "583172e2e7bf631192350c745b91026037d2595b" }
+ci2-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "583172e2e7bf631192350c745b91026037d2595b" }
+strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "583172e2e7bf631192350c745b91026037d2595b" }
 
 # for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
 # sudo apt install librust-alsa-sys-dev
