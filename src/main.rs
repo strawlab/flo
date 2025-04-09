@@ -199,42 +199,42 @@ impl<'a> FloCoordinator<'a> {
         udp_msg: std::result::Result<(UdpMsg, std::net::SocketAddr), udp_codec::Error>,
     ) -> Result<()> {
         log::trace!("got UDP message {:?}", udp_msg);
-        if let Ok((UdpMsg::Centroid(ref centroid), _addr)) = &udp_msg {
-            // Save data
-            let msg = SaveToDiskMsg::CentroidData((chrono::Local::now(), centroid.clone()));
-            self.flo_saver_tx.send(msg)?;
-
-            // Check if we have a second camera but no secondary camera in configuration.
-            self.all_cam_names_ever_seen
-                .insert(centroid.cam_name.clone());
-
-            if self.all_cam_names_ever_seen.len() > 1
-                && self.device_config.secondary_cam_name.is_none()
-            {
-                anyhow::bail!(
-                    "More than one camera sending data, but no secondary camera assigned"
-                );
-            }
-        }
-        // Amongst others, this is the path through which centroid data
-        // from Strand Camera arrives.
+        // This is the path through which centroid data from Strand Camera
+        // arrives.
         let centroid = match udp_msg {
-            Ok((UdpMsg::Centroid(c), _a)) => c,
+            Ok((UdpMsg::Centroid(centroid), _addr)) => {
+                if centroid.schema_version != 2 {
+                    tracing::error!(
+                        "expected centroid schema version 2, found {}",
+                        centroid.schema_version
+                    );
+                    return Ok(());
+                }
+
+                if centroid.mu00 != 0.0 {
+                    // Save data if something was detected.
+                    let msg = SaveToDiskMsg::CentroidData((chrono::Local::now(), centroid.clone()));
+                    self.flo_saver_tx.send(msg)?;
+                }
+
+                // Check if we have a second camera but no secondary camera in configuration.
+                self.all_cam_names_ever_seen
+                    .insert(centroid.cam_name.clone());
+
+                if self.all_cam_names_ever_seen.len() > 1
+                    && self.device_config.secondary_cam_name.is_none()
+                {
+                    eyre::bail!(
+                        "More than one camera sending data, but no secondary camera assigned"
+                    );
+                }
+                centroid
+            }
             Err(e) => {
                 tracing::error!("Error deserializing UDP message: {e}");
                 return Ok(());
             }
         };
-
-        if centroid.schema_version != 2 {
-            tracing::error!(
-                "expected centroid schema version 2, found {}",
-                centroid.schema_version
-            );
-            return Ok(());
-        }
-
-        self.my_state.recent_centroid_packets += 1;
 
         let cam_name = centroid.cam_name.as_str();
         let mut is_secondary = false;
@@ -244,29 +244,30 @@ impl<'a> FloCoordinator<'a> {
             }
         }
 
-        self.broadway
-            .flo_detections
-            .send(flo_core::FloDetectionEvent::Centroid(
-                flo_core::CentroidEvent {
-                    centroid: centroid.clone(),
-                    is_primary: !is_secondary,
-                },
-            ))?;
-
         if is_secondary {
-            {
+            if centroid.mu00 != 0.0 {
                 let cs = &mut self.latest_centroid_stereo;
-                cs.1 = Some(centroid);
+                cs.1 = Some(centroid.clone());
             }
         } else {
-            {
+            if centroid.mu00 != 0.0 {
                 let c = &mut self.latest_centroid;
                 *c = Some(centroid.clone());
-            }
-            {
+
                 let cs = &mut self.latest_centroid_stereo;
-                cs.0 = Some(centroid);
+                cs.0 = Some(centroid.clone());
             }
+        }
+
+        if centroid.mu00 != 0.0 {
+            self.broadway
+                .flo_detections
+                .send(flo_core::FloDetectionEvent::Centroid(
+                    flo_core::CentroidEvent {
+                        centroid,
+                        is_primary: !is_secondary,
+                    },
+                ))?;
         }
 
         Ok(())
