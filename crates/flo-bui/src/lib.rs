@@ -582,7 +582,7 @@ impl App {
     fn info_div(&self) -> Html {
         if let Some(ref state) = self.last_state {
             let (distance, disparity) = match state.stereopsis_state.as_ref() {
-                Some(ss) => (format!("{:.2}m", ss.dist), format!("{}px", ss.dx)),
+                Some(ss) => (format!("{:.2}m", ss.dist), format!("{:.2}px", ss.dx)),
                 None => ("\u{200b}".to_string(), "\u{200b}".to_string()), // unicode zero width space character
             };
             let pan_deg = format!("{:.1}°", state.cached_motors.pan.degrees());
