@@ -1,4 +1,3 @@
-use bui_backend_session::HttpSession;
 use clap::Parser;
 use color_eyre::eyre::{self, self as anyhow, Result, WrapErr};
 use futures::StreamExt;
@@ -9,6 +8,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, RwLock},
 };
+use strand_bui_backend_session::HttpSession;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -547,7 +547,9 @@ impl<'a> FloCoordinator<'a> {
                         let body =
                             axum::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
                                 serde_json::to_vec(&strand_cam_storetype::CallbackType::ToCamera(
-                                    ci2_remote_control::CamArg::SetIsRecordingMp4(want_recording),
+                                    strand_cam_remote_control::CamArg::SetIsRecordingMp4(
+                                        want_recording,
+                                    ),
                                 ))
                                 .unwrap(),
                             )));
@@ -663,8 +665,8 @@ async fn initialize_strand_cam_session(
     cfg: &StrandCamConfig,
     jar: Arc<RwLock<cookie_store::CookieStore>>,
 ) -> Result<HttpSession> {
-    let info = flydra_types::BuiServerAddrInfo::parse_url_with_token(&cfg.url)?;
-    let mut session = bui_backend_session::create_session(&info, jar.clone())
+    let info = strand_bui_backend_session_types::BuiServerAddrInfo::parse_url_with_token(&cfg.url)?;
+    let mut session = strand_bui_backend_session::create_session(&info, jar.clone())
         .await
         .with_context(|| {
             format!(
