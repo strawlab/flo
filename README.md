@@ -30,9 +30,14 @@ program.
 
 ## Overview of multiple pieces when using PWM servo motors
 
-Other variants trade `rpipico-pantilt` and the PWM servo motors for other types
-of motors, such as Trinamic stepper motors or SimpleBGC gimbal motors. Strand
-Camera is available [here](https://strawlab.org/strand-cam/).
+This diagram shows the various software pieces, and the means with which they
+communicate with each other, when using the
+[Mini-FLO](https://github.com/strawlab/flo-hardware?tab=readme-ov-file#mini-flo)
+ variant. In Mini-FLO, the `rpipico-pantilt` software running on a Raspberry Pi
+Pico board controls PWM servo motors. Other variants trade `rpipico-pantilt` and
+the PWM servo motors for other types of motors, such as Trinamic stepper motors
+or SimpleBGC gimbal motors. Strand Camera is available
+[here](https://strawlab.org/strand-cam/).
 
 ```
 +-------------+
@@ -67,49 +72,54 @@ Camera is available [here](https://strawlab.org/strand-cam/).
 - `firmware/rpipico-pantilt` Firmware for RPi Pico to control PWM servo motors.
 - `src` Rust source code for `flo`
 
-# How to
+## How to connect to Strand Camera
 
-## How to connect to strandcam
+1. Run strand-cam.
 
-1. Run strandcam. 
+Specify the networking port using command-line argument: `--http-server-addr
+127.0.0.1:5555` (5555 is the port number).  Specify the camera to use with
+`--camera-name Basler-40522040` (40522040 is the serial number of the camera).
+Thus, your command line would be:
 
-Specify the networking port using command-line argument: `--http-server-addr 0.0.0.0:5555` (5555 is the port number). Use different ports for different cameras (for example, 5555 for the primary camera, and 5556 for the secondary camera). Specify the camera to use with `--camera-name Basler-40522040` (40522040 is the serial number of the camera)
+    strand-cam-pylon --http-server-addr 127.0.0.1:5555 --camera-name Basler-40522040
 
-2. obtain the token link for each strandcam
+To obtain distance estimates using stereo cameras, it is necessary to run two
+instances of strand-cam, one for the main camera and one for the secondary
+camera. These will have different ports. For example, 5555 for the main camera,
+and 5556 for the secondary camera.
 
-Strandcam will dump a lot of info into the terminal. Look for a link like `* predicted URL http://127.0.0.1:5555/?token=f6868732-14da-427d-ac02-6f0c42d8cbff`. This is the link with the token. 
+2. Obtain the link for strand-cam.
 
-Repeat for the second camera, it will be a different token. Keep the strandcam instances running for the next step. 
+Strand-cam will dump a lot of info into the terminal. Look for a line like `*
+predicted URL http://127.0.0.1:5555/`.
 
-3. put the token link into the FLO config file, and run FLO once.
+When running with two cameras, each will have a different link. Keep the
+strand-cam instances running for the next step.
+
+3. Put the link into the FLO config file, and run FLO once.
 
 Look for url fields in the FLO config file:
 ```
   strand_cam_main:
-    url: http://127.0.0.1:5555    # <-- append the token part here
+    url: http://127.0.0.1:5555
     on_attach_json_commands:
     - '{"ToCamera":{"SetImOpsCenterX":960}}'
     - '{"ToCamera":{"SetImOpsCenterY":600}}'
     - '{"ToCamera":{"SetImOpsThreshold":200}}'
     - '{"ToCamera":{"ToggleImOpsDetection":true}}'
     - '{"ToCamera":{"SetMp4MaxFramerate": "Fps60"}}'
-    - '{"ToCamera":{"SetMp4Codec":{"Ffmpeg":{"device_args":[["-vaapi_device","/dev/dri/renderD128"]],"pre_codec_args":[["-vf","format=nv12,hwupload"]],"codec":"h264_vaapi","post_codec_args":null}}}}'
-  strand_cam_secondary:
-    url: http://127.0.0.1:5556    # <-- ... and here
+  strand_cam_secondary: # If you have a secondary camera for stereopsis, also use this section
+    url: http://127.0.0.1:5556
     on_attach_json_commands:
     - '{"ToCamera":{"SetImOpsCenterX":960}}'
     - '{"ToCamera":{"SetImOpsCenterY":600}}'
     - '{"ToCamera":{"SetImOpsThreshold":200}}'
     - '{"ToCamera":{"ToggleImOpsDetection":true}}'
-    - '{"ToCamera":{"SetMp4MaxFramerate": "Fps30"}}'
-    - '{"ToCamera":{"SetMp4Codec":{"Ffmpeg":{"device_args":[["-vaapi_device","/dev/dri/renderD128"]],"pre_codec_args":[["-vf","format=nv12,hwupload"]],"codec":"h264_vaapi","post_codec_args":null}}}}'
 ```
-Add the token part to the url fields. Then run FLO.
 
-If FLO connects to the camera(s), a cookie will be saved, and the token will not be needed again to establish a connection. The cookie lives for 400 days. The token is only valid for the current strandcam session, and is refreshed (becomes invalid) if strandcam is restarted.
+Then run FLO with something like this:
 
-4. upon successful connection, remove the token part from the url fields.
+    flo --config config-mini.yaml --pwm-serial /dev/ttyACM0
 
-Done!
-
-Note that with this connection method, you have an option to configure imops and other aspects of strandcam automatically.
+Note that in the FLO config file you can configure imops and other aspects of
+strand-cam automatically in the `on_attach_json_commands` section.

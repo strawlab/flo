@@ -41,3 +41,11 @@ tracking_thresholds:
 # if motor_timeconstant_secs=dt (=.001), the estimated motor position is the
 # current motor command
 motor_timeconstant_secs: .001
+strand_cam_main:
+  url: http://127.0.0.1:5555
+  on_attach_json_commands:
+  - '{"ToCamera":{"SetImOpsCenterX":960}}'
+  - '{"ToCamera":{"SetImOpsCenterY":600}}'
+  - '{"ToCamera":{"SetImOpsThreshold":200}}'
+  - '{"ToCamera":{"ToggleImOpsDetection":true}}'
+  - '{"ToCamera":{"SetMp4MaxFramerate": "Fps60"}}'
