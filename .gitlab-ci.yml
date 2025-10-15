@@ -76,8 +76,8 @@ flo:
 
     - export RUSTFLAGS="-D warnings"
 
-    - cargo install grass
-    - curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+    - cargo install trunk
+
     - cd crates/flo-bui
     - ./build.sh
     - cd ${CI_PROJECT_DIR}

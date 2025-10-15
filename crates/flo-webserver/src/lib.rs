@@ -251,7 +251,7 @@ pub async fn main_loop(
 
     #[cfg(feature = "bundle_files")]
     static ASSETS_DIR: include_dir::Dir<'static> =
-        include_dir::include_dir!("$CARGO_MANIFEST_DIR/../flo-bui/pkg"); // Built by build script in `flo-bui`
+        include_dir::include_dir!("$CARGO_MANIFEST_DIR/../flo-bui/dist"); // Built by build script in `flo-bui`
 
     #[cfg(feature = "bundle_files")]
     let serve_dir = tower_serve_static::ServeDir::new(&ASSETS_DIR);

@@ -1,4 +1,4 @@
-@use 'recording_path';
+@use '../scss/recording_path';
 
 $body-color-dark: #adadad;
 $body-background-dark: #000000;
@@ -191,6 +191,7 @@ input[type="text"].ranged-value-input-error {
     font-weight: lighter;
     font-size: smaller;
 }
+
 .qqvalue {
     font-weight: bolder;
     font-size: larger;

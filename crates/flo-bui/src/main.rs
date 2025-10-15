@@ -1,7 +1,4 @@
-#![recursion_limit = "1024"]
-
-// TODO: keep an actively updated list of all recently heard devices and allow
-// the user to select which one to interact with.
+use console_error_panic_hook::set_once as set_panic_hook;
 
 use std::fmt;
 
@@ -676,8 +673,8 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 
 // -----------------------------------------------------------------------------
 
-#[wasm_bindgen(start)]
-pub fn run_app() {
+pub fn main() {
+    set_panic_hook();
     wasm_logger::init(wasm_logger::Config::default());
     yew::Renderer::<App>::new().render();
 }

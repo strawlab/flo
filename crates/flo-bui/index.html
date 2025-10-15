@@ -5,7 +5,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=320">
     <title>FLO</title>
-    <link rel="stylesheet" href="style.css">
+    <link data-trunk rel="scss" href="static/flo-bui.scss" />
+    <base data-trunk-public-url />
 </head>
 
 <body>
@@ -49,6 +50,7 @@
         }
         run();
     </script>
+    <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z" data-bin="flo-bui" />
 
     <script type='text/javascript'>
         function _remove_token_from_url() {
