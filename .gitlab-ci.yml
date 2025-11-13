@@ -76,6 +76,7 @@ flo:
 
     - export RUSTFLAGS="-D warnings"
 
+    - rustup target add wasm32-unknown-unknown
     - cargo install trunk --locked
 
     - cd crates/flo-bui
