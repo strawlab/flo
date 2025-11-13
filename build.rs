@@ -1,6 +1,6 @@
 /// Set the environment variables `GIT_HASH` AND `CARGO_PKG_VERSION` to include
 /// the current git revision.
-fn git_hash() -> Result<(), Box<(dyn std::error::Error)>> {
+fn git_hash() -> Result<(), Box<dyn std::error::Error>> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()?;
@@ -12,7 +12,7 @@ fn git_hash() -> Result<(), Box<(dyn std::error::Error)>> {
     Ok(())
 }
 
-fn main() -> Result<(), Box<(dyn std::error::Error)>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     git_hash()?;
     Ok(())
 }
