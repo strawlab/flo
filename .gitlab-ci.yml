@@ -76,7 +76,7 @@ flo:
 
     - export RUSTFLAGS="-D warnings"
 
-    - cargo install trunk
+    - cargo install trunk --locked
 
     - cd crates/flo-bui
     - ./build.sh
