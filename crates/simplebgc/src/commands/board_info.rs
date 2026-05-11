@@ -1,5 +1,5 @@
 use crate::{Payload, PayloadParseError};
-use enumflags2::{bitflags, BitFlags};
+use enumflags2::{BitFlags, bitflags};
 
 #[bitflags]
 #[derive(Copy, Clone, Debug, PartialEq)]

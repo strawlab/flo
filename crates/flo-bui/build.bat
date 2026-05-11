@@ -1,2 +1,2 @@
-@REM install with "cargo install trunk --locked"
+@REM install with cargo install trunk
 trunk build --release

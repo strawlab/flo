@@ -1,0 +1,13 @@
+[package]
+name = "h264-recorder"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+camino.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+nix = { version = "0.30.1", features = ["signal"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.60", features = ["Win32_System_Console"] }

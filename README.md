@@ -20,6 +20,14 @@ This repository contains the source code for the primary FLO executable, called
 from Strand Cam `imops` and controls motors. This is the main, high-level FLO
 program.
 
+While FLO was originally designed as a generic camera tracking system for all
+FLO variants, it has over time accumulated substantial specialized code for
+drone-based operation. That configuration adds MAVLink flight-controller
+integration and pilot video display via OSD. Non-drone use cases — such as
+[Mini-FLO](https://github.com/strawlab/flo-hardware?tab=readme-ov-file#mini-flo)
+with PWM servo motors, Trinamic stepper motors, or SimpleBGC gimbal motors —
+remain fully supported.
+
 ## Other FLO-related repositories
 
 - https://github.com/strawlab/flo-data-analysis data analysis for FLO data

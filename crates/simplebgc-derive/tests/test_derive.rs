@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use simplebgc_derive::BgcPayload;
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(thiserror::Error, Debug)]
 enum PayloadParseError {
     #[error("invalid flags value for {name}")]
@@ -10,7 +10,7 @@ enum PayloadParseError {
     InvalidEnum { name: String },
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 trait Payload {
     /// Parses this payload from bytes according to the SimpleBGC spec.
     fn from_bytes(b: Bytes) -> Result<Self, PayloadParseError>
@@ -25,7 +25,6 @@ trait Payload {
 
 // This checks that `derive(BgcPayload)` compiles.
 #[derive(BgcPayload)]
-#[allow(dead_code)]
 struct BoardInfo {
     #[kind(raw)]
     #[name("BOARD_VER")]

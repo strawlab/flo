@@ -1,7 +1,6 @@
 use crate::{
-    is_default,
-    utils::{elapsed, ChangeDetector, NoiseGate, NoiseGateParameters},
-    FloatType, MyTimestamp,
+    FloatType, MyTimestamp, is_default,
+    utils::{ChangeDetector, NoiseGate, NoiseGateParameters, elapsed},
 };
 
 use num_derive::FromPrimitive;
@@ -9,12 +8,24 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum DroneEvent {
-    CommEstablished,
-    CommLost,
     Armed,
     Disarmed,
     BatteryState(BatteryState),
     FlightModeChanged(Option<FlightMode>, FlightMode),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
+pub enum GnssRtkMode {
+    #[default]
+    NoGps,
+    NoFix,
+    TwoDFix,
+    ThreeDFix,
+    DGps,
+    RtkFloat,
+    RtkFixed,
+    Static,
+    Ppp,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -26,10 +37,10 @@ pub enum DroneRealtimeEvent {
 
 pub const NUM_RC_CHANNELS: usize = 18;
 
-///struct to send drone's remote-control channel values around in flo
+/// Drone RC channel values.
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct DroneChannelData {
-    ///values in range -1.0 .. 1.0
+    /// Values in range -1.0..1.0.
     pub values: [FloatType; NUM_RC_CHANNELS],
     pub timestamp: MyTimestamp,
 }
@@ -43,26 +54,12 @@ impl DroneChannelData {
     }
 }
 
-///struct to send other general drone status around in flo
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Default)]
-pub struct DroneStatus {
-    //FIXME: add timestamp
-    pub armed: bool,
-    pub flight_mode: FlightMode,
-    ///battery voltage per cell
-    pub batt_voltage: FloatType,
-    ///battery percentage, as reported by flight controller
-    pub batt_percent: FloatType,
-    ///for now, this refers to battery status only; ar=med status is updated independently and is not timestamped
-    pub timestamp: MyTimestamp,
-}
-
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Default)]
 pub struct BatteryState {
     pub timestamp: MyTimestamp,
-    ///battery voltage per cell
+    /// Battery voltage per cell.
     pub batt_voltage: FloatType,
-    ///battery percentage, as reported by flight controller
+    /// Battery percentage as reported by the flight controller.
     pub batt_percent: FloatType,
 }
 
@@ -86,18 +83,18 @@ pub struct MavlinkConfig {
     )]
     pub component_id: u8,
 
-    #[serde(
-        default = "default_mavlink_loss_timeout",
-        skip_serializing_if = "is_default_mavlink_loss_timeout"
-    )]
-    pub loss_timeout: FloatType,
-
-    ///how many cells in series in the drone battery
+    /// Number of cells in series in the drone battery.
     #[serde(
         default = "default_mavlink_batt_s",
         skip_serializing_if = "is_default_mavlink_batt_s"
     )]
     pub batt_s: u8,
+
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub set_gps_global_origin: Option<[FloatType; 3]>,
+
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub ntrip_url: Option<String>,
 }
 
 fn default_mavlink_system_id() -> u8 {
@@ -116,14 +113,6 @@ fn is_default_mavlink_component_id(val: &u8) -> bool {
     *val == default_mavlink_component_id()
 }
 
-fn default_mavlink_loss_timeout() -> FloatType {
-    1.0
-}
-
-fn is_default_mavlink_loss_timeout(val: &FloatType) -> bool {
-    *val == default_mavlink_loss_timeout()
-}
-
 fn default_mavlink_batt_s() -> u8 {
     1
 }
@@ -138,8 +127,9 @@ impl Default for MavlinkConfig {
             port_path: "".to_string(),
             system_id: default_mavlink_system_id(),
             component_id: default_mavlink_component_id(),
-            loss_timeout: default_mavlink_loss_timeout(),
             batt_s: default_mavlink_batt_s(),
+            set_gps_global_origin: Default::default(),
+            ntrip_url: Default::default(),
         }
     }
 }
@@ -170,7 +160,7 @@ pub struct RcConfig {
     pub tilt_knob: Option<AngleKnobConfig>,
 }
 
-///convert "pwm microsecond pulse duration" into a value in range -1..+1
+/// Converts a PWM pulse duration (microseconds) to a value in -1..+1.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelRange {
@@ -193,20 +183,20 @@ impl ChannelRange {
     }
 }
 
-///defines a check that a channel value is in a certain range
+/// Checks whether an RC channel value is within a specified range.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelCondition {
-    ///number of the channel, from 1 to 18.
+    /// Channel number, from 1 to 18.
     pub ch_no: i32,
-    ///channel values are typically value in range -1.0..1.0
+    /// Channel value bounds; values are typically in -1.0..1.0.
     pub val_min: FloatType,
     pub val_max: FloatType,
 }
 
 impl ChannelCondition {
     pub fn test(condition: &Option<Self>, channels: &DroneChannelData) -> bool {
-        if let Some(ref condition) = condition {
+        if let Some(condition) = condition {
             (elapsed(channels.timestamp) < 1.5)
                 && channels.get(condition.ch_no) >= condition.val_min
                 && channels.get(condition.ch_no) <= condition.val_max
@@ -219,14 +209,14 @@ impl ChannelCondition {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AngleKnobConfig {
-    ///number of the channel, from 1 to 18.
+    /// Channel number, from 1 to 18.
     pub ch_no: i32,
     pub noise_gate: NoiseGateParameters,
     //angle [degrees] from neutral, corresponding to extreme position of the knob
     pub max_angle: FloatType,
 }
 
-///state of rc change detection program
+/// State of the RC change-detection program.
 #[derive(Clone, Debug)]
 pub struct RcProgramState {
     pub track_start_cd: ChangeDetector<bool>,
@@ -239,9 +229,9 @@ pub struct RcProgramState {
 impl Default for RcProgramState {
     fn default() -> Self {
         Self {
-            track_start_cd: ChangeDetector::new(),
-            track_stop_cd: ChangeDetector::new(),
-            set_home_cd: ChangeDetector::new(),
+            track_start_cd: Default::default(),
+            track_stop_cd: Default::default(),
+            set_home_cd: Default::default(),
             pan_ng: NoiseGate::new(NoiseGateParameters {
                 noise_gate: 0.02,
                 hold_time: 2.0,
@@ -271,6 +261,7 @@ pub enum FlightMode {
     Position = 0x0003_0000,
     Hold     = 0x0304_0000,
     Return   = 0x0504_0000,
+    Offboard = 0x0006_0000,
     Takeoff  = 0x0204_0000,
     Land     = 0x0604_0000,
     #[default]
@@ -288,7 +279,7 @@ impl From<u32> for FlightMode {
 }
 
 impl FlightMode {
-    ///returns (combined_flight_mude, main_mode, sub_mode), or None for Other
+    /// Returns `(combined_flight_mode, main_mode, sub_mode)`, or `None` for [`FlightMode::Other`].
     pub fn mode_numbers(&self) -> Option<(u32, f32, f32)> {
         if *self == FlightMode::Other {
             None

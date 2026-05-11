@@ -46,7 +46,7 @@ impl Message {
     }
 
     pub fn from_buffer(data: &[u8; 9]) -> Result<Self> {
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         let request_struct = structure!(">BBBBiB").unpack(data)?;
         let expected_checksum = request_struct.5;
         let decoded = Message::new(
@@ -74,7 +74,7 @@ impl Message {
     }
 
     pub fn to_buffer(&self) -> Vec<u8> {
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         structure!(">BBBBiB")
             .pack(
                 self.byte0,
@@ -194,9 +194,9 @@ impl Default for TMCM1141Parameters {
     }
 }
 pub trait TMCMParameters {
-    ///returns speed limit in microsteps per second
+    /// Returns speed limit in microsteps per second.
     fn speed_limit(&self) -> FloatType;
-    ///returns acceleration in microsteps per s^2
+    /// Returns acceleration in microsteps per s².
     fn acceleration(&self) -> FloatType;
     //pub async fn apply(&self, &mut device: Motor) -> Result<()>; //not supported by rust
 }

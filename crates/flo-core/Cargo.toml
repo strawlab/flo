@@ -3,14 +3,16 @@ name = "flo-core"
 description = "Common definitions"
 version = "0.1.0"
 authors = ["Andrew Straw <strawman@astraw.com>"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 thiserror.workspace = true
+camino.workspace = true
 eyre.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio = { workspace = true, features = [
     "rt",
     "macros",
@@ -28,6 +30,12 @@ num-derive.workspace = true
 num-traits.workspace = true
 opencv-ros-camera.workspace = true
 cam-geom.workspace = true
+
+strand-cam-remote-control.workspace = true
+
+extended-unified-camera-model = { version = "0.2.0", features = [
+    "serde-serialize",
+] }
 
 [dev-dependencies]
 rand = "0.6.3"

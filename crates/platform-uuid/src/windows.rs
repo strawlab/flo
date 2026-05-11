@@ -1,5 +1,5 @@
-use winreg::enums::*;
 use winreg::RegKey;
+use winreg::enums::*;
 
 fn strip_err(_orig: std::io::Error) -> crate::Error {
     crate::Error {}

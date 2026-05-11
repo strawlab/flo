@@ -1,12 +1,18 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
+  "crates/burn-osd",
+  "crates/camshow",
+  "crates/camshow-protocol",
   "crates/flo-bui",
   "crates/flo-core",
   "crates/flo-mavlink",
   "crates/flo-mavlink/mavlink-dump",
   "crates/flo-webserver",
+  "crates/h264-recorder",
+  "crates/h264-recorder/h264-recorder-cli",
   "crates/osd-displayport",
+  "crates/osd-overlay",
   "crates/osd-utils",
   "crates/platform-uuid",
   "crates/pwm-motor-types",
@@ -26,7 +32,7 @@ exclude = [
 [package]
 name = "flo"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = [
   "Andrew Straw <strawman@astraw.com>",
   "Victor V. Titov <vv.titov@gmail.com>",
@@ -34,6 +40,13 @@ authors = [
 ]
 description = "method for videography using a camera system that automatically moves to follow the subject"
 license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "flo"
+path = "src/main.rs"
 
 [dependencies]
 color-eyre.workspace = true
@@ -64,9 +77,10 @@ rodio = { version = "0.20", default-features = false, features = [
   "vorbis",
 ] }
 hyper = "1.1"
+tempfile = "3"
 time = "0.3.36"
 tracing.workspace = true
-tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
+tracing-subscriber.workspace = true
 tracing-panic.workspace = true
 serde_cbor = "0.11.1"
 packed_struct = "0.3" # required by multiwii_serial_protocol_v2 0.1.12
@@ -74,26 +88,29 @@ glob = "0.3.1"
 regex = "1.10.5"
 http-body-util = "0.1.0"
 axum.workspace = true
+camino.workspace = true
 nalgebra.workspace = true
 adskalman.workspace = true
 json-lines = { version = "0.1.1", features = ["codec"] }
 
 multiwii_serial_protocol_v2.workspace = true
 
+camshow-protocol.workspace = true
 flo-core.workspace = true
 flo-mavlink.workspace = true
 flo-webserver = { path = "crates/flo-webserver", default-features = false }
-osd-utils = { path = "crates/osd-utils" }
+h264-recorder.workspace = true
+osd-displayport.workspace = true
+osd-utils.workspace = true
 platform-uuid = { path = "crates/platform-uuid" }
-trinamic = { path = "crates/trinamic" }
 sbgc-gimbal = { path = "crates/sbgc-gimbal" }
 tilta-dongle-comms = { path = "crates/tilta-dongle-comms" }
-osd-displayport = { path = "crates/osd-displayport" }
+trinamic = { path = "crates/trinamic" }
 
-strand-bui-backend-session-types = "0.1.1"
-strand-bui-backend-session = "0.1.0"
-strand-cam-remote-control = "0.1.0"
-strand-cam-storetype = "0.1.0"
+strand-bui-backend-session-types.workspace = true
+strand-bui-backend-session.workspace = true
+strand-cam-remote-control.workspace = true
+strand-cam-storetype.workspace = true
 
 # for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
 # sudo apt install librust-alsa-sys-dev
@@ -101,52 +118,67 @@ strand-cam-storetype = "0.1.0"
 [target.'cfg(target_os = "windows")'.dependencies]
 ansi_term = "0.12.1"
 
-[dev-dependencies]
-tempfile = "3"
-
 [workspace.dependencies]
-adskalman = { version = "0.16.0", default-features = false }
+adskalman = { version = "0.17", default-features = false }
 axum = "0.8.1"
 bytes = "1"
-cam-geom = "0.15.1"
+cam-geom = "0.16"
+camino = { version = "1.1.12", features = ["serde1"] }
 chrono = { version = "0.4.38", default-features = false }
 clap = "4.0.10"
 color-eyre = "0.6.3"
 enumflags2 = "0.7.7"
 eyre = "0.6.12"
 futures = "0.3.30"
-if-addrs = "0.11"
+http = "1"
+if-addrs = "0.14"
 image = { version = "0.25", default-features = false }
+indicatif = "0.18"
 log = "0.4.17"
-machine-vision-formats = "0.1.2"
-mavlink = { version = "0.12.2", default-features = false }
+machine-vision-formats = "0.1.5"
+mavlink = { version = "0.17", default-features = false }
 multiwii_serial_protocol_v2 = "0.1.12"
-nalgebra = { version = "0.33.2", default-features = false }
+nalgebra = { version = "0.34", default-features = false }
 num-derive = "0.4.2"
 num-traits = "0.2.19"
-opencv-ros-camera = { version = "0.15.1", features = ["serde-serialize"] }
+opencv-ros-camera = { version = "0.16", features = ["serde-serialize"] }
 preferences-serde1 = "2.0.0"
 serde = { version = "1.0.79", default-features = false }
 serde_json = "1.0.116"
 serde_yaml = "0.9.14"
-thiserror = "1.0.62"
+thiserror = "2"
 tokio = "1"
 tokio-serial = { package = "kioto-serial", version = "0.1.2" }
 tokio-stream = "0.1.15"
 tokio-util = "0.7.4"
-tracing = "0.1.40"
+tracing = { version = "0.1.41", features = ["release_max_level_debug"] }
+tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
 tracing-panic = "0.1.1"
-base64 = "0.6"
+base64 = "0.22"
 flate2 = "1.0"
 
-
+camshow-protocol = { path = "crates/camshow-protocol" }
 flo-core = { path = "crates/flo-core", default-features = false }
+osd-overlay = { path = "crates/osd-overlay" }
 flo-mavlink = { path = "crates/flo-mavlink" }
+h264-recorder = { path = "crates/h264-recorder" }
 osd-displayport = { path = "crates/osd-displayport" }
+osd-utils = { path = "crates/osd-utils" }
 pwm-motor-types = { path = "crates/pwm-motor-types" }
 simplebgc = { path = "crates/simplebgc" }
 simplebgc-derive = { path = "crates/simplebgc-derive" }
 tokio-mavlink = { path = "crates/tokio-mavlink" }
+
+bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+ffmpeg-rewriter = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+ffmpeg-writer = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+frame-source = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+srt-writer = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+strand-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+strand-bui-backend-session-types = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+strand-cam-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+strand-dynamic-frame = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 
 [features]
 default = ["bundle_files"]

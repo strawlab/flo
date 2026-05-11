@@ -9,8 +9,8 @@ extern crate quote;
 use crate::field::*;
 use crate::primitive::*;
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
 use proc_macro_error::*;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::*;
@@ -39,7 +39,7 @@ mod primitive;
 ///
 /// ### `#[kind(payload)]`
 /// Indicates that this struct member is a sub-payload. The member's type must implement
-/// [`simplebgc::payload`].
+/// `simplebgc::Payload`.
 ///
 /// ### `#[kind(raw)]`
 /// Indicates that this struct member is a primitive value. The member's type must be a primitive
@@ -214,12 +214,12 @@ pub fn payload_derive(input: TokenStream) -> TokenStream {
 fn dummy_const_trick<T: quote::ToTokens>(name: &Ident, exp: T) -> TokenStream2 {
     let dummy_const = format_ident!("__IMPL_PAYLOAD_FOR_{}", name);
     quote! {
-        #[allow(non_upper_case_globals, unused_qualifications, non_local_definitions)]
+        #[expect(non_upper_case_globals, unused_qualifications, non_local_definitions)]
         const #dummy_const: () = {
             use bytes::{Bytes, BytesMut, Buf, BufMut};
-            #[allow(unused_imports)]
+            #[expect(unused_imports)]
             use enumflags2::{BitFlags};
-            #[allow(unused_imports)]
+            #[expect(unused_imports)]
             use num_traits::{FromPrimitive, ToPrimitive};
             #exp
         };
@@ -287,20 +287,20 @@ fn get_parser_for_field(info: &FieldInfo) -> Option<TokenStream2> {
             }
 
             match ty {
-                Type::Array(ty) => {
-                    if let Ok(PrimitiveKind::U8) = PrimitiveKind::try_from(ty.elem.as_ref().clone())
-                    {
+                Type::Array(ty) => match PrimitiveKind::try_from(ty.elem.as_ref().clone()) {
+                    Ok(PrimitiveKind::U8) => {
                         let len = &ty.len;
 
                         Some(quote_spanned! {span=>
                             let mut #var = [0u8; #len];
                             _b.copy_to_slice(&mut #var[..]);
                         })
-                    } else {
+                    }
+                    _ => {
                         emit_error!(ty, ERR_RAW_PRIMITIVE);
                         None
                     }
-                }
+                },
                 Type::Tuple(ty) => {
                     let item_parse_stmts = ty
                         .elems
@@ -404,16 +404,12 @@ fn get_serializer_for_field(info: &FieldInfo) -> Option<TokenStream2> {
                 });
             }
             match ty {
-                Type::Array(ty) => {
-                    if let Ok(PrimitiveKind::U8) = PrimitiveKind::try_from(ty.elem.as_ref().clone())
-                    {
-                        Some(quote_spanned! {span=>
-                            _b.extend_from_slice(&#var[..]);
-                        })
-                    } else {
-                        None
-                    }
-                }
+                Type::Array(ty) => match PrimitiveKind::try_from(ty.elem.as_ref().clone()) {
+                    Ok(PrimitiveKind::U8) => Some(quote_spanned! {span=>
+                        _b.extend_from_slice(&#var[..]);
+                    }),
+                    _ => None,
+                },
                 Type::Tuple(ty) => {
                     let item_ser_stmts = ty
                         .elems

@@ -1,0 +1,13 @@
+[package]
+name = "osd-overlay"
+description = "Renders an OSD character canvas onto image frames"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eyre.workspace = true
+image.workspace = true
+machine-vision-formats.workspace = true
+rusttype = "0.9.3"
+
+osd-utils.workspace = true

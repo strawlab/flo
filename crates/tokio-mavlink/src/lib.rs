@@ -1,16 +1,13 @@
 use std::{
-    future::Future,
+    fmt::Debug,
     io::{Read, Write},
-    pin::Pin,
 };
 
-use futures::future::FutureExt;
-
-use mavlink::{error::MessageReadError, MavHeader, MavlinkVersion, Message};
+use mavlink::{MavHeader, MavlinkVersion, Message, error::MessageReadError};
 
 /// ensure that we never instantiate a NeverOk type
 macro_rules! assert_never {
-    ($never: expr) => {{
+    ($never: expr_2021) => {{
         let _: NeverOk = $never;
         unreachable!("NeverOk was instantiated");
     }};
@@ -21,27 +18,26 @@ pub struct MavlinkConnection<M: Message> {
     pub tx: MavlinkSender<M>,
 }
 
-impl<M: Message> MavlinkConnection<M> {
-    pub fn split(self) -> (MavlinkSender<M>, MavlinkReceiver<M>) {
-        (self.tx, self.rx)
-    }
-}
-
 /// An asynchronous implementation of a MAVLink receiver.
 pub struct MavlinkReceiver<M: Message> {
-    read_err: Pin<Box<dyn Future<Output = RecvError> + Send>>,
+    read_err: tokio::sync::oneshot::Receiver<RecvError>,
     reader_rx: tokio::sync::mpsc::Receiver<Result<(MavHeader, M), RecvError>>,
 }
 
-impl<M: Message> MavlinkReceiver<M> {
+impl<M: Message + Debug> MavlinkReceiver<M> {
     pub async fn recv(&mut self) -> Result<(MavHeader, M), RecvError> {
         tokio::select! {
             err = &mut self.read_err => {
-                Err(err)
+                tracing::error!("MavlinkReceiver: read error {err:?}");
+                Err(flatten(err))
             }
             opt_res = self.reader_rx.recv() => {
+                tracing::trace!("MavlinkReceiver::recv() got {opt_res:?}");
                 match opt_res {
-                    None => {Err(RecvError::SenderClosed)},
+                    None => {
+                        tracing::error!("MavlinkReceiver: sender closed");
+                        Err(RecvError::SenderClosed)
+                    },
                     Some(res) => res
                 }
             }
@@ -51,17 +47,32 @@ impl<M: Message> MavlinkReceiver<M> {
 
 /// An asynchronous implementation of a MAVLink sender.
 pub struct MavlinkSender<M: Message> {
-    write_err: Pin<Box<dyn Future<Output = SendError<M>> + Send>>,
+    write_err: tokio::sync::oneshot::Receiver<SendError<M>>,
     writer_tx: tokio::sync::mpsc::Sender<(MavHeader, M)>,
 }
 
 impl<M: Message> MavlinkSender<M> {
+    /// Clone the sender.
+    ///
+    /// This is at least somewhat suboptimal, as a sender cloned this way will
+    /// not perform error checking as done in [`Self::send`].
+    pub fn hacky_clone_tx(&self) -> tokio::sync::mpsc::Sender<(MavHeader, M)> {
+        self.writer_tx.clone()
+    }
+}
+
+impl<M: Message + Debug> MavlinkSender<M> {
     pub async fn send(&mut self, msg: (MavHeader, M)) -> Result<(), SendError<M>> {
+        tracing::trace!("MavlinkSender::send({msg:?})");
         tokio::select! {
             err = &mut self.write_err => {
-                Err(err)
+                tracing::error!("MavlinkSender: write error: {err:?}");
+                Err(flatten2(err))
             }
-            res = self.writer_tx.send(msg) => res.map_err(|se| SendError::MpscSendError(se)),
+            res = self.writer_tx.send(msg) => res.map_err(|se| {
+                tracing::error!("MavlinkSender: send error: {se:?}");
+                SendError::MpscSendError(se)
+            }),
         }
     }
 }
@@ -86,6 +97,8 @@ pub enum SendError<M: Message> {
     OneshotRecv(#[from] tokio::sync::oneshot::error::RecvError),
     #[error("mpsc send error {0}")]
     MpscSendError(tokio::sync::mpsc::error::SendError<(MavHeader, M)>),
+    #[error("MAVLink2 only message")]
+    MAVLink2Only,
 }
 
 impl<M: Message> std::fmt::Debug for SendError<M> {
@@ -96,6 +109,7 @@ impl<M: Message> std::fmt::Debug for SendError<M> {
             SendError::ReceiverClosed => write!(f, "ReceiverClosed"),
             SendError::OneshotRecv(e) => write!(f, "OneshotRecv({e:?})"),
             SendError::MpscSendError(_e) => write!(f, "MpscSendError(_)"),
+            SendError::MAVLink2Only => write!(f, "MAVLink2Only"),
         }
     }
 }
@@ -106,13 +120,14 @@ impl<M: Message> std::fmt::Debug for SendError<M> {
 enum NeverOk {}
 
 /// Read loop, launched on own thread. Returns only on error.
-fn reader<M: Message>(
-    mut rdr: impl Read,
+fn reader<M: Message + std::fmt::Debug>(
+    mut rdr: mavlink::peek_reader::PeekReader<impl Read>,
     tx: tokio::sync::mpsc::Sender<Result<(MavHeader, M), RecvError>>,
     protocol_version: MavlinkVersion,
 ) -> Result<NeverOk, RecvError> {
     loop {
-        match mavlink::read_versioned_msg(&mut rdr, protocol_version) {
+        match mavlink::read_versioned_msg(&mut rdr, mavlink::ReadVersion::Single(protocol_version))
+        {
             Ok(val) => tx.blocking_send(Ok(val)).unwrap(),
             Err(MessageReadError::Io(e)) => {
                 return Err(e.into());
@@ -123,7 +138,7 @@ fn reader<M: Message>(
 }
 
 /// Write loop, launched on own thread. Returns only on error.
-fn writer<M: Message>(
+fn writer<M: Message + std::fmt::Debug>(
     mut wtr: impl Write,
     mut rx: tokio::sync::mpsc::Receiver<(MavHeader, M)>,
     protocol_version: MavlinkVersion,
@@ -137,6 +152,9 @@ fn writer<M: Message>(
         };
         match mavlink::write_versioned_msg(&mut wtr, protocol_version, header, &data) {
             Ok(_sz) => {}
+            Err(mavlink::error::MessageWriteError::MAVLink2Only) => {
+                return Err(SendError::MAVLink2Only);
+            }
             Err(mavlink::error::MessageWriteError::Io(e)) => {
                 return Err(e.into());
             }
@@ -148,7 +166,7 @@ fn writer<M: Message>(
 /// [MavlinkConnection].
 ///
 /// Reading and writing is handled by two newly spawned threads.
-pub fn open<M: Message + Send + 'static>(
+pub fn spawn_mavlink_threads<M: Message + Send + std::fmt::Debug + 'static>(
     rdr: impl Read + Send + 'static,
     wtr: impl Write + Send + 'static,
     read_channel_size: usize,
@@ -157,6 +175,9 @@ pub fn open<M: Message + Send + 'static>(
 ) -> std::io::Result<MavlinkConnection<M>> {
     let (reader_tx, reader_rx) = tokio::sync::mpsc::channel(read_channel_size);
     let (read_thread_result_tx, read_thread_result_rx) = tokio::sync::oneshot::channel();
+    // As below, we do not bother keeping the std::thread::JoinHandle<_> because
+    // we use oneshot channels to signal that the thread has ended.
+    let rdr = mavlink::peek_reader::PeekReader::new(rdr);
     std::thread::spawn(move || match reader(rdr, reader_tx, protocol_version) {
         Ok(never) => assert_never!(never),
         Err(e) => read_thread_result_tx.send(e).unwrap(),
@@ -164,6 +185,8 @@ pub fn open<M: Message + Send + 'static>(
 
     let (writer_tx, writer_rx) = tokio::sync::mpsc::channel(write_channel_size);
     let (write_thread_result_tx, write_thread_result_rx) = tokio::sync::oneshot::channel();
+    // As above, we do not bother keeping the std::thread::JoinHandle<_> because
+    // we use oneshot channels to signal that the thread has ended.
     std::thread::spawn(move || match writer(wtr, writer_rx, protocol_version) {
         Ok(never) => assert_never!(never),
         Err(e) => write_thread_result_tx.send(e).unwrap(),
@@ -171,11 +194,11 @@ pub fn open<M: Message + Send + 'static>(
 
     Ok(MavlinkConnection {
         rx: MavlinkReceiver {
-            read_err: Box::pin(read_thread_result_rx.map(flatten)),
+            read_err: read_thread_result_rx,
             reader_rx,
         },
         tx: MavlinkSender {
-            write_err: Box::pin(write_thread_result_rx.map(flatten2)),
+            write_err: write_thread_result_rx,
             writer_tx,
         },
     })

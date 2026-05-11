@@ -1,7 +1,7 @@
 use eyre::{Result, WrapErr};
 use futures::{
-    stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
 };
 use simplebgc::{IncomingCommand, OutgoingCommand, ParamsQuery, Payload, RollPitchYaw, V2Codec};
 use std::time::Duration;
@@ -250,7 +250,10 @@ async fn run_gimbal_loop_internal(
                                 // to degrees
                                 let (_roll, pitch, yaw) =
                                     (roll * 360.0, pitch * 360.0, yaw * 360.0);
-                                (Angle::from_degrees(yaw), Angle::from_degrees(pitch))
+                                (
+                                    Angle::from_degrees(yaw).constrained_signed(),
+                                    Angle::from_degrees(pitch).constrained_signed(),
+                                )
                             };
 
                             let (pan_imu, tilt_imu) = {
@@ -288,7 +291,7 @@ async fn run_gimbal_loop_internal(
                                 )
                             };
 
-                            let (vpan_imu, vtilt_imu) = {
+                            let vpan_vtilt_imu = {
                                 //convert imu rotation rates
                                 let (roll, pitch, yaw) = (
                                     msg_data.gyro_data.roll,
@@ -303,10 +306,8 @@ async fn run_gimbal_loop_internal(
                                     pitch as FloatType * UNIT,
                                     yaw as FloatType * UNIT,
                                 );
-                                (
-                                    Some(yaw * pan_rev),
-                                    Some(-roll * tilt_rev), //why not pitch? probably it is because of how imu is mounted
-                                )
+
+                                Some((yaw * pan_rev, -roll * tilt_rev)) //why not pitch? probably it is because of how imu is mounted
                             };
 
                             let ret = MotorPositionResult {
@@ -315,8 +316,7 @@ async fn run_gimbal_loop_internal(
                                 tilt_enc,
                                 pan_imu,
                                 tilt_imu,
-                                vpan_imu,
-                                vtilt_imu,
+                                vpan_vtilt_imu,
                             };
 
                             motor_position_tx.send(ret).await.unwrap();
@@ -332,7 +332,7 @@ async fn run_gimbal_loop_internal(
                 }
             }
         }
-        #[allow(unreachable_code)]
+        #[expect(unreachable_code)]
         Ok::<_, InternalGimbalError>(())
     };
 
@@ -452,7 +452,7 @@ async fn run_gimbal_loop_internal(
             // 0.5 seconds or so, instead of almost immediately.
             tokio::time::sleep(Duration::from_secs_f64(0.015)).await;
         }
-        #[allow(unreachable_code)]
+        #[expect(unreachable_code)]
         Ok::<_, eyre::Error>(())
     };
 
@@ -469,7 +469,6 @@ async fn run_gimbal_loop_internal(
         }
     }
 
-    #[allow(unreachable_code)]
     Ok(())
 }
 

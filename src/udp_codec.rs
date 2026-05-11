@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use bytes::{buf::Buf, BytesMut};
+use bytes::{BytesMut, buf::Buf};
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::UdpMsg;

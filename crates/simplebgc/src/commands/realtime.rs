@@ -1,6 +1,6 @@
 use crate::*;
 use bytes::{BufMut, Bytes, BytesMut};
-use enumflags2::{bitflags, BitFlags};
+use enumflags2::{BitFlags, bitflags};
 
 #[bitflags]
 #[derive(Copy, Clone, Debug, PartialEq)]

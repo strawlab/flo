@@ -103,7 +103,7 @@ macro_rules! payload_rpy {
     };
 }
 
-///representation of 24-bit signed integer, for encoder data sbgc messages
+/// 24-bit signed integer, used in SimpleBGC encoder data messages.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct I24(i32);
 

@@ -2,7 +2,7 @@
 name = "platform-uuid"
 version = "0.1.0"
 authors = ["Andrew Straw <strawman@astraw.com>"]
-edition = "2021"
+edition = "2024"
 
 [target.'cfg(any(target_os = "macos"))'.dependencies]
 libc = "0.2"

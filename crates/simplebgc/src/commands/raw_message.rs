@@ -9,7 +9,7 @@ pub struct RawMessage {
 }
 
 impl Payload for RawMessage {
-    ///leaves typ unfilled!
+    /// Note: leaves `typ` unfilled (set to 0).
     fn from_bytes(b: Bytes) -> Result<Self, PayloadParseError>
     where
         Self: Sized,

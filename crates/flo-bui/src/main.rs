@@ -4,7 +4,7 @@ use std::fmt;
 
 use gloo_events::EventListener;
 use gloo_timers::callback::Interval;
-use wasm_bindgen::{prelude::*, JsCast, JsValue};
+use wasm_bindgen::{JsCast, JsValue, prelude::*};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Event, EventSource, Gamepad, GamepadEvent, MessageEvent};
 
@@ -55,6 +55,7 @@ impl std::fmt::Display for DistanceMeters {
 
 struct App {
     floz_recording_path: Option<RecordingPath>,
+    webcam_recording_path: Option<RecordingPath>,
     pan_center_degrees: TypedInputStorage<AngleDegrees>,
     tilt_center_degrees: TypedInputStorage<AngleDegrees>,
     distance_center: TypedInputStorage<DistanceMeters>,
@@ -179,6 +180,7 @@ impl Component for App {
         Self {
             es,
             floz_recording_path: None,
+            webcam_recording_path: None,
             pan_center_degrees: TypedInputStorage::from_initial(AngleDegrees(0.0)),
             tilt_center_degrees: TypedInputStorage::from_initial(AngleDegrees(0.0)),
             distance_center: TypedInputStorage::from_initial(DistanceMeters(0.5)),
@@ -207,7 +209,7 @@ impl Component for App {
                 }
             }
             Msg::GamepadInterval => {
-                if let Some(cfg) = self.cfg.as_ref().map(Clone::clone) {
+                if let Some(cfg) = self.cfg.clone() {
                     self.handle_gamepad_interval(ctx, cfg);
                 }
             }
@@ -244,17 +246,16 @@ impl Component for App {
             }
 
             Msg::SetHomePosition => {
-                if let Ok(pan) = self.pan_center_degrees.parsed() {
-                    if let Ok(tilt) = self.tilt_center_degrees.parsed() {
-                        if let Ok(distance) = self.distance_center.parsed() {
-                            let msg = flo_core::FloCommand::SetHomePosition((
-                                Some(Angle::from_degrees(pan.0)),
-                                Some(Angle::from_degrees(tilt.0)),
-                                Some(RadialDistance::new(distance.0)),
-                            ));
-                            self.send_message(msg, ctx);
-                        }
-                    }
+                if let Ok(pan) = self.pan_center_degrees.parsed()
+                    && let Ok(tilt) = self.tilt_center_degrees.parsed()
+                    && let Ok(distance) = self.distance_center.parsed()
+                {
+                    let msg = flo_core::FloCommand::SetHomePosition((
+                        Some(Angle::from_degrees(pan.0)),
+                        Some(Angle::from_degrees(tilt.0)),
+                        Some(RadialDistance::new(distance.0)),
+                    ));
+                    self.send_message(msg, ctx);
                 }
                 return false; // don't update DOM, do that on return
             }
@@ -290,10 +291,12 @@ impl Component for App {
                                 self.tilt_center_degrees
                                     .set_if_not_focused(AngleDegrees(home_tilt_deg));
                                 self.distance_center.set_if_not_focused(DistanceMeters(
-                                    new_state.home_position.2 .0,
+                                    new_state.home_position.2.0,
                                 ));
 
                                 self.floz_recording_path = new_state.floz_recording_path.clone();
+                                self.webcam_recording_path =
+                                    new_state.webcam_recording_path.clone();
                                 self.last_state = Some(new_state);
                             }
                             BuiEventData::Config(cfg) => {
@@ -454,10 +457,10 @@ impl App {
 
             self.last_gamepad_timestamp = timestamp;
 
-            if buttons[0] == true {
+            if buttons[0] {
                 ctx.link().send_message(Msg::SwitchToClosedLoop)
             }
-            if buttons[1] == true {
+            if buttons[1] {
                 ctx.link().send_message(Msg::SwitchToOpenLoop)
             }
 
@@ -584,11 +587,16 @@ impl App {
             };
             let pan_deg = format!("{:.1}°", state.cached_motors.pan.degrees());
             let tilt_deg = format!("{:.1}°", state.cached_motors.tilt.degrees());
+            let cam_state = state.cam_stale.as_msg();
             html! {
                 <div>
                     <div class="qqblock">
                        <div class="qqkey">{ "Mode" }</div>
                        <div class="qqvalue"> {format!("{}", state.mode) } </div>
+                    </div>
+                    <div class="qqblock">
+                        <div class="qqkey">{ "Current Cam Data?" }</div>
+                        <div class="qqvalue"> {cam_state} </div>
                     </div>
                     <div class="qqblock">
                         <div class="qqkey">{ "Distance" }</div>
@@ -613,7 +621,7 @@ impl App {
                 </div>
             }
         } else {
-            "".to_html()
+            html! {}
         }
     }
 

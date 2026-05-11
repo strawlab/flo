@@ -1,6 +1,6 @@
 use crate::*;
 use bytes::{BufMut, Bytes, BytesMut};
-use enumflags2::{bitflags, BitFlags};
+use enumflags2::{BitFlags, bitflags};
 use num_traits::*;
 
 #[derive(BgcPayload, Copy, Clone, Debug, PartialEq)]
@@ -412,7 +412,7 @@ pub enum FiltersEnFlags {
 
 #[derive(FromPrimitive, ToPrimitive, Copy, Clone, Debug, PartialEq)]
 #[repr(u8)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types)]
 #[rustfmt::skip]
 pub enum EncoderType {
     AS5048A    = 1,
@@ -723,7 +723,7 @@ pub struct ParamsExtData {
     #[size(3)]
     pub filters_en: RollPitchYaw<u8>, //RollPitchYaw<BitFlags<FiltersEnFlags>>, but it does not work, not sure how to implement
 
-    ///units: 0.02197265625 deg, aka 2^14 units per turn
+    /// Units: 0.02197265625 deg (2^14 units per turn).
     #[kind(payload)]
     #[size(6)]
     pub encoder_offset: RollPitchYaw<i16>,
@@ -751,22 +751,22 @@ pub struct ParamsExtData {
     #[kind(raw)]
     pub follow_inside_deadband: u8,
 
-    ///deprecated
+    /// Deprecated.
     #[kind(payload)]
     #[size(3)]
     pub motor_mag_link: RollPitchYaw<u8>,
 
-    ///8.8 fixed-point (1.0f <-> 256)
+    /// 8.8 fixed-point format (1.0 ↔ 256).
     #[kind(payload)]
     #[size(6)]
     pub motor_gearing: RollPitchYaw<u16>,
 
-    ///deprecated
+    /// Deprecated.
     #[kind(payload)]
     #[size(3)]
     pub motor_coolingencoder_limit_min: RollPitchYaw<i8>,
 
-    ///deprecated
+    /// Deprecated.
     #[kind(payload)]
     #[size(3)]
     pub motor_coolingencoder_limit_max: RollPitchYaw<i8>,
@@ -786,7 +786,7 @@ pub struct ParamsExtData {
     #[kind(raw)]
     pub beeper_volume: u8,
 
-    ///unit: 0.001
+    /// Units: 0.001.
     #[kind(payload)]
     #[size(6)]
     pub encoder_gear_ratio: RollPitchYaw<u16>,
@@ -818,7 +818,7 @@ pub struct ParamsExtData {
     #[kind(raw)]
     pub mag_trust: u8,
 
-    ///unit: 1 degree
+    /// Units: 1 degree.
     #[kind(raw)]
     pub mag_declination: i8,
 

@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TitlaFocusDongleMessage {
     VersionRequest,
-    ///check this against TitlaFocusDongleMessage::VERSION
+    /// Check against [`TitlaFocusDongleMessage::VERSION`].
     VersionResponse(u16),
     // Ping([u8; 8]),
     // Pong([u8; 8]),
-    ///position is 0 to 4095 for full range of focus ring motion
+    /// Position is 0 to 4095 for full range of focus ring motion.
     SetPos(i32),
 }
 

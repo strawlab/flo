@@ -1,4 +1,4 @@
-use simplebgc::{Payload, PayloadParseError, I24};
+use simplebgc::{I24, Payload, PayloadParseError};
 use simplebgc_derive::BgcPayload;
 
 #[derive(BgcPayload, Clone, Debug, PartialEq)]
@@ -6,12 +6,12 @@ pub struct RealTimeDataCustomFlo {
     #[kind(raw)]
     pub timestamp_ms: u16,
 
-    ///unit: 0.02197265625 deg
+    /// Unit: 0.02197265625 deg.
     #[kind(payload)]
     #[size(6)]
     pub imu_angles: simplebgc::RollPitchYaw<i16>,
 
-    ///unit: 0.06103701895 deg/s
+    /// Unit: 0.06103701895 deg/s.
     #[kind(payload)]
     #[size(6)]
     pub gyro_data: simplebgc::RollPitchYaw<i16>,
@@ -26,7 +26,7 @@ pub struct RequestStreamIntervalCustom {
     #[kind(raw)]
     pub cmd_id: u8,
 
-    ///milliseconds or sample ratedivisor, depending on sync_to_data
+    /// Milliseconds or sample rate divisor, depending on `sync_to_data`.
     #[kind(raw)]
     pub interval: u16,
 

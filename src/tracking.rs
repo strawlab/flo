@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use nalgebra as na;
 
 use flo_core::{
-    motion_model, sq, Angle, Broadway, CentroidToAngleCalibration, DeviceMode, DeviceState,
-    FloControllerConfig, FloatType, FocusMotorType, ModeChangeReason, MomentCentroid,
-    MotorPositionResult, MotorType, RadialDistance, SensorAngle2D, StereopsisState, TrackingState,
+    Angle, Broadway, CentroidToAngleCalibration, DeviceMode, DeviceState, FloControllerConfig,
+    FloatType, FocusMotorType, ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType,
+    RadialDistance, SensorAngle2D, StereopsisState, TrackingState, motion_model, sq,
 };
 
 ///returns position and velocity after dt, given init. pos,  velocity, and acceleration limit,
@@ -44,13 +44,13 @@ fn predict_stepper(
     } else if dt < t2 {
         let xsw = x0 + v0 * t1 + 0.5 * a1 * t1 * t1; //position where phase2 began
         let dt2 = dt - t1; //time since phase2 began
-        return (
+        (
             xsw + vtop_signed * dt2 - 0.5 * a2 * dt2 * dt2,
             vtop_signed + a2 * dt2,
-        );
+        )
     } else {
         //target reached, standing still
-        return (x1, 0.0);
+        (x1, 0.0)
     }
 }
 
@@ -104,7 +104,7 @@ pub(crate) fn centroid_to_sensor_angles(
 }
 
 /// Updates tracking_state. {pan_obs, tilt_obs, kalman_estimates, last_observation}
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn kalman_step(
     tracking_state: &mut TrackingState,
     cfg: &FloControllerConfig,
@@ -144,19 +144,17 @@ pub(crate) fn kalman_step(
         tracking_state.last_motor_readout = Some(motor_readout.clone());
         let cam_pan = motor_readout.pan_imu.0;
         let cam_tilt = motor_readout.tilt_imu.0;
-        let (cam_vpan, cam_vtilt) = if motor_readout.vpan_imu.is_some() {
-            //use gyro if available ...
-            (
-                motor_readout.vpan_imu.unwrap(),
-                motor_readout.vtilt_imu.unwrap(),
-            )
-        } else {
-            //... otherwise, use prediction
-            (
-                tracking_state.pan_velocity.0,
-                tracking_state.tilt_velocity.0,
-            )
-        };
+        let (cam_vpan, cam_vtilt) =
+            if let Some((vpan_imu, vtilt_imu)) = motor_readout.vpan_vtilt_imu {
+                //use gyro if available ...
+                (vpan_imu, vtilt_imu)
+            } else {
+                //... otherwise, use prediction
+                (
+                    tracking_state.pan_velocity.0,
+                    tracking_state.tilt_velocity.0,
+                )
+            };
 
         // Offset based on where motors were pointing.
         (pan_observed, tilt_observed) = (
@@ -334,7 +332,9 @@ pub(crate) fn kalman_step(
                 }
             }
             None => {
-                unreachable!("Somehow ended up in ClosedLoop without any prior observation. Should't happen.")
+                unreachable!(
+                    "Somehow ended up in ClosedLoop without any prior observation. Should't happen."
+                )
                 //next_mode = Some(DeviceMode::AcquiringLock);
             }
         },
@@ -349,15 +349,15 @@ pub(crate) fn kalman_step(
                     }
                 }
                 None => {
-                    unreachable!("Somehow ended up in SuspendedClosedLoop without any prior observation. Should't happen.");
+                    unreachable!(
+                        "Somehow ended up in SuspendedClosedLoop without any prior observation. Should't happen."
+                    );
                     // Some(DeviceMode::AcquiringLock);
                 }
             }
         }
-        DeviceMode::AcquiringLock => {
-            if !is_nan(sensor_x) && !is_nan(sensor_y) {
-                next_mode = Some((DeviceMode::ClosedLoop, ModeChangeReason::TargetAcqiured));
-            }
+        DeviceMode::AcquiringLock if !is_nan(sensor_x) && !is_nan(sensor_y) => {
+            next_mode = Some((DeviceMode::ClosedLoop, ModeChangeReason::TargetAcqiured));
         }
         _ => {}
     }
@@ -442,35 +442,10 @@ pub(crate) fn compute_motor_output(
     tracking_state: &mut TrackingState,
     device_state: &DeviceState,
     cfg: &FloControllerConfig,
-    broadway: &mut Broadway,
     dt_secs: FloatType,
 ) {
     let is_imu =
         !tracking_state.mode.is_rel_frame() && device_state.motor_type == MotorType::Gimbal;
-
-    //target position estimate for sending to broadway
-    let mut t_est = if let Some(kalman_estimates) = &tracking_state.kalman_estimates {
-        let (dist, vdist) =
-            if let Some(kalman_dist_estimates) = &tracking_state.kalman_estimates_distance {
-                (
-                    Some(kalman_dist_estimates.0.state()[0]),
-                    Some(kalman_dist_estimates.0.state()[1]),
-                )
-            } else {
-                (None, None)
-            };
-        Some(flo_core::TargetEstimate {
-            timestamp: chrono::Local::now(),
-            target_pan: kalman_estimates.0.state()[0],
-            target_tilt: kalman_estimates.0.state()[1],
-            target_vpan: kalman_estimates.0.state()[2],
-            target_vtilt: kalman_estimates.0.state()[3],
-            dist: dist.map(RadialDistance),
-            vdist,
-        })
-    } else {
-        None
-    };
 
     let (pan_min, pan_max) = {
         if !is_imu {
@@ -508,30 +483,12 @@ pub(crate) fn compute_motor_output(
             device_state.home_position.2,
             0.0,
         ),
-        DeviceMode::SuspendedClosedLoop => {
-            //override target position estimate with last seen observation
-            let dist = if tracking_state.dist_obs != 0.0 {
-                Some(RadialDistance(tracking_state.dist_obs))
-            } else {
-                None
-            };
-            t_est = Some(flo_core::TargetEstimate {
-                timestamp: chrono::Local::now(),
-                target_pan: tracking_state.pan_obs,
-                target_tilt: tracking_state.tilt_obs,
-                target_vpan: 0.0,
-                target_vtilt: 0.0,
-                dist,
-                vdist: dist.map(|_x| 0.0),
-            });
-
-            (
-                Angle(tracking_state.pan_obs.clamp(pan_min, pan_max)), //clamping conditions can change as the drone yaws because encoder<->imu offset changes, so clamp here too.
-                Angle(tracking_state.tilt_obs),
-                RadialDistance(tracking_state.dist_obs),
-                0.0,
-            )
-        }
+        DeviceMode::SuspendedClosedLoop => (
+            Angle(tracking_state.pan_obs.clamp(pan_min, pan_max)), //clamping conditions can change as the drone yaws because encoder<->imu offset changes, so clamp here too.
+            Angle(tracking_state.tilt_obs),
+            RadialDistance(tracking_state.dist_obs),
+            0.0,
+        ),
         DeviceMode::ClosedLoop => {
             if tracking_state.kalman_estimates.is_none() {
                 // We have no estimated sensor input, so we cannot close the
@@ -642,15 +599,6 @@ pub(crate) fn compute_motor_output(
             )
         }
     };
-
-    if let Some(t_est) = t_est {
-        let ret = broadway
-            .flo_motion
-            .send(flo_core::FloMotionEvent::TargetEstimate(t_est));
-        if let Err(e) = ret {
-            tracing::error!("sending estimate to broadway failed:{e}");
-        }
-    }
 
     tracking_state.pan_command = pan_command;
     tracking_state.tilt_command = tilt_command;

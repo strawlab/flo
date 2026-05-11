@@ -1,0 +1,18 @@
+[package]
+name = "camshow-protocol"
+description = "Wire protocol between flo and camshow"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde.workspace = true
+camino.workspace = true
+chrono = { workspace = true, features = ["serde", "clock"] }
+tokio-util = { workspace = true, features = ["codec"] }
+json-lines = { version = "0.1.1", features = ["codec"] }
+
+osd-utils.workspace = true
+strand-cam-remote-control.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

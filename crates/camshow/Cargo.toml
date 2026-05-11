@@ -1,0 +1,47 @@
+[package]
+name = "camshow"
+description = "Webcam viewer with OSD overlay; receives canvas + recording control from flo over localhost"
+version = "0.1.0"
+edition = "2024"
+authors = [
+  "Andrew Straw <strawman@astraw.com>",
+  "Victor V. Titov <vv.titov@gmail.com>",
+  "Stephan Lochner <lochner@bio.uni-freiburg.de>",
+]
+
+[dependencies]
+camino.workspace = true
+chrono = { workspace = true, default-features = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
+color-eyre.workspace = true
+eyre.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = "0.3.36"
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["codec"] }
+tracing.workspace = true
+tracing-panic.workspace = true
+tracing-subscriber.workspace = true
+
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+] }
+image.workspace = true
+machine-vision-formats.workspace = true
+nokhwa = { version = "0.10.9", features = ["input-native"] }
+
+bg-movie-writer.workspace = true
+srt-writer.workspace = true
+strand-cam-remote-control.workspace = true
+strand-dynamic-frame.workspace = true
+
+camshow-protocol.workspace = true
+osd-overlay.workspace = true
+osd-utils.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ansi_term = "0.12.1"

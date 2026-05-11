@@ -13,21 +13,21 @@ pub enum FocusMotorType {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct FocusMotorConfig {
     pub motor: FocusMotorType,
-    ///min motor position in motor units (microsteps)
+    /// Minimum motor position (motor units / microsteps).
     pub min_pos: FloatType,
-    ///max motor position in motor units
+    /// Maximum motor position (motor units / microsteps).
     pub max_pos: FloatType,
-    ///focus offset in motor units (startup value and interactive adjustment)
+    /// Focus offset in motor units; startup value, also adjustable interactively.
     pub pos_offset: FloatType,
-    ///how much to change focus offset for one bui button press
+    /// Change in focus offset per BUI button press (motor units).
     pub adjust_step: FloatType,
-    ///position to assume when system starts; position to go to when shutting down (motor units)
+    /// Motor position at startup and shutdown (motor units).
     pub park_position: FloatType,
-    ///position to go to when stopping tracking
+    /// Object distance at which to position focus when stopping tracking.
     pub home_position: RadialDistance,
-    ///(motor units)
+    /// Backlash compensation amount (motor units).
     pub backlash: FloatType,
-    ///(motor units)
+    /// Noise gate threshold below which position changes are ignored (motor units).
     pub noise_gate: FloatType,
     pub cal: FocusCalibration,
 }
@@ -51,14 +51,14 @@ impl Default for FocusMotorConfig {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct FocusCalibration {
-    ///distance offset: difference between stereopsis origin and lens calibration function origin
+    /// Distance offset: difference between the stereopsis origin and the lens calibration function origin.
     pub distance_offset: RadialDistance,
-    ///a0,a1,a2,a3 are polynomial coefficients for conversion formula mot_pos = a0 + a1/r^1 + a2/r^2 + a3/r^3
+    /// Polynomial coefficients: `mot_pos = a0 + a1/r + a2/r² + a3/r³`.
     pub a0: FloatType,
     pub a1: FloatType,
     pub a2: FloatType,
     pub a3: FloatType,
-    ///minimum distance the cal is valid for (typ. equal to the closest the lens can focus)
+    /// Minimum distance the calibration is valid for (typically the closest focus distance of the lens).
     pub min_dist: RadialDistance,
     pub max_dist: RadialDistance,
 }
@@ -82,7 +82,7 @@ impl FocusCalibration {
     pub fn convert(&self, r: RadialDistance, pos_offset: FloatType) -> FloatType {
         self.convert_with_deriv(r, pos_offset).0
     }
-    ///derivative of convert() by r
+    /// Returns `(motor_position, d(motor_position)/dr)` — same value as [`Self::convert`] plus its derivative with respect to `r`.
     pub fn convert_with_deriv(
         &self,
         r: RadialDistance,
@@ -99,10 +99,12 @@ impl FocusCalibration {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct TrinamicFocusConfig {
     pub port: String,
+    /// Override for speed limit (microstep/s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed_limit: Option<FloatType>, // [microstep/s]
+    pub speed_limit: Option<FloatType>,
+    /// Override for acceleration (microstep/s²).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceleration: Option<FloatType>, // [microstep/s^2]
+    pub acceleration: Option<FloatType>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]

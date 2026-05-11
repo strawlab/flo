@@ -1,28 +1,27 @@
 use std::io::Write;
 
-use flo_core::{osd_structs::Align, sq, Angle, FloatType};
+use flo_core::{Angle, FloatType, osd_structs::Align, sq};
 use osd_displayport::displayport_messages;
 
-#[allow(unused)]
 mod osd_symbols {
     //see https://betaflight.com/docs/development/osd-glyps
 
     pub const SYM_M: u8 = 0x0c;
     pub const SYM_STICK_OVERLAY_VERTICAL: u8 = 0x16;
     pub const SYM_STICK_OVERLAY_HORIZONTAL: u8 = 0x17;
-    ///also the first in a total of 16 arrows (ccw)
+    /// Also the first in a total of 16 arrows (CCW).
     pub const SYM_ARROW_SOUTH: u8 = 0x60;
     pub const X75: u8 = 0x75;
     pub const X76: u8 = 0x76;
     pub const X77: u8 = 0x77;
     pub const X78: u8 = 0x78;
-    ///total 7 symbols, from full to empty
+    /// Total 7 symbols, from full to empty.
     pub const SYM_BATT_FULL: u8 = 0x90;
 }
 use multiwii_serial_protocol_v2::MspPacket;
 pub use osd_symbols::*;
 
-///return arrow character closest to the given direction (0 angle ls ccw from rightward)
+/// Returns the arrow character closest to the given direction (0 angle is CCW from rightward).
 fn arrow_char(dir: Angle) -> u8 {
     let turn = core::f64::consts::TAU as FloatType;
     let dir_rel_south = Angle(dir.0 + turn / 4.0).constrained_unsigned().0 + turn; //+turn to be super duper sure it's positive, because remainder operator has stupid habit of being negative for negative numbers
@@ -30,7 +29,7 @@ fn arrow_char(dir: Angle) -> u8 {
     (char_index % 16) as u8 + SYM_ARROW_SOUTH
 }
 
-///returns arrow character pointing towards a given screen point
+/// Returns the arrow character pointing towards a given screen point.
 pub fn arrow_towards(
     cal: &flo_core::osd_structs::LoadedFpvCameraOSDCalibration,
     charpos: (i32, i32),
@@ -41,7 +40,7 @@ pub fn arrow_towards(
     arrow_char(Angle(dir))
 }
 
-///creates a list of character coordinates sorted by proximity to given screen coordinates
+/// Returns character coordinates sorted by proximity to the given screen coordinates.
 pub fn char_blob(
     cal: &flo_core::osd_structs::LoadedFpvCameraOSDCalibration,
     screenpos: (FloatType, FloatType),
@@ -72,11 +71,12 @@ where
     S: serde::Serializer,
 {
     // use serde::ser::Error;
+    use base64::Engine;
 
     let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
     enc.write_all(chars).unwrap();
     let compressed = enc.finish().unwrap();
-    let base64_buf = base64::encode(&compressed);
+    let base64_buf = base64::engine::general_purpose::STANDARD.encode(&compressed);
     serializer.serialize_str(&base64_buf)
 }
 
@@ -84,15 +84,18 @@ fn deserialize_chars<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::{de::Error, Deserialize};
+    use base64::Engine;
+    use serde::{Deserialize, de::Error};
 
     let base64_encoded = String::deserialize(deserializer)?;
-    let compressed = base64::decode(&base64_encoded).map_err(|_decode_error| {
-        D::Error::invalid_value(
-            serde::de::Unexpected::Str(&base64_encoded),
-            &"base64 encoded string",
-        )
-    })?;
+    let compressed = base64::engine::general_purpose::STANDARD
+        .decode(&base64_encoded)
+        .map_err(|_decode_error| {
+            D::Error::invalid_value(
+                serde::de::Unexpected::Str(&base64_encoded),
+                &"base64 encoded string",
+            )
+        })?;
 
     let mut writer = Vec::new();
     let mut deflater = flate2::write::DeflateDecoder::new(writer);
@@ -113,7 +116,7 @@ pub struct OsdCache {
     pub h: i32,
 }
 
-///a character canvas that can then group adjacent characters into strings to send them efficiently
+/// A character canvas that groups adjacent characters into strings for efficient sending.
 impl OsdCache {
     pub fn new(w: i32, h: i32) -> Self {
         let chars = vec![0; (w * h) as usize];
@@ -139,7 +142,7 @@ impl OsdCache {
         }
     }
 
-    ///supports negative indexing like python
+    /// Supports negative indexing (like Python).
     pub fn print(&mut self, s: &[u8], mut x: i32, y: i32, align: Align) {
         if align == Align::Right {
             x -= s.len() as i32 - 1;
@@ -181,11 +184,11 @@ impl OsdCache {
                     } else {
                         packet_range = Some((x, x + 1));
                     }
-                } else if let Some((x0, x1)) = packet_range {
-                    if x - x1 > MSP_OVERHEAD {
-                        push_packet(x0, x1, y);
-                        packet_range = None;
-                    }
+                } else if let Some((x0, x1)) = packet_range
+                    && x - x1 > MSP_OVERHEAD
+                {
+                    push_packet(x0, x1, y);
+                    packet_range = None;
                 }
             }
             if let Some((x0, x1)) = packet_range {
@@ -200,31 +203,95 @@ impl OsdCache {
     }
 }
 
-#[test]
-fn test_serde_rt() {
+/// Build a 30×16 canvas with every kind of OSD glyph (corner labels, the 16
+/// arrow directions, the battery ramp, and the misc symbols) so a viewer can
+/// confirm the font/rendering pipeline is working without flo connected.
+pub fn test_pattern() -> OsdCache {
+    use flo_core::osd_structs::Align;
+
     let mut canvas = OsdCache::new(30, 16);
-    canvas.print(b"TOP LEFT", 0, 0, flo_core::osd_structs::Align::Left);
+    canvas.print(b"TOP LEFT", 0, 0, Align::Left);
+    canvas.print(b"TOP RIGHT", -1, 0, Align::Right);
+    canvas.print(b"BOTTOM LEFT", 0, -1, Align::Left);
+    canvas.print(b"BOTTOM RIGHT", -1, -1, Align::Right);
+
     let arrows: Vec<u8> = (SYM_ARROW_SOUTH..SYM_ARROW_SOUTH + 16).collect();
-    canvas.print(&arrows, 0, 1, flo_core::osd_structs::Align::Left);
+    canvas.print(&arrows, 0, 1, Align::Left);
+
     let batts: Vec<u8> = (SYM_BATT_FULL..SYM_BATT_FULL + 6).collect();
-    canvas.print(&batts, 0, 2, flo_core::osd_structs::Align::Left);
+    canvas.print(&batts, 0, 2, Align::Left);
+
     canvas.print(
         &[SYM_STICK_OVERLAY_VERTICAL, SYM_STICK_OVERLAY_HORIZONTAL],
         0,
         3,
-        flo_core::osd_structs::Align::Left,
+        Align::Left,
     );
-    canvas.print(
-        &[X75, X76, X77, X78],
-        0,
-        4,
-        flo_core::osd_structs::Align::Left,
-    );
-    canvas.print(b"TOP RIGHT", -1, 0, flo_core::osd_structs::Align::Right);
-    canvas.print(b"BOTTOM LEFT", 0, -1, flo_core::osd_structs::Align::Left);
-    canvas.print(b"BOTTOM RIGHT", -1, -1, flo_core::osd_structs::Align::Right);
+    canvas.print(&[X75, X76, X77, X78], 0, 4, Align::Left);
 
-    let encoded = serde_json::to_string(&canvas).unwrap();
-    let decoded = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(canvas, decoded);
+    canvas
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serde_rt() {
+        let mut canvas = OsdCache::new(30, 16);
+        canvas.print(b"TOP LEFT", 0, 0, flo_core::osd_structs::Align::Left);
+        let arrows: Vec<u8> = (SYM_ARROW_SOUTH..SYM_ARROW_SOUTH + 16).collect();
+        canvas.print(&arrows, 0, 1, flo_core::osd_structs::Align::Left);
+        let batts: Vec<u8> = (SYM_BATT_FULL..SYM_BATT_FULL + 6).collect();
+        canvas.print(&batts, 0, 2, flo_core::osd_structs::Align::Left);
+        canvas.print(
+            &[SYM_STICK_OVERLAY_VERTICAL, SYM_STICK_OVERLAY_HORIZONTAL],
+            0,
+            3,
+            flo_core::osd_structs::Align::Left,
+        );
+        canvas.print(
+            &[X75, X76, X77, X78],
+            0,
+            4,
+            flo_core::osd_structs::Align::Left,
+        );
+        canvas.print(b"TOP RIGHT", -1, 0, flo_core::osd_structs::Align::Right);
+        canvas.print(b"BOTTOM LEFT", 0, -1, flo_core::osd_structs::Align::Left);
+        canvas.print(b"BOTTOM RIGHT", -1, -1, flo_core::osd_structs::Align::Right);
+
+        let encoded = serde_json::to_string(&canvas).unwrap();
+        let decoded = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(canvas, decoded);
+    }
+
+    // This test data ensures the format of the serialized data remains stable.
+    const RAW_CHARS: &[u8] = b"abc\0def\xF0\x9F\x98\x80";
+    const RAW_W: i32 = 12;
+    const RAW_H: i32 = 34;
+    const ENCODED: &str = "{\"chars\":\"S0xKZkhJTfswf0YDAA==\",\"w\":12,\"h\":34}";
+
+    #[test]
+    fn test_decode() {
+        let x = serde_json::from_str::<OsdCache>(ENCODED).unwrap();
+        assert_eq!(&x.chars, RAW_CHARS);
+        assert_eq!(x.w, RAW_W);
+        assert_eq!(x.h, RAW_H);
+    }
+
+    #[test]
+    fn test_encode() {
+        let raw = OsdCache {
+            chars: RAW_CHARS.to_vec(),
+            w: RAW_W,
+            h: RAW_H,
+        };
+        let encoded = serde_json::to_string(&raw).unwrap();
+        // Don't compare the raw encoded string, as json formatting may change
+        // slightly. Rather decode it and check the source data is unchanged.
+        let x = serde_json::from_str::<OsdCache>(&encoded).unwrap();
+        assert_eq!(&x.chars, RAW_CHARS);
+        assert_eq!(x.w, RAW_W);
+        assert_eq!(x.h, RAW_H);
+    }
 }

@@ -1,15 +1,16 @@
 use axum::{
+    Json,
     extract::State,
     response::{
-        sse::{Event, Sse},
         IntoResponse,
+        sse::{Event, Sse},
     },
     routing::{get, post},
-    Json,
 };
+use base64::Engine;
 use eyre as anyhow;
 use futures_util::stream::Stream;
-use http::{header::ACCEPT, request::Parts, StatusCode};
+use http::{StatusCode, header::ACCEPT, request::Parts};
 use preferences_serde1::{AppInfo, Preferences};
 use std::{
     convert::Infallible,
@@ -19,7 +20,7 @@ use std::{
 use tokio::sync::watch;
 use tower_http::trace::TraceLayer;
 
-use flo_core::{BuiEventData, DeviceState, FloCommand, FloControllerConfig, FloEvent, EVENT_NAME};
+use flo_core::{BuiEventData, DeviceState, EVENT_NAME, FloCommand, FloControllerConfig, FloEvent};
 
 pub const APP_INFO: AppInfo = AppInfo {
     name: "flo",
@@ -232,13 +233,15 @@ pub async fn main_loop(
         Err(_) => {
             tracing::debug!("No secret loaded from preferences file, generating new.");
             let persistent_secret = cookie::Key::generate();
-            let persistent_secret_base64 = base64::encode(persistent_secret.master());
+            let persistent_secret_base64 =
+                base64::engine::general_purpose::STANDARD.encode(persistent_secret.master());
             persistent_secret_base64.save(&APP_INFO, COOKIE_SECRET_KEY)?;
             persistent_secret_base64
         }
     };
 
-    let persistent_secret = base64::decode(persistent_secret_base64)?;
+    let persistent_secret =
+        base64::engine::general_purpose::STANDARD.decode(persistent_secret_base64)?;
     let persistent_secret = cookie::Key::try_from(persistent_secret.as_slice())?;
 
     let cfg = axum_token_auth::AuthConfig {
@@ -258,7 +261,7 @@ pub async fn main_loop(
 
     #[cfg(feature = "serve_files")]
     let serve_dir = tower_http::services::fs::ServeDir::new(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("flo-bui")
             .join("pkg"),

@@ -19,7 +19,7 @@ pub struct FieldInfo {
     pub variable: Ident,
     pub name: String,
     pub span: Span,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub idx: usize,
 }
 
@@ -36,9 +36,7 @@ pub fn get_info_for_field(idx: usize, field: &Field) -> Option<FieldInfo> {
     let repr: Option<PrimitiveKind> = field
         .attrs
         .iter()
-        // actual helper attribute is called "format" to avoid conflict
-        .filter(|&attr| attr.path().is_ident("format"))
-        .last()
+        .rfind(|&attr| attr.path().is_ident("format"))
         .and_then(|attr| match attr.parse_args::<Type>() {
             Ok(ty) => match ty.try_into() {
                 Ok(ty) => Some(ty),
@@ -56,8 +54,7 @@ pub fn get_info_for_field(idx: usize, field: &Field) -> Option<FieldInfo> {
     let size: Option<usize> = field
         .attrs
         .iter()
-        .filter(|&attr| attr.path().is_ident("size"))
-        .last()
+        .rfind(|&attr| attr.path().is_ident("size"))
         .and_then(|attr| match attr.parse_args::<LitInt>() {
             Ok(s) => match s.base10_parse::<usize>() {
                 Ok(s) => Some(s),
@@ -75,8 +72,7 @@ pub fn get_info_for_field(idx: usize, field: &Field) -> Option<FieldInfo> {
     let kind = field
         .attrs
         .iter()
-        .filter(|&attr| attr.path().is_ident("kind"))
-        .last()
+        .rfind(|&attr| attr.path().is_ident("kind"))
         .and_then(|attr| match attr.parse_args::<Ident>() {
             Ok(ident) if ident == "raw" => Some(FieldKind::Raw {
                 ty: field.ty.clone(),
@@ -126,8 +122,7 @@ pub fn get_info_for_field(idx: usize, field: &Field) -> Option<FieldInfo> {
     let name: Option<String> = field
         .attrs
         .iter()
-        .filter(|&attr| attr.path().is_ident("name"))
-        .last()
+        .rfind(|&attr| attr.path().is_ident("name"))
         .and_then(|attr| match attr.parse_args::<LitStr>() {
             Ok(name) => Some(name.value()),
             _ => {

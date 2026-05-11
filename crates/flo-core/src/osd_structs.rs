@@ -1,21 +1,23 @@
 use crate::{
-    is_default, is_none_or_default, sq, Angle, DeviceMode as TrackingMode, FloatType,
-    MotorPositionResult, RadialDistance,
+    Angle, CamStaleBitmask, DeviceMode as TrackingMode, FloatType, MotorPositionResult,
+    RadialDistance, eucm_camera::EucmParamsShape, is_default, is_none_or_default, sq,
 };
 
+use cam_geom::Points;
+use extended_unified_camera_model::EucmParams;
 use eyre::Context;
+use nalgebra::{DefaultAllocator, Dim, Storage, U1, U2, U3, allocator::Allocator};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_FPV_CAL_YAML: &str = include_str!("../../../dji-o3-goggles2-calibration.yaml");
 
-///realtime data passed from flo to osd task
+/// Realtime state passed from the FLO controller to the OSD task.
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct OsdState {
     pub motor_state: MotorPositionResult,
     pub bee_dist: RadialDistance,
-    ///magnitude of centroid in the latest observations, or None if no recent observations.
-    pub bee_signal_strength: Option<f64>,
     pub tracking_mode: TrackingMode,
+    pub cam_stale: CamStaleBitmask,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
@@ -30,31 +32,156 @@ pub struct OsdConfig {
     pub cal: Option<FpvCameraOSDCalibration>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub blob: BlobConfig,
+    /// If set, flo connects to a `camshow` instance at this address and
+    /// pushes OSD canvas updates plus recording start/stop commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camshow_addr: Option<String>,
+    /// MP4 recording configuration sent to camshow at recording-start. If
+    /// `None`, camshow uses [`strand_cam_remote_control::RecordingConfig`]'s
+    /// default (an ffmpeg pipe with built-in defaults).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camshow_mp4_cfg: Option<strand_cam_remote_control::RecordingConfig>,
 }
 
-///defines relation between fpv camera pixels, view directions, and osd character grid
+#[derive(Debug, Clone)]
+pub(crate) enum CameraCalibration {
+    OpenCv5(Box<opencv_ros_camera::NamedIntrinsicParameters<f64>>),
+    Eucm(EucmParamsShape),
+}
+
+impl cam_geom::IntrinsicParameters<f64> for CameraCalibration {
+    type BundleType = cam_geom::ray_bundle_types::SharedOriginRayBundle<f64>;
+
+    fn pixel_to_camera<IN, NPTS>(
+        &self,
+        pixels: &cam_geom::Pixels<f64, NPTS, IN>,
+    ) -> cam_geom::RayBundle<
+        cam_geom::coordinate_system::CameraFrame,
+        Self::BundleType,
+        f64,
+        NPTS,
+        nalgebra::Owned<f64, NPTS, U3>,
+    >
+    where
+        Self::BundleType: cam_geom::Bundle<f64>,
+        IN: Storage<f64, NPTS, U2>,
+        NPTS: Dim,
+        DefaultAllocator: Allocator<U1, U2>,
+        DefaultAllocator: Allocator<NPTS, U2>,
+        DefaultAllocator: Allocator<NPTS, U3>,
+    {
+        match &self {
+            CameraCalibration::OpenCv5(cal) => cal.intrinsics.pixel_to_camera(pixels),
+            CameraCalibration::Eucm(cal) => cal.inner.pixel_to_camera(pixels),
+        }
+    }
+
+    fn camera_to_pixel<IN, NPTS>(
+        &self,
+        camera: &Points<cam_geom::coordinate_system::CameraFrame, f64, NPTS, IN>,
+    ) -> cam_geom::Pixels<f64, NPTS, nalgebra::Owned<f64, NPTS, U2>>
+    where
+        IN: Storage<f64, NPTS, U3>,
+        NPTS: Dim,
+        DefaultAllocator: Allocator<NPTS, U2>,
+    {
+        match &self {
+            CameraCalibration::OpenCv5(cal) => cal.intrinsics.camera_to_pixel(camera),
+            CameraCalibration::Eucm(cal) => cal.inner.camera_to_pixel(camera),
+        }
+    }
+}
+
+impl CameraCalibration {
+    pub(crate) fn width(&self) -> f64 {
+        match &self {
+            CameraCalibration::OpenCv5(cal) => cal.width as f64,
+            CameraCalibration::Eucm(cal) => cal.width as f64,
+        }
+    }
+
+    pub(crate) fn height(&self) -> f64 {
+        match &self {
+            CameraCalibration::OpenCv5(cal) => cal.height as f64,
+            CameraCalibration::Eucm(cal) => cal.height as f64,
+        }
+    }
+}
+
+/// Loaded (runtime) calibration relating FPV camera pixels, view directions, and the OSD character grid.
 #[derive(Debug, Clone)]
 pub struct LoadedFpvCameraOSDCalibration {
-    pub camcal: opencv_ros_camera::NamedIntrinsicParameters<f64>,
-    ///the rectangle covered by osd char grid (center of top-left char to center of bottom-right char)
+    pub(crate) camcal: CameraCalibration,
+    /// Width/height of the rectangle covered by the OSD char grid, measured between centers of corner chars (pixels).
     pub osd_area_w: FloatType,
     pub osd_area_h: FloatType,
-    ///character grid size
+    /// Character grid dimensions (columns, rows).
     pub osd_char_w: i32,
     pub osd_char_h: i32,
     pub pose: FpvCameraPose,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+enum CamCalParams {
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "EUCM is a standard camera model name"
+    )]
+    EUCM {
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+        alpha: f64,
+        beta: f64,
+        width: u32,
+        height: u32,
+    },
+}
+
 impl TryFrom<FpvCameraOSDCalibration> for LoadedFpvCameraOSDCalibration {
     type Error = eyre::Report;
     fn try_from(orig: FpvCameraOSDCalibration) -> eyre::Result<Self> {
-        let yaml_buf = if let Some(fname) = orig.camera_calibration {
-            std::fs::read(&fname)
-                .with_context(|| format!("while reading camera calibration {}", fname.display()))?
+        let camcal = if let Some(fname) = orig.camera_calibration {
+            let buf = std::fs::read(&fname)
+                .with_context(|| format!("while reading camera calibration {fname}"))?;
+            if fname.as_os_str().to_string_lossy().ends_with(".yaml") {
+                CameraCalibration::OpenCv5(Box::new(opencv_ros_camera::from_ros_yaml(&buf[..])?))
+            } else {
+                if fname.as_os_str().to_string_lossy().ends_with(".json") {
+                    let ccp: CamCalParams = serde_json::from_slice(&buf[..])?;
+                    let eucm = match ccp {
+                        CamCalParams::EUCM {
+                            fx,
+                            fy,
+                            cx,
+                            cy,
+                            alpha,
+                            beta,
+                            width,
+                            height,
+                        } => EucmParamsShape {
+                            inner: EucmParams {
+                                fx,
+                                fy,
+                                cx,
+                                cy,
+                                alpha,
+                                beta,
+                            },
+                            width,
+                            height,
+                        },
+                    };
+                    CameraCalibration::Eucm(eucm)
+                } else {
+                    eyre::bail!("Only yaml and json files are supported as calibration sources");
+                }
+            }
         } else {
-            DEFAULT_FPV_CAL_YAML.as_bytes().to_vec()
+            let yaml_buf = DEFAULT_FPV_CAL_YAML.as_bytes().to_vec();
+            CameraCalibration::OpenCv5(Box::new(opencv_ros_camera::from_ros_yaml(&yaml_buf[..])?))
         };
-        let camcal = opencv_ros_camera::from_ros_yaml(&yaml_buf[..])?;
 
         Ok(LoadedFpvCameraOSDCalibration {
             camcal,
@@ -67,16 +194,16 @@ impl TryFrom<FpvCameraOSDCalibration> for LoadedFpvCameraOSDCalibration {
     }
 }
 
-///defines relation between fpv camera pixels, view directions, and osd character grid
+/// Serializable calibration relating FPV camera pixels, view directions, and the OSD character grid.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct FpvCameraOSDCalibration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub camera_calibration: Option<std::path::PathBuf>,
-    ///the rectangle covered by osd char grid (center of top-left char to center of bottom-right char)
+    pub camera_calibration: Option<camino::Utf8PathBuf>,
+    /// Width/height of the rectangle covered by the OSD char grid, measured between centers of corner chars (pixels).
     pub osd_area_w: FloatType,
     pub osd_area_h: FloatType,
-    ///character grid size
+    /// Character grid dimensions (columns, rows).
     pub osd_char_w: i32,
     pub osd_char_h: i32,
     pub pose: FpvCameraPose,
@@ -140,8 +267,8 @@ impl LoadedFpvCameraOSDCalibration {
         // "The camera center is at (0,0,0) at looking at (0,0,1) with up as (0,-1,0) in this coordinate frame."
         let cam_pts = nalgebra::Matrix1x3::new(x, y, z);
         let cam_pts = cam_geom::Points::new(cam_pts);
-        let undistorted = self.camcal.intrinsics.camera_to_undistorted_pixel(&cam_pts);
-        let distorted = self.camcal.intrinsics.distort(&undistorted);
+        use cam_geom::IntrinsicParameters;
+        let distorted = self.camcal.camera_to_pixel(&cam_pts);
         let distorted = distorted.data.row(0);
         (distorted[(0, 0)], distorted[(0, 1)])
     }
@@ -167,7 +294,7 @@ impl LoadedFpvCameraOSDCalibration {
     pub fn charpos_to_px(&self, chx: i32, chy: i32) -> (FloatType, FloatType) {
         self.charposf_to_px(chx as FloatType, chy as FloatType)
     }
-    ///returns (column, row) in floats
+    /// Returns `(column, row)` as floats from pan/tilt angles and optional distance.
     pub fn angles_to_charpos(
         &self,
         pan: Angle,
@@ -178,7 +305,7 @@ impl LoadedFpvCameraOSDCalibration {
         self.px_to_charpos(px_pos.0, px_pos.1)
     }
 
-    ///if the charpos is outside of the boundary, it is put to the intersection of the boundary and the line towards the input position from the center
+    /// Clamps a character position to the OSD boundary. If out of bounds, projects onto the boundary along the line from the grid center to the input position.
     pub fn constrain_charpos(&self, (x, y): (FloatType, FloatType)) -> ((i32, i32), bool) {
         let ((chx, chy), inscreen) = self.constrain_charpos_f((x, y));
         ((chx.round() as i32, chy.round() as i32), inscreen)
@@ -200,16 +327,16 @@ impl LoadedFpvCameraOSDCalibration {
         (((cx + x), (cy + y)), dv == 1.0)
     }
 
-    ///test if given character coordinates can be rendered to
+    /// Returns `true` if the given character coordinates are within the renderable OSD area.
     pub fn in_screen(&self, chx: i32, chy: i32) -> bool {
         chx >= 0 && chy >= 0 && chx < self.osd_char_w && chy < self.osd_char_h
     }
 
-    ///returns pixel coordinates of center of top-left character
+    /// Returns pixel coordinates of the top-left OSD character center (the OSD grid origin).
     pub fn osd_origin(&self) -> (FloatType, FloatType) {
         (
-            (self.camcal.width as f64 - self.osd_area_w) / 2.0,
-            (self.camcal.height as f64 - self.osd_area_h) / 2.0,
+            (self.camcal.width() - self.osd_area_w) / 2.0,
+            (self.camcal.height() - self.osd_area_h) / 2.0,
         )
     }
 
@@ -222,13 +349,13 @@ impl LoadedFpvCameraOSDCalibration {
     }
 }
 
-///defines fpv camera pose relative to tracking system origin
+/// FPV camera pose relative to the tracking system origin.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FpvCameraPose {
-    ///how much higher is the fpv camera than the tracking camera
+    /// Vertical offset: how much higher the FPV camera is than the tracking camera (meters, positive up).
     pub z: FloatType,
-    ///pitch angle of the fpv camera, positive up
+    /// Pitch angle of the FPV camera (degrees, positive up).
     pub pitch_deg: FloatType,
 }
 
@@ -236,10 +363,10 @@ pub struct FpvCameraPose {
 #[serde(deny_unknown_fields)]
 pub struct BlobConfig {
     pub max_num_chars: i32,
-    ///how manu arrows should be drawn when bee is at ref_dist
+    /// Number of OSD arrows drawn when the target is at `ref_dist`.
     pub ref_num_chars: FloatType,
     pub ref_dist: FloatType,
-    ///the number of arrows in the blob decreases with distance like r^-power
+    /// Arrow count scales with distance as `r^(-power)`.
     pub power: FloatType,
 }
 

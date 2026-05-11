@@ -1,5 +1,5 @@
 /// general-purpose math functions
-use crate::{deserialize_float_null_as_nan, FloatType};
+use crate::{FloatType, deserialize_float_null_as_nan};
 
 use serde::{Deserialize, Serialize};
 

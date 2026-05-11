@@ -4,13 +4,44 @@ cargo-fmt:
     - rustup component add rustfmt
     - cargo fmt --check
 
+cargo-clippy:
+  image: rust
+  script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev libclang-dev librust-alsa-sys-dev
+    - rustup component add clippy
+
+    # `flo-webserver` includes `crates/flo-bui/dist/` via `include_dir!`.
+    # The native lint pass doesn't need the real wasm bundle, just a
+    # non-empty directory, so stub one out instead of running trunk.
+    - mkdir -p crates/flo-bui/dist
+    - touch crates/flo-bui/dist/index.html
+
+    # Catches lints that `RUSTFLAGS=-D warnings` does not (e.g. the
+    # clippy `needless_borrow` family) on every workspace target,
+    # including tests and examples.
+    - cargo clippy --workspace --all-targets -- -D warnings
+
+cargo-doc:
+  image: rust
+  script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev libclang-dev librust-alsa-sys-dev
+
+    # Ensure dist dir in flo-bui exists to avoid build errors.
+    - mkdir -p crates/flo-bui/dist
+    - touch crates/flo-bui/dist/index.html
+
+    - export RUSTDOCFLAGS="-D warnings"
+    - cargo doc --no-deps
+
 beamdriver:
   image: rust
   script:
     # Install and build elf2uf2-rs
     - apt-get update
     - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
-    - cargo install elf2uf2-rs --locked
+    - cargo install --git https://github.com/StripedMonkey/elf2uf2-rs.git#c1639b9e8bcaaaab653f9fa0e358fed0e8a7ce76 --locked
 
     # Now build firmware
     - cd firmware/beamdriver
@@ -32,7 +63,7 @@ rpipico-pantilt-firmware:
     # Install and build elf2uf2-rs
     - apt-get update
     - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev
-    - cargo install elf2uf2-rs --locked
+    - cargo install --git https://github.com/StripedMonkey/elf2uf2-rs.git#c1639b9e8bcaaaab653f9fa0e358fed0e8a7ce76 --locked
 
     # Now build firmware
     - cd firmware/rpipico-pantilt
@@ -76,25 +107,29 @@ flo:
 
     - export RUSTFLAGS="-D warnings"
 
+    # Install trunk for building the web UI (this assumes x86_64)
+    - curl --location --remote-name https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-musl.tar.gz
+    - tar xzf trunk-x86_64-unknown-linux-musl.tar.gz
+    - mv trunk $CARGO_HOME/bin/
+    - trunk --version
+    # - cargo install trunk
     - rustup target add wasm32-unknown-unknown
-    - cargo install trunk --locked
 
     - cd crates/flo-bui
     - ./build.sh
     - cd ${CI_PROJECT_DIR}
+    - ./build.sh
 
-    - cargo test
-    - cargo run -- --config config-byo.yaml show-config
-    - cargo run -- --config config-drone.yaml show-config
-    - cargo run -- --config config-mini.yaml show-config
+    - cargo test --workspace --all-targets
+    - cargo run --release -- --config config-byo.yaml show-config
+    - cargo run --release -- --config config-mini.yaml show-config
 
-    # Also run flo-mavlink tests
-    - cd ${CI_PROJECT_DIR}/crates/flo-mavlink
-    - cargo test
-
-    # And mavlink-dump tests
-    - cd ${CI_PROJECT_DIR}/crates/flo-mavlink/mavlink-dump
-    - cargo test
+    - cd ${CI_PROJECT_DIR}
+    - cp target/release/flo flo.${CI_COMMIT_SHA}
+  artifacts:
+    paths:
+      - flo.${CI_COMMIT_SHA}
+    name: "flo.${CI_COMMIT_SHA}"
 
 test-crates:
   image: rust

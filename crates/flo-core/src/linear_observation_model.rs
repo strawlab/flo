@@ -83,7 +83,7 @@ impl<R: RealField + Copy> DynamicPositionObservationModel1D<R> {
         me.set_noise(variance);
         me
     }
-    #[allow(clippy::just_underscores_and_digits)]
+    #[expect(clippy::just_underscores_and_digits)]
     pub fn set_noise(&mut self, variance: R) {
         let _1: R = na::convert(1.0);
         let _0: R = na::convert(0.0);
@@ -117,7 +117,7 @@ where
         &self.observation_noise_covariance
     }
     fn predict_observation(&self, state: &OVector<R, U2>) -> OVector<R, U1> {
-        &self.observation_matrix * state
+        self.observation_matrix * state
     }
 }
 

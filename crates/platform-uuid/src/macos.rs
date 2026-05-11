@@ -1,6 +1,6 @@
 // TODO: use https://crates.io/crates/cocoa instead of C code?
 
-extern "C" {
+unsafe extern "C" {
     // get_platform_uuid is defined in uuid-macos.cpp
     fn get_platform_uuid(buf: *mut u8, buf_size: libc::c_int) -> u8;
 }

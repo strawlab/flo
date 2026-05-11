@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
 
 use na::{
+    ArrayStorage, DefaultAllocator, Matrix, OMatrix, RealField,
     allocator::Allocator,
     dimension::{U1, U2, U4},
-    ArrayStorage, DefaultAllocator, Matrix, OMatrix, RealField,
 };
 use nalgebra as na;
 

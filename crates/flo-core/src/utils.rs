@@ -6,24 +6,21 @@ use serde::{Deserialize, Serialize};
 ///
 /// [Self::update] updates the value and indicates if the value has changed.
 #[derive(Clone, Debug)]
-pub struct ChangeDetector<T: Eq + Clone> {
+pub struct ChangeDetector<T: PartialEq + Clone> {
     pub old_value: Option<T>,
     pub latest_change: Option<(Option<T>, T)>,
 }
 
-impl<T: Eq + Clone> Default for ChangeDetector<T> {
+impl<T: PartialEq + Clone> Default for ChangeDetector<T> {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T: Eq + Clone> ChangeDetector<T> {
-    pub fn new() -> Self {
         Self {
             old_value: None,
             latest_change: None,
         }
     }
+}
+
+impl<T: PartialEq + Clone> ChangeDetector<T> {
     pub fn new_with_initial_state(val: &T) -> Self {
         Self {
             old_value: Some(val.clone()),
@@ -65,18 +62,18 @@ impl<T: Eq + Clone> ChangeDetector<T> {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct NoiseGateParameters {
-    ///how large a noise are we rejecting (peak-to-peak)
+    /// Noise rejection threshold (peak-to-peak).
     pub noise_gate: FloatType,
-    ///for how long to pass through all the noise after the gate is broken
+    /// Duration to pass through all noise after the gate is broken (seconds).
     pub hold_time: FloatType,
 }
 
-///Noise gate: detect changes in float value, with some noise threshold. Once the threshold is broken, the noise gate will pass-through all noise for params.hold_time seconds.
+/// Suppresses small float variations. Once the noise threshold is exceeded, all values pass through for [`NoiseGateParameters::hold_time`] seconds.
 #[derive(Debug, Clone)]
 pub struct NoiseGate {
     gated_val: FloatType,
     state: NoiseGateStatus,
-    ///the last time the threshold has been surpassed
+    /// The last time the noise threshold was exceeded.
     pub last_break_time: Option<std::time::Instant>,
     pub params: NoiseGateParameters,
 }
@@ -128,7 +125,6 @@ impl NoiseGate {
 }
 
 pub type MyTimestamp = chrono::DateTime<chrono::Local>;
-#[allow(non_upper_case_globals)]
 pub fn now() -> MyTimestamp {
     chrono::Local::now()
 }

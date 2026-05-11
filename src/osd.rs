@@ -1,31 +1,72 @@
 use color_eyre::eyre::{self, Result, WrapErr};
 use futures::{SinkExt, StreamExt};
-use std::{
-    pin::Pin,
-    sync::{Arc, Mutex},
-};
+use std::pin::Pin;
 use tokio_serial::SerialPortBuilderExt;
 
 use flo_core::{
-    drone_structs::{DroneEvent, FlightMode},
+    Broadway, DeviceMode as TrackingMode, LocalFloState, MyTimestamp, OsdConfig, OsdState,
+    drone_structs::{DroneEvent, FlightMode, GnssRtkMode},
     elapsed,
     osd_structs::Align,
-    Broadway, DeviceMode as TrackingMode, DroneStatus, OsdConfig, OsdState,
 };
 use multiwii_serial_protocol_v2::MspPacket;
 use osd_displayport::{displayport_messages, msp_codec};
 use osd_utils::OsdCache;
 
+use crate::extension::OsdOverlay;
+
+// Left screen.
+const SCREEN_L_FLO: i32 = 0; // line where "FLO" is displayed
+const SCREEN_L_CAM_STALE: i32 = 1; // line where camera stale message is displayed
+const SCREEN_L_GNSS_STATUS: i32 = 2; // line where GNSS status is displayed
+const SCREEN_L_DIST: i32 = -1; // line where distance to bee is displayed
+
+// Right screen.
+const SCREEN_R_MODE: i32 = 0; // line where flight mode is displayed
+const SCREEN_R_BATTERY: i32 = -1; // line where battery status is displayed
+
+/// general drone status
+#[derive(Debug, PartialEq, Clone)]
+pub struct DroneStatus {
+    pub armed: bool,
+    pub flight_mode: FlightMode,
+    /// battery voltage per cell
+    pub batt_voltage: f64,
+    /// battery percentage, as reported by flight controller
+    pub batt_percent: f64,
+    /// for now, this refers to battery status only; armed status is updated independently and is not timestamped
+    pub timestamp: MyTimestamp,
+    pub gnss_rtk_mode: GnssRtkMode,
+}
+
+impl Default for DroneStatus {
+    fn default() -> Self {
+        Self {
+            armed: false,
+            flight_mode: FlightMode::default(),
+            batt_voltage: 0.0,
+            batt_percent: 0.0,
+            // Default to the epoch so `elapsed(timestamp)` starts large; the
+            // OSD shows "no signal" until the first telemetry message lands.
+            timestamp: MyTimestamp::default(),
+            gnss_rtk_mode: GnssRtkMode::default(),
+        }
+    }
+}
+
 pub(crate) async fn run_osd_loop(
     mut flo: tokio::sync::watch::Receiver<OsdState>,
     broadway: Broadway,
     config: OsdConfig,
-    canvas_arc: Arc<Mutex<OsdCache>>,
+    local_flo_state: LocalFloState,
+    canvas_tx: Option<tokio::sync::watch::Sender<OsdCache>>,
+    overlays: Vec<Box<dyn OsdOverlay + Send + Sync>>,
 ) -> Result<()> {
     let cal: flo_core::osd_structs::FpvCameraOSDCalibration = config
         .cal
         .ok_or_else(|| eyre::eyre!("OSD calibration required"))?;
     let cal: flo_core::osd_structs::LoadedFpvCameraOSDCalibration = cal.try_into()?;
+    let mut canvas = OsdCache::new(cal.osd_char_w, cal.osd_char_h);
     let mut drone_events = broadway.drone_events.subscribe();
     let (mut osd_tx, mut osd_rx): (_, Pin<Box<dyn futures::Stream<Item = _> + Send>>) =
         match config.port_path {
@@ -50,7 +91,7 @@ pub(crate) async fn run_osd_loop(
     let mut drone_status: DroneStatus = Default::default();
 
     loop {
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         enum MyAction {
             Render,
             Heartbeat,
@@ -97,13 +138,6 @@ pub(crate) async fn run_osd_loop(
                     drone_status.batt_voltage = bs.batt_voltage;
                     drone_status.timestamp = bs.timestamp;
                 }
-                DroneEvent::CommLost => {
-                    drone_status = DroneStatus {
-                        armed: drone_status.armed, //keep assuming armed to not stop goggle video recording upon mavlink loss
-                        ..Default::default()
-                    }
-                }
-                _ => {}
             },
             MyAction::Pass => {}
             MyAction::Heartbeat => {
@@ -147,22 +181,46 @@ pub(crate) async fn run_osd_loop(
                     flo.borrow_and_update().clone()
                 };
                 let packets = {
-                    // Lock the canvas while we redraw it.
-                    let mut canvas = canvas_arc.lock().unwrap();
                     canvas.clear();
 
-                    canvas.print(b"FLO", 0, 0, Align::Left);
+                    canvas.print(b"FLO", 0, SCREEN_L_FLO, Align::Left);
+                    let gnss_rtk_mode = { local_flo_state.read().unwrap().gnss_rtk_mode.clone() };
+                    draw_gnss_status(
+                        &mut canvas,
+                        &gnss_rtk_mode,
+                        0,
+                        SCREEN_L_GNSS_STATUS,
+                        Align::Left,
+                    );
 
-                    draw_battery(&mut canvas, &drone_status, -1, -1, Align::Right);
+                    draw_battery(
+                        &mut canvas,
+                        &drone_status,
+                        -1,
+                        SCREEN_R_BATTERY,
+                        Align::Right,
+                    );
+
+                    // Contributions from extensions. Drawn before the other
+                    // status indicators so they appear underneath them in case
+                    // of overlap.
+                    for overlay in &overlays {
+                        overlay.draw(&mut canvas, &cal, &drone_status);
+                    }
 
                     let fm_str = match drone_status.flight_mode {
                         FlightMode::Position => b"POS",
+                        FlightMode::Offboard => b"OFB",
                         FlightMode::Hold => b"HLD",
                         FlightMode::Manual => b"MAN",
                         FlightMode::Altitude => b"ALT",
                         _ => b"???",
                     };
-                    canvas.print(fm_str, -1, 0, Align::Right);
+                    canvas.print(fm_str, -1, SCREEN_R_MODE, Align::Right);
+
+                    if let Some(msg) = state.cam_stale.as_osd_msg() {
+                        canvas.print(msg, 0, SCREEN_L_CAM_STALE, Align::Left);
+                    }
 
                     //display tracking/bee marker
                     if state.tracking_mode == TrackingMode::ClosedLoop {
@@ -200,12 +258,12 @@ pub(crate) async fn run_osd_loop(
                         }
 
                         //draw numerical distance
-                        let mut s = format!("{:.2}", state.bee_dist.0.clamp(-99.99, 99.99))
+                        let mut s = format!("{:5.2}", state.bee_dist.0.clamp(-99.99, 99.99))
                             .to_ascii_uppercase()
                             .as_bytes()
                             .to_vec();
                         s.push(osd_utils::SYM_M); // add "m" for meters
-                        canvas.print(&s, 0, cal.osd_char_h - 1, Align::Left);
+                        canvas.print(&s, 0, SCREEN_L_DIST, Align::Left);
                     } else {
                         //render a character indicating where flo is pointing
                         let ((chx, chy), _) = cal.constrain_charpos(cal.angles_to_charpos(
@@ -234,14 +292,20 @@ pub(crate) async fn run_osd_loop(
 
                 // We have now finished rendering the canvas.
 
+                // Publish a snapshot for any consumer (e.g. the camshow client
+                // that forwards it over TCP).
+                if let Some(canvas_tx) = canvas_tx.as_ref() {
+                    let _ = canvas_tx.send(canvas.clone());
+                }
+
                 // In case of true OSD, finalize the packets and send out the serial port.
-                if let Some(osd_tx) = osd_tx.as_mut() {
-                    if let Some(ser_packets) = packets {
-                        for pkt in ser_packets.into_iter() {
-                            osd_tx.feed(pkt).await?;
-                        }
-                        osd_tx.flush().await?;
+                if let Some(osd_tx) = osd_tx.as_mut()
+                    && let Some(ser_packets) = packets
+                {
+                    for pkt in ser_packets.into_iter() {
+                        osd_tx.feed(pkt).await?;
                     }
+                    osd_tx.flush().await?;
                 }
             }
             MyAction::MessageFromGoggles(_) => {} //FIXME: parse and listen for canvas size
@@ -255,6 +319,21 @@ pub(crate) async fn run_osd_loop(
 //     )
 //     .make_msp_packet())
 // }
+
+fn draw_gnss_status(
+    canvas: &mut OsdCache,
+    gnss_mode: &GnssRtkMode,
+    chx: i32,
+    chy: i32,
+    align: Align,
+) {
+    let s: &[u8] = match gnss_mode {
+        GnssRtkMode::RtkFloat => &b"FLT"[..],
+        GnssRtkMode::RtkFixed => &b"FIX"[..],
+        _ => &b"NO RTK"[..],
+    };
+    canvas.print(s, chx, chy, align)
+}
 
 fn draw_battery(
     canvas: &mut OsdCache,

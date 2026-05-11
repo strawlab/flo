@@ -1,9 +1,6 @@
-use std::{
-    io::{Read, Seek, Write},
-    path::PathBuf,
-};
+use std::io::{Seek, Write};
 
-use color_eyre::eyre::{self, Result};
+use color_eyre::eyre::Result;
 use flo_core::{
     FloControllerConfig, FloatType, GimbalEncoderData, GimbalEncoderOffsets, MomentCentroid,
     RadialDistance, SaveToDiskMsg, StampedBMsg, StampedJson, StampedTrackingState, TimestampSource,
@@ -50,7 +47,7 @@ fn test_stamped_is_superset() -> Result<()> {
         .insert("received_timestamp".to_string(), received_timestamp_value)
         .is_some()
     {
-        eyre::bail!("'received_timestamp' field already in MomentCentroid");
+        color_eyre::eyre::bail!("'received_timestamp' field already in MomentCentroid");
     }
     let _smc: StampedMomentCentroid = serde_json::from_value(json_value)?;
     Ok(())
@@ -107,8 +104,8 @@ pub(crate) fn writer_task_main(
     mut flo_write_rx: tokio::sync::mpsc::UnboundedReceiver<SaveToDiskMsg>,
     config: &FloControllerConfig,
 ) -> Result<()> {
-    use std::time::{Duration, Instant};
     use SaveToDiskMsg::*;
+    use std::time::{Duration, Instant};
 
     let mut writing_state: Option<WritingState> = None;
     const FLUSH_INTERVAL: u64 = 1;
@@ -123,7 +120,7 @@ pub(crate) fn writer_task_main(
     // Ideally we would have a timeout here, but this is not available.
 
     while let Some(msg) = flo_write_rx.blocking_recv() {
-        tracing::debug!("processing message {msg:?}");
+        tracing::trace!("processing message {msg:?}");
         match msg {
             Quit => {
                 break;
@@ -146,13 +143,13 @@ pub(crate) fn writer_task_main(
             }
             ToggleSavingFloz(values) => {
                 if let Some((creation_time, output_dirname)) = values {
-                    tracing::info!("Saving FLO data to {}", output_dirname.display());
+                    tracing::info!("Saving FLO data to {output_dirname}");
                     if writing_state.is_none() {
                         writing_state = Some(WritingState::new(
                             creation_time,
                             output_dirname,
                             encoder_offsets.as_ref(),
-                            &config,
+                            config,
                         )?);
                     }
                 } else {
@@ -183,8 +180,17 @@ pub(crate) fn writer_task_main(
                     ws.save_broadway_msg(msg)?;
                 }
             }
+            ExtensionRecord {
+                file_name,
+                stamp,
+                record,
+            } => {
+                if let Some(ref mut ws) = writing_state.as_mut() {
+                    ws.save_extension_record(file_name, stamp, record)?;
+                }
+            }
         }
-        tracing::debug!("processing message done");
+        tracing::trace!("processing message done");
 
         // after processing message, check if we should flush data.
         if last_flushed.elapsed() > flush_interval {
@@ -288,7 +294,7 @@ impl From<StampedTrackingState> for SaveTrackingState {
 }
 
 struct WritingState {
-    output_dirname: std::path::PathBuf,
+    output_dirname: camino::Utf8PathBuf,
     /// The readme file in the output directory.
     ///
     /// We keep this file open to establish locking on the open directory.
@@ -297,7 +303,6 @@ struct WritingState {
     /// but this does not seem possible. So we have a potential slight race
     /// condition when we have our directory but not yet the file handle on
     /// readme.
-    #[allow(dead_code)]
     readme_fd: Option<std::fs::File>,
     centroid_wtr: csv::Writer<Box<dyn Write + Send>>,
     tracking_state_wtr: csv::Writer<Box<dyn Write + Send>>,
@@ -306,6 +311,10 @@ struct WritingState {
     encoder_data_wtr: Option<csv::Writer<Box<dyn Write + Send>>>,
     mavlink_data_wtr: Option<JsonLinesWriter<Box<dyn Write + Send>>>,
     broadway_data_wtr: Option<JsonLinesWriter<Box<dyn Write + Send>>>,
+    /// One JSONL file per registered extension, opened lazily on the first
+    /// record. Keyed by extension name (e.g. "extension" → `extension.jsonl`).
+    extension_wtrs:
+        std::collections::BTreeMap<&'static str, JsonLinesWriter<Box<dyn Write + Send>>>,
 }
 
 fn _test_writing_state_is_send() {
@@ -321,7 +330,7 @@ fn readme_contents() -> String {
 impl WritingState {
     fn new(
         creation_time_local: chrono::DateTime<chrono::Local>,
-        output_dirname: PathBuf,
+        output_dirname: camino::Utf8PathBuf,
         encoder_offsets: Option<&GimbalEncoderOffsets>,
         config: &FloControllerConfig,
     ) -> Result<Self> {
@@ -399,6 +408,7 @@ impl WritingState {
             encoder_data_wtr: None,
             mavlink_data_wtr: None,
             broadway_data_wtr: None,
+            extension_wtrs: std::collections::BTreeMap::new(),
         };
 
         if let Some(encoder_offsets) = encoder_offsets {
@@ -461,6 +471,29 @@ impl WritingState {
         Ok(())
     }
 
+    fn save_extension_record(
+        &mut self,
+        file_name: &'static str,
+        stamp: chrono::DateTime<chrono::Local>,
+        record: serde_json::Value,
+    ) -> Result<()> {
+        let wtr = match self.extension_wtrs.entry(file_name) {
+            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::btree_map::Entry::Vacant(e) => {
+                let mut jsonl_path = self.output_dirname.clone();
+                jsonl_path.push(format!("{file_name}.jsonl"));
+                let buf: Box<dyn Write + Send> = Box::new(bufwriter(jsonl_path)?);
+                e.insert(JsonLinesWriter::from_writer(buf))
+            }
+        };
+        // Wrap the record so each line carries the local timestamp alongside
+        // the extension's payload. Equivalent to StampedJson but the
+        // extension-side type is opaque to this crate.
+        let stamped = serde_json::json!({ "stamp": stamp, "record": record });
+        wtr.serialize(&stamped)?;
+        Ok(())
+    }
+
     fn save_stamped_tracking_state(
         &mut self,
         stamped_tracking_state: flo_core::StampedTrackingState,
@@ -495,91 +528,15 @@ impl WritingState {
             .as_mut()
             .map(|x| x.flush())
             .transpose()?;
+        for wtr in self.extension_wtrs.values_mut() {
+            wtr.flush()?;
+        }
         Ok(())
-    }
-
-    /// Open an existing directory
-    ///
-    /// This solely exists to close the directory and save it as a .floz file.
-    fn from_existing_dir<P: AsRef<std::path::Path>>(existing_dir: P) -> Result<Self> {
-        let existing_dir: std::path::PathBuf = std::path::PathBuf::from(existing_dir.as_ref());
-
-        // Until we obtain the readme file handle, we have a small race
-        // condition where another process could also open this directory.
-        let readme_fd = {
-            let readme_path = existing_dir.join(README_MD_FNAME);
-
-            let mut fd = std::fs::File::open(readme_path)?;
-            let mut actual_readme_contents = String::new();
-            fd.read_to_string(&mut actual_readme_contents)?;
-            if actual_readme_contents != readme_contents() {
-                eyre::bail!("unexpected readme contents");
-            }
-
-            Some(fd)
-        };
-
-        Ok(Self {
-            readme_fd,
-            output_dirname: existing_dir,
-            centroid_wtr: dummy_csv(),
-            tracking_state_wtr: dummy_csv(),
-            motor_position_wtr: dummy_csv(),
-            encoder_offsets_wtr: None,
-            encoder_data_wtr: None,
-            mavlink_data_wtr: None,
-            broadway_data_wtr: None,
-        })
     }
 }
 
 fn bufwriter<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<impl Write + Seek + Send> {
     Ok(std::io::BufWriter::new(std::fs::File::create(path)?))
-}
-
-pub(crate) fn fix_csv_file<P: AsRef<std::path::Path>>(csv_path: P) -> Result<()> {
-    let newlen = {
-        // Checks if CSV files are complete. If not, delete any final unfinished line.
-        let raw_rdr = std::fs::File::open(&csv_path)?;
-        let mut rdr = csv::Reader::from_reader(raw_rdr);
-        let mut last_good_position = None;
-        for record in rdr.byte_records() {
-            let record = match record {
-                Ok(record) => record,
-                Err(csv_err) => {
-                    last_good_position = csv_err.position().map(|pos| pos.byte());
-                    break;
-                }
-            };
-            last_good_position = record.position().map(|pos| pos.byte());
-        }
-        if let Some(last_good_position) = last_good_position {
-            last_good_position - 1
-        } else {
-            // file may be empty
-            return Ok(());
-        }
-    };
-    let fd = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(&csv_path)?;
-    fd.set_len(newlen)?;
-    Ok(())
-}
-
-pub(crate) fn repair_unfinished_flo<P: AsRef<std::path::Path>>(existing_dir: P) -> Result<()> {
-    // find CSV files
-    let pattern = format!("{}/{}", existing_dir.as_ref().display(), "*.csv");
-    for csv_path in glob::glob(&pattern)? {
-        let csv_path = csv_path?;
-        tracing::info!("fixing CSV file: {}", csv_path.display());
-        fix_csv_file(&csv_path)?;
-    }
-
-    let ws = WritingState::from_existing_dir(existing_dir)?;
-    std::mem::drop(ws);
-    Ok(())
 }
 
 fn dummy_csv() -> csv::Writer<Box<dyn Write + Send>> {
@@ -601,6 +558,7 @@ impl Drop for WritingState {
             self.encoder_data_wtr = None;
             self.mavlink_data_wtr = None;
             self.broadway_data_wtr = None;
+            self.extension_wtrs.clear();
         }
 
         // Move out original output name so that a subsequent call to `drop()`
@@ -621,15 +579,15 @@ impl Drop for WritingState {
             };
 
             // compute the name of the zip file.
-            let output_zipfile: std::path::PathBuf = if replace_extension {
+            let output_zipfile: camino::Utf8PathBuf = if replace_extension {
                 output_dirname.with_extension("floz")
             } else {
                 let mut tmp = output_dirname.clone().into_os_string();
                 tmp.push(".floz");
-                tmp.into()
+                camino::Utf8PathBuf::from_os_string(tmp).unwrap()
             };
 
-            tracing::info!("creating zip file {}", output_zipfile.display());
+            tracing::info!("creating zip file {output_zipfile}");
             // zip the output_dirname directory
             {
                 let mut file = bufwriter(output_zipfile).unwrap();
@@ -680,10 +638,7 @@ impl Drop for WritingState {
 
             // Once the original directory is written successfully to a zip
             // file, we remove it.
-            tracing::info!(
-                "done creating zip file, removing {}",
-                output_dirname.display()
-            );
+            tracing::info!("done creating zip file, removing {output_dirname}");
             std::fs::remove_dir_all(&output_dirname).unwrap();
         }
     }

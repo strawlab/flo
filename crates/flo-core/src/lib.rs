@@ -8,7 +8,9 @@ pub mod events;
 pub use events::*;
 
 pub mod drone_structs;
-pub use drone_structs::{DroneChannelData, DroneStatus, RcConfig};
+pub use drone_structs::{DroneChannelData, GnssRtkMode, RcConfig};
+
+mod eucm_camera;
 
 pub mod osd_structs;
 pub use osd_structs::{FpvCameraOSDCalibration, OsdConfig, OsdState};
@@ -20,9 +22,7 @@ pub mod linear_observation_model;
 pub mod motion_model;
 
 pub mod utils;
-pub use utils::{elapsed, elapsed_by, now, ChangeDetector, MyTimestamp, Timestamped};
-
-mod backwards_compat;
+pub use utils::{ChangeDetector, MyTimestamp, Timestamped, elapsed, elapsed_by, now};
 
 pub const EVENTS_PATH: &str = "events";
 
@@ -33,7 +33,7 @@ pub const UNICAST_UDP_DEFAULT: &str = const_format::concatcp!("0.0.0.0:", UNICAS
 pub type CamNameString = String;
 
 pub use pwm_motor_types::{
-    FloatType, PwmDuration, PwmSerial, PwmState, DATATYPES_VERSION, VERSION_RESPONSE_JSON_NEWLINE,
+    DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,
 };
 
 /// returns `true` if the value is `None` or equal to
@@ -59,9 +59,7 @@ where
 
 // --------------------------------------------------------------------------
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-#[allow(dead_code)]
-#[derive(Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub enum SystemGeometry {
     #[default]
     MovingMirror,
@@ -93,9 +91,7 @@ impl SystemGeometry {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-#[allow(dead_code)]
-#[derive(Default)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub enum MotorType {
     #[default]
     PwmServo,
@@ -210,9 +206,9 @@ pub type KalmanEstimatesDistance = Option<(adskalman::StateAndCovariance<FloatTy
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct KalmanFilterParameters {
-    ///rms of (unknown random) acceleration
+    /// RMS of unknown random acceleration.
     pub motion_noise: FloatType,
-    ///rms of inaccuracy of measurement
+    /// RMS measurement noise.
     pub observation_noise: FloatType,
 }
 
@@ -220,8 +216,18 @@ fn is_false(val: &bool) -> bool {
     !val
 }
 
+/// Top-level device configuration.
+///
+/// Unknown top-level YAML keys are not rejected here: anything that isn't a
+/// named field above is collected into [`Self::extensions`] so out-of-tree
+/// subsystems can carry their own configuration in the same file. See
+/// `Extension::spawn` in `flo-app` for how each extension validates and parses
+/// its section.
+///
+/// We do not use `#[serde(deny_unknown_fields)]` because it is incompatible
+/// with our extensions system. To validate all top-level fields after
+/// deserializing, use `validate_config`.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct FloControllerConfig {
     pub geometry: SystemGeometry,
 
@@ -233,10 +239,10 @@ pub struct FloControllerConfig {
 
     /// Kalman filter parameters for distance estimation
     ///
-    /// motion_noise: Motion noise [m/s2] for constant-speed dynamic model is
-    /// root-mean-square of (unknown random) acceleration [m/s2]. flying animals
-    /// have thrust to mass ratios anywhere between circa 11 and 50 m/s2 [doi:
-    /// 10.1098/rsos.160746]. Honey bees are probably around 17 m/s2.
+    /// motion_noise: Motion noise (m/s²) for constant-speed dynamic model is
+    /// root-mean-square of (unknown random) acceleration (m/s²). Flying animals
+    /// have thrust to mass ratios anywhere between circa 11 and 50 m/s² [doi:
+    /// 10.1098/rsos.160746]. Honey bees are probably around 17 m/s².
     ///
     /// observation_noise: rms measurement noise at 1 meter; this is internally
     /// scaled according to stereopsis law (i.e., multiplied by r^2)
@@ -254,7 +260,7 @@ pub struct FloControllerConfig {
 
     pub ki_tilt_angle: FloatType,
 
-    ///d terms: add speed*kd to position commands. Speed comes from global-coordinate kalman filter
+    /// D-term gains: `speed × kd` is added to position commands. Speed is from the global-coordinate Kalman filter.
     #[serde(default)]
     pub kd_pan: FloatType,
 
@@ -325,7 +331,7 @@ pub struct FloControllerConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub encoder_lag: FloatType,
 
-    /// Name of second camera used for stereopsis.
+    /// DEPRECATED. Name of second camera used for stereopsis.
     #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub secondary_cam_name: Option<CamNameString>,
 
@@ -346,21 +352,34 @@ pub struct FloControllerConfig {
     pub osd_config: Option<OsdConfig>,
 
     #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub highmag_visible_recorder: Option<HighmagVisbileRecorderConfig>,
+
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub rc_config: Option<RcConfig>,
 
     /// MAVLink configuration
     #[serde(rename = "mavlink", skip_serializing_if = "is_none_or_default")]
     pub mavlink_config: Option<crate::drone_structs::MavlinkConfig>,
 
-    // The following definitions are kept for backwards compatibility.
-    #[serde(rename = "adc3_threshold", default, skip_serializing)]
-    _unused_adc3_threshold: Option<u16>,
-    #[serde(rename = "sensor_type", default, skip_serializing)]
-    _unused_sensor_type: Option<backwards_compat::UnusedSensorType>,
-    #[serde(rename = "adc_to_sensor_x_angle_func", default, skip_serializing)]
-    _unused_adc_to_sensor_x_angle_func: Option<backwards_compat::UnusedAdcToAngleCalibration>,
-    #[serde(rename = "adc_to_sensor_y_angle_func", default, skip_serializing)]
-    _unused_adc_to_sensor_y_angle_func: Option<backwards_compat::UnusedAdcToAngleCalibration>,
+    /// YAML sections owned by [`Extension`]-style plug-ins. Any top-level key
+    /// that is not a named field above is collected here; the extension reads
+    /// its own subsection at startup. flo-app rejects keys that no registered
+    /// extension claims, so a config with an `sample-name:` block fed to a
+    /// binary built without the sample-name extension fails loudly.
+    ///
+    /// [`Extension`]: ../../flo/extension/trait.Extension.html
+    #[serde(
+        flatten,
+        default,
+        skip_serializing_if = "serde_yaml::Mapping::is_empty"
+    )]
+    pub extensions: serde_yaml::Mapping,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HighmagVisbileRecorderConfig {
+    pub ffmpeg_cli: String,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -383,7 +402,7 @@ pub struct MotorConfig {
     pub endpoint_low: Angle,
     pub endpoint_high: Angle,
     pub neutral_position: Angle,
-    ///lag in seconds from computed motor command to motor starting to move (but not to reaching the commanded position)
+    /// Lag from computed motor command to the motor beginning to move (seconds; excludes time to reach the commanded position).
     #[serde(default, skip_serializing_if = "is_default")]
     pub control_lag: FloatType,
 }
@@ -472,23 +491,69 @@ impl DeviceId {
 /// The state of the FLO controller
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct DeviceState {
-    ///this is here for display in bui only. The real value is in TrackingStateGlobal
+    /// Mode as displayed in the BUI; the authoritative value is in `TrackingStateGlobal`.
     pub mode: DeviceMode,
     pub motor_type: MotorType,
     pub focusing: bool,
     pub enqueue_drop: u16,
     pub cached_motors: MotorValueCache,
     pub motor_readout: Option<MotorPositionResult>,
-    pub recent_centroid_packets: u16,
     pub device_id: DeviceId,
     pub home_position: (Angle, Angle, RadialDistance),
     pub floz_recording_path: Option<RecordingPath>,
+    pub webcam_recording_path: Option<RecordingPath>,
     pub stereopsis_state: Option<StereopsisState>,
+    /// Is data from cameras stale.
+    pub cam_stale: CamStaleBitmask,
+}
+
+/// FLO state which is not shared with the BUI.
+///
+/// This should not implement Clone because we only want a single source of
+/// truth.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct LocalFloStateInner {
+    /// The current GNSS RTK mode, if known.
+    pub gnss_rtk_mode: GnssRtkMode,
+}
+
+/// FLO state which is not shared with the BUI.
+///
+/// This is a resource-counted pointer to [`LocalFloStateInner`]. The pointer
+/// can be cheaply cloned.
+pub type LocalFloState = std::sync::Arc<std::sync::RwLock<LocalFloStateInner>>;
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Default)]
+#[serde(transparent)]
+pub struct CamStaleBitmask(u8);
+
+impl CamStaleBitmask {
+    pub fn new(is_stale_primary: bool, is_stale_secondary: bool) -> Self {
+        Self((is_stale_primary as u8) + 2 * (is_stale_secondary as u8))
+    }
+    pub fn as_msg(&self) -> &'static str {
+        match self.0 {
+            0b11 => "Both cameras missing",
+            0b01 => "Primary camera missing",
+            0b10 => "Secondary camera missing",
+            0b00 => "OK",
+            _ => "invalid state",
+        }
+    }
+    pub fn as_osd_msg(&self) -> Option<&'static [u8]> {
+        match self.0 {
+            0b11 => Some(b"FAIL: 12"),
+            0b01 => Some(b"FAIL: 1"),
+            0b10 => Some(b"FAIL:  2"),
+            0b00 => None,
+            _ => Some(b"??"),
+        }
+    }
 }
 
 /// The data sent from FLO controller to the BUI
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 pub enum BuiEventData {
     DeviceState(DeviceState),
     Config(FloControllerConfig),
@@ -541,15 +606,14 @@ impl SensorAngle2D {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct MotorPositionResult {
     pub local: chrono::DateTime<chrono::Local>,
-    ///motor position, relative to frame
+    /// Motor (encoder) position, relative to frame.
     pub pan_enc: Angle,
     pub tilt_enc: Angle,
-    ///camera rotational position in field CS, imu-based (may drift?). For BYO setup, equal to _enc values.
+    /// Camera rotational position in field CS, IMU-based (may drift). Equal to encoder values for BYO setups.
     pub pan_imu: Angle,
     pub tilt_imu: Angle,
-    ///speeds. Only supported by gimbal; these are imu speed, i.e. rotation speed around camera axes, not always equal to motor speeds even for stationary frame
-    pub vpan_imu: Option<FloatType>,
-    pub vtilt_imu: Option<FloatType>,
+    /// IMU angular speeds (gimbal only). Rotation speed around camera axes; may differ from motor speeds even with a stationary frame.
+    pub vpan_vtilt_imu: Option<(FloatType, FloatType)>,
 }
 
 impl Default for MotorPositionResult {
@@ -560,17 +624,16 @@ impl Default for MotorPositionResult {
             tilt_enc: Angle(0.0),
             pan_imu: Angle(0.0),
             tilt_imu: Angle(0.0),
-            vpan_imu: None,
-            vtilt_imu: None,
+            vpan_vtilt_imu: None,
         }
     }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy)]
 pub enum MotorDriveMode {
-    ///move to specified position and stay there (for drone: relative to frame)
+    /// Move to a specified position and hold (drone: relative to frame).
     Position,
-    ///move with specified speed (for drone: relative to earth)
+    /// Move at a specified speed (drone: relative to earth).
     Speed,
     //Track, //move so that position = (specified_position) + speed * (now() - timestamp) (not yet supported by anything)
 }
@@ -581,9 +644,9 @@ pub struct MotorValueCache {
     pub tilt: Angle,
     pub vpan: FloatType,
     pub vtilt: FloatType,
-    ///drive mode only applies to pan and tilt, not focus
+    /// Drive mode applies to pan and tilt only; focus position is always used directly.
     pub drivemode: MotorDriveMode,
-    ///if true, angles are relative to drone. If false, angles are imu angles
+    /// If `true`, pan/tilt angles are relative to the drone frame; if `false`, they are IMU-absolute angles.
     pub rel_frame: bool,
     pub focus: FloatType,
 }
@@ -605,10 +668,12 @@ impl Default for MotorValueCache {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct TrinamicAxisConfig {
     pub microsteps_per_radian: FloatType,
+    /// Override for speed limit (microstep/s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speed_limit: Option<FloatType>, // [microstep/s]
+    pub speed_limit: Option<FloatType>,
+    /// Override for acceleration (microstep/s²).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceleration: Option<FloatType>, // [microstep/s^2]
+    pub acceleration: Option<FloatType>,
 }
 
 impl TrinamicAxisConfig {
@@ -850,13 +915,10 @@ impl Default for FloControllerConfig {
             secondary_cam_name: None,
             sounds_filenames: Default::default(),
             osd_config: None,
+            highmag_visible_recorder: Default::default(),
             rc_config: None,
             mavlink_config: None,
-
-            _unused_adc3_threshold: None,
-            _unused_sensor_type: None,
-            _unused_adc_to_sensor_x_angle_func: None,
-            _unused_adc_to_sensor_y_angle_func: None,
+            extensions: serde_yaml::Mapping::new(),
         }
     }
 }
@@ -870,11 +932,12 @@ impl DeviceState {
             enqueue_drop: 0,
             cached_motors: MotorValueCache::default(),
             motor_readout: None,
-            recent_centroid_packets: 0,
             device_id,
             home_position: (Angle(0.0), Angle(0.0), RadialDistance(1.0)),
             floz_recording_path: None,
+            webcam_recording_path: None,
             stereopsis_state: Default::default(),
+            cam_stale: Default::default(),
         }
     }
 }
@@ -955,7 +1018,7 @@ fn unique_id_to_hex(unique_id: &[u8; DEVICE_ID_LEN], hex_out: &mut [u8; DEVICE_I
 #[derive(Debug)]
 pub enum SaveToDiskMsg {
     /// Start or stop saving data to disk.
-    ToggleSavingFloz(Option<(chrono::DateTime<chrono::Local>, std::path::PathBuf)>),
+    ToggleSavingFloz(Option<(chrono::DateTime<chrono::Local>, camino::Utf8PathBuf)>),
     /// New centroid data
     CentroidData((chrono::DateTime<chrono::Local>, MomentCentroid)),
     /// New tracking state data
@@ -974,6 +1037,15 @@ pub enum SaveToDiskMsg {
     /// task, so we have to send a quit message.
     Quit,
     BroadwaySaveToDiskMsg(StampedBMsg),
+    /// Append a JSON line to `<output_dir>/<file_name>.jsonl`. The writer
+    /// creates each file on the first record. Used by [`Extension`] plug-ins so
+    /// they can persist diagnostic events without flo-core having to know what
+    /// kinds of events they emit.
+    ExtensionRecord {
+        file_name: &'static str,
+        stamp: chrono::DateTime<chrono::Local>,
+        record: serde_json::Value,
+    },
 }
 
 /// Timestamped broadway message
@@ -990,6 +1062,12 @@ pub enum BMsg {
     FloDetectionEvent(FloDetectionEvent),
     DroneEvent(crate::drone_structs::DroneEvent),
     DroneRealtimeEvent(crate::drone_structs::DroneRealtimeEvent),
+    /// A flight-control setpoint published by some subsystem. Recorded so
+    /// `.floz` files capture every command sent to the autopilot, regardless of
+    /// which subsystem produced it.
+    FlightSetpoint(crate::drone_structs::TrajectorySetpoint),
+    /// A flight-mode-change request published by some subsystem.
+    FlightModeRequest(crate::drone_structs::FlightMode),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]

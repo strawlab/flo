@@ -1,6 +1,6 @@
 use multiwii_serial_protocol_v2::{MspPacket, MspPacketDirection};
 
-///msp command code
+/// MSP command code for the displayport protocol.
 const MSP_DISPLAYPORT: u16 = 182;
 
 // see https://betaflight.com/docs/development/api/displayport
@@ -57,14 +57,14 @@ pub struct WriteStringPayload {
     pub row: u8,
     pub col: u8,
     pub attribute: u8,
-    ///null-terminated, up to 30 chars in length
+    /// Null-terminated, up to 30 chars in length.
     pub string: [u8; 31],
     pub string_len: usize,
 }
 
 impl WriteStringPayload {
     pub fn from_string(s: &str, row: u8, col: u8) -> Self {
-        assert_eq!(s.len(), s.as_bytes().len()); //no utf chars allowed
+        assert_eq!(s.len(), s.len()); //no utf chars allowed
         Self::from_bytestring(s.as_bytes(), row, col)
     }
 

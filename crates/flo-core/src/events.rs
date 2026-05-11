@@ -1,27 +1,31 @@
-use crate::{
-    Angle, DeviceMode, FloatType, MomentCentroid, MotorPositionResult, MotorValueCache,
-    RadialDistance,
-};
+use crate::{Angle, DeviceMode, FloatType, MomentCentroid, MotorPositionResult, RadialDistance};
 
-#[allow(unused_imports)]
-use crate::drone_structs::{DroneEvent, DroneRealtimeEvent};
+#[cfg(feature = "tokio")]
+use crate::drone_structs::{DroneEvent, DroneRealtimeEvent, FlightMode, TrajectorySetpoint};
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "tokio")]
 use tokio::sync::broadcast;
 
-///global messaging queues.
+/// Global messaging queues.
 #[cfg(feature = "tokio")]
 #[derive(Clone)]
 pub struct Broadway {
     pub flo_events: broadcast::Sender<FloEvent>,
     pub flo_detections: broadcast::Sender<FloDetectionEvent>,
-    pub flo_motion: broadcast::Sender<FloMotionEvent>,
-    ///stuff like arm/disarm, battery level
+    /// Non-realtime events such as arm/disarm and battery level.
     pub drone_events: broadcast::Sender<DroneEvent>,
-    ///stuff like pose and rc channels
+    /// Realtime events such as pose and RC channel values.
     pub drone_realtime: broadcast::Sender<DroneRealtimeEvent>,
+    /// Realtime channel: any subsystem that wants to drive the autopilot
+    /// publishes a [`TrajectorySetpoint`] here. `flo-mavlink` consumes it
+    /// and translates each setpoint into a MAVLink message.
+    pub flight_setpoint: broadcast::Sender<TrajectorySetpoint>,
+    /// Event channel: any subsystem that wants the autopilot in a
+    /// particular flight mode publishes the desired mode here.
+    /// `flo-mavlink` consumes it and issues MAVLink commands.
+    pub flight_mode_request: broadcast::Sender<FlightMode>,
 }
 
 #[cfg(feature = "tokio")]
@@ -30,19 +34,20 @@ impl Broadway {
         Self {
             flo_events: broadcast::channel(capacity).0,
             flo_detections: broadcast::channel(capacity_rt).0,
-            flo_motion: broadcast::channel(capacity_rt).0,
             drone_events: broadcast::channel(capacity).0,
             drone_realtime: broadcast::channel(capacity_rt).0,
+            flight_setpoint: broadcast::channel(capacity_rt).0,
+            flight_mode_request: broadcast::channel(capacity).0,
         }
     }
 }
 
-///non-realtime flo events like bui command, mode change, file recording
+/// Non-realtime FLO events such as BUI commands, mode changes, and recording state.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum FloEvent {
     Command(FloCommand, CommandSource),
 
-    ///fires when the tracking mode is actually changed. Data: (old_mode, new_mode, reason).
+    /// Fires when the tracking mode changes. Payload is `(old_mode, new_mode, reason)`.
     ModeChanged((DeviceMode, DeviceMode, ModeChangeReason)),
 }
 
@@ -93,31 +98,13 @@ pub struct CentroidEvent {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Observation {
     pub timestamp: chrono::DateTime<chrono::Local>,
-    ///detection angles, with periscope unrotation applied
+    /// Detection angles, with periscope de-rotation applied.
     pub sensor_pan: Angle,
     pub sensor_tilt: Angle,
-    ///estimate of the motor position at the instant the centroid was captured.
-    /// (Missing for mini-pantilt)
+    /// Estimated motor position at the instant the centroid was captured.
+    /// Missing for mini-pantilt.
     pub motor_estimate: Option<MotorPositionResult>,
     pub target_pan: Angle,  //in imu frame
     pub target_tilt: Angle, //in imu frame
     pub dist: Option<RadialDistance>,
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub enum FloMotionEvent {
-    ///output of the kalman filter
-    TargetEstimate(TargetEstimate),
-    MotorCommand(MotorValueCache),
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct TargetEstimate {
-    pub timestamp: chrono::DateTime<chrono::Local>,
-    pub target_pan: FloatType,  //in imu frame
-    pub target_tilt: FloatType, //in imu frame
-    pub target_vpan: FloatType,
-    pub target_vtilt: FloatType,
-    pub dist: Option<RadialDistance>,
-    pub vdist: Option<FloatType>,
 }

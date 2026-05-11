@@ -1,6 +1,6 @@
 use crate::{Payload, PayloadParseError, RollPitchYaw};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use enumflags2::{bitflags, BitFlags};
+use enumflags2::{BitFlags, bitflags};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -106,21 +106,16 @@ pub enum AxisControlFlags {
     /// (frw. ver. 2.60+)
     HighResSpeed = 1 << 7,
 
-    /// Applicable for: MODE_ANGLE, MODE_ANGLE_SHORTEST,
-    ///MODE_ANGLE_REL_FRAME
-    ///If this flag is set, the speed is not decreased in a
-    ///vicinity of target. It allows to get more predictive speed
-    ///profile for the motion trajectory. If not set, actual speed
-    ///is decreased near target to smooth over the jerks when
-    ///distance to target is small and target is updated
-    ///frequently by small steps
+    /// Applicable for: MODE_ANGLE, MODE_ANGLE_SHORTEST, MODE_ANGLE_REL_FRAME.
+    ///
+    /// If set, speed is not decreased near the target, allowing a more predictive
+    /// motion profile. If not set, speed is reduced near the target to smooth jerks
+    /// when it is updated frequently by small steps.
     TargetPrecise = 1 << 5,
 
-    ///If this flag is set, the follow mode is not overridden, but
-    ///is mixed with the commanded motion, like it happens
-    ///for the regular RC control in SPEED or ANGLE mode.
-    ///If this flag is not set, the commanded motion
-    ///completely overrides the follow control for this axis.
+    /// If set, follow mode is mixed with the commanded motion (like regular RC
+    /// control in SPEED or ANGLE mode). If not set, commanded motion completely
+    /// overrides follow control for this axis.
     MixFollow = 1 << 4,
 }
 
@@ -250,12 +245,12 @@ pub struct AxisControlConfigParams {
     #[kind(raw)]
     pub rc_lpf: u8,
 
-    ///deg/s2
+    /// Units: deg/s².
     #[kind(raw)]
     pub acc_limit: u16,
 
-    ///time to raise acceleration from 0 to full
-    /// unit = 20 ms
+    /// Time to raise acceleration from 0 to full.
+    /// Unit: 20 ms per increment.
     #[kind(raw)]
     pub jerk_slope: u8,
 

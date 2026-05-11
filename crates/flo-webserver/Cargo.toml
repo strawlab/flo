@@ -1,22 +1,23 @@
 [package]
 name = "flo-webserver"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 tracing.workspace = true
 eyre.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "rt-multi-thread"] }
-http = "1"
+http.workspace = true
 tokio-stream = { workspace = true, features = ["sync"] }
 axum.workspace = true
 axum-token-auth = "0.2.0"
+camino = { workspace = true, optional = true }
 if-addrs.workspace = true
 tower = "0.5.2"
 tower-http = { version = "0.6.2", features = ["trace", "fs"] }
 preferences-serde1.workspace = true
 cookie = "0.18.0"
-base64 = "0.12"
+base64.workspace = true
 futures-util = "0.3.30"
 qrcodegen = "1.8.0"
 tower-serve-static = { version = "0.1", optional = true }
@@ -32,4 +33,4 @@ default = ["bundle_files"]
 ## Bundle files into executable
 bundle_files = ["tower-serve-static", "include_dir"]
 ## Serve files from disk at runtime
-serve_files = []
+serve_files = ["camino"]
