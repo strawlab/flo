@@ -11,11 +11,13 @@ cargo-clippy:
     - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev libclang-dev librust-alsa-sys-dev
     - rustup component add clippy
 
-    # `flo-webserver` includes `crates/flo-bui/dist/` via `include_dir!`.
-    # The native lint pass doesn't need the real wasm bundle, just a
-    # non-empty directory, so stub one out instead of running trunk.
-    - mkdir -p crates/flo-bui/dist
-    - touch crates/flo-bui/dist/index.html
+    # Install trunk for building the web UI (this assumes x86_64)
+    - curl --location --remote-name https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-musl.tar.gz
+    - tar xzf trunk-x86_64-unknown-linux-musl.tar.gz
+    - mv trunk $CARGO_HOME/bin/
+    - trunk --version
+
+    - rustup target add wasm32-unknown-unknown
 
     # Catches lints that `RUSTFLAGS=-D warnings` does not (e.g. the
     # clippy `needless_borrow` family) on every workspace target,
@@ -28,9 +30,13 @@ cargo-doc:
     - apt-get update
     - DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev libclang-dev librust-alsa-sys-dev
 
-    # Ensure dist dir in flo-bui exists to avoid build errors.
-    - mkdir -p crates/flo-bui/dist
-    - touch crates/flo-bui/dist/index.html
+    # Install trunk for building the web UI (this assumes x86_64)
+    - curl --location --remote-name https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-musl.tar.gz
+    - tar xzf trunk-x86_64-unknown-linux-musl.tar.gz
+    - mv trunk $CARGO_HOME/bin/
+    - trunk --version
+
+    - rustup target add wasm32-unknown-unknown
 
     - export RUSTDOCFLAGS="-D warnings"
     - cargo doc --no-deps
@@ -112,12 +118,11 @@ flo:
     - tar xzf trunk-x86_64-unknown-linux-musl.tar.gz
     - mv trunk $CARGO_HOME/bin/
     - trunk --version
-    # - cargo install trunk
     - rustup target add wasm32-unknown-unknown
 
-    - cd crates/flo-bui
-    - ./build.sh
-    - cd ${CI_PROJECT_DIR}
+    # The subsequent check builds in offline mode, so make sure we are ready for that.
+    - cargo build --release --workspace
+
     - ./build.sh
 
     - cargo test --workspace --all-targets
