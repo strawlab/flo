@@ -66,6 +66,12 @@ impl eframe::App for CamshowApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+
         if let Some(sender) = self.egui_ctx_tx.take() {
             let _ = sender.send(ctx.clone());
         }
