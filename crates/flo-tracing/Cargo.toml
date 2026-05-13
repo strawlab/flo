@@ -1,0 +1,17 @@
+[package]
+name = "flo-tracing"
+description = "Shared tracing initialisation for flo binaries"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+camino.workspace = true
+chrono = { workspace = true, default-features = true }
+eyre.workspace = true
+time = "0.3.36"
+tracing.workspace = true
+tracing-panic.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ansi_term = "0.12.1"

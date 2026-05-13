@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     future::{Future, pending},
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 use strand_bui_backend_session::HttpSession;
 use tokio::{
@@ -912,54 +912,7 @@ pub fn run(options: AppOptions) -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("While creating directory {data_dir}"))?;
 
-    // Enable logging to console and to disk using tracing.
-    {
-        use time::{UtcOffset, format_description::well_known::Iso8601};
-        use tracing_subscriber::{
-            fmt::{self, time::OffsetTime},
-            layer::SubscriberExt,
-        };
-
-        let log_file_name = chrono::Local::now()
-            .format(".flo-%Y%m%d_%H%M%S.%f.log")
-            .to_string();
-        let full_log_file_name = log_dir
-            .join(&log_file_name)
-            .into_os_string()
-            .into_string()
-            .unwrap();
-
-        // Create a fixed offset time formatter based on the timezone at the
-        // time this line of code runs.
-        let timer = OffsetTime::new(
-            UtcOffset::from_whole_seconds(chrono::Local::now().offset().local_minus_utc())?,
-            Iso8601::DEFAULT,
-        );
-
-        #[cfg(target_os = "windows")]
-        ansi_term::enable_ansi_support()
-            .map_err(|code| eyre::eyre!("Failed setting windows ansi: {code}"))?;
-
-        let file = std::fs::File::create(&full_log_file_name)
-            .with_context(|| format!("While creating file {full_log_file_name}"))?;
-        let file_writer = Mutex::new(file);
-        let file_layer = fmt::layer()
-            .with_timer(timer.clone())
-            .with_writer(file_writer)
-            .with_ansi(false)
-            .with_file(true)
-            .with_line_number(true);
-        let console_layer = fmt::layer()
-            .with_timer(timer)
-            .with_file(true)
-            .with_line_number(true);
-        let collector = tracing_subscriber::registry()
-            .with(file_layer)
-            .with(console_layer)
-            .with(tracing_subscriber::filter::EnvFilter::from_default_env());
-        tracing::subscriber::set_global_default(collector)?;
-        std::panic::set_hook(Box::new(tracing_panic::panic_hook));
-    }
+    flo_tracing::init_tracing(&log_dir, "flo")?;
 
     let device_id = match get_device_id() {
         Ok(device_id) => device_id,

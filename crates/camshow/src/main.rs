@@ -74,7 +74,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("creating log directory {log_dir}"))?;
 
-    init_tracing(&log_dir)?;
+    flo_tracing::init_tracing(&log_dir, "camshow")?;
 
     let (display_tx, display_rx) = watch::channel::<Option<DisplayFrame>>(None);
     let (osd_tx, osd_rx) = watch::channel::<Option<OsdSnapshot>>(None);
@@ -145,50 +145,5 @@ fn main() -> Result<()> {
     // The tokio thread's outer loop never returns under normal use, so we
     // don't block on it here.
     drop(tokio_handle);
-    Ok(())
-}
-
-fn init_tracing(log_dir: &camino::Utf8Path) -> Result<()> {
-    use std::sync::Mutex;
-    use time::{UtcOffset, format_description::well_known::Iso8601};
-    use tracing_subscriber::{
-        fmt::{self, time::OffsetTime},
-        layer::SubscriberExt,
-    };
-
-    let log_file_name = chrono::Local::now()
-        .format(".camshow-%Y%m%d_%H%M%S.%f.log")
-        .to_string();
-    let full_log_path = log_dir.join(&log_file_name);
-
-    let timer = OffsetTime::new(
-        UtcOffset::from_whole_seconds(chrono::Local::now().offset().local_minus_utc())?,
-        Iso8601::DEFAULT,
-    );
-
-    #[cfg(target_os = "windows")]
-    ansi_term::enable_ansi_support()
-        .map_err(|code| eyre::eyre!("Failed setting windows ansi: {code}"))?;
-
-    let file = std::fs::File::create(&full_log_path)
-        .with_context(|| format!("creating log file {full_log_path}"))?;
-    let file_writer = Mutex::new(file);
-    let file_layer = fmt::layer()
-        .with_timer(timer.clone())
-        .with_writer(file_writer)
-        .with_ansi(false)
-        .with_file(true)
-        .with_line_number(true);
-    let console_layer = fmt::layer()
-        .with_timer(timer)
-        .with_file(true)
-        .with_line_number(true);
-    let collector = tracing_subscriber::registry()
-        .with(file_layer)
-        .with(console_layer)
-        .with(tracing_subscriber::filter::EnvFilter::from_default_env());
-    tracing::subscriber::set_global_default(collector)?;
-    std::panic::set_hook(Box::new(tracing_panic::panic_hook));
-    tracing::info!("logging to {full_log_path}");
     Ok(())
 }

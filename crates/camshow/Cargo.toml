@@ -16,15 +16,13 @@ home.workspace = true
 clap = { workspace = true, features = ["derive"] }
 color-eyre.workspace = true
 eyre.workspace = true
+flo-tracing.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-time = "0.3.36"
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true
-tracing-panic.workspace = true
-tracing-subscriber.workspace = true
 
 eframe = { version = "0.33", default-features = false, features = [
     "default_fonts",

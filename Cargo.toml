@@ -7,6 +7,7 @@ members = [
   "crates/flo-bui",
   "crates/flo-core",
   "crates/flo-mavlink",
+  "crates/flo-tracing",
   "crates/flo-mavlink/mavlink-dump",
   "crates/flo-webserver",
   "crates/h264-recorder",
@@ -76,12 +77,10 @@ rodio = { version = "0.20", default-features = false, features = [
   "wav",
   "vorbis",
 ] }
+flo-tracing.workspace = true
 hyper = "1.1"
 tempfile = "3"
-time = "0.3.36"
 tracing.workspace = true
-tracing-subscriber.workspace = true
-tracing-panic.workspace = true
 serde_cbor = "0.11.1"
 packed_struct = "0.3" # required by multiwii_serial_protocol_v2 0.1.12
 glob = "0.3.1"
@@ -160,6 +159,7 @@ flate2 = "1.0"
 
 camshow-protocol = { path = "crates/camshow-protocol" }
 flo-core = { path = "crates/flo-core", default-features = false }
+flo-tracing = { path = "crates/flo-tracing" }
 osd-overlay = { path = "crates/osd-overlay" }
 flo-mavlink = { path = "crates/flo-mavlink" }
 h264-recorder = { path = "crates/h264-recorder" }
