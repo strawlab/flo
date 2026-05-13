@@ -972,6 +972,11 @@ pub fn run(options: AppOptions) -> Result<()> {
     let mut my_state = flo_core::DeviceState::new(device_id);
 
     let mut device_config = if let Some(device_config_fname) = &cli.config {
+        tracing::debug!("Loading config file: \"{device_config_fname}\"");
+        for name in options.extensions.iter().map(|e| e.name()) {
+            tracing::debug!("extension name: \"{name}\"");
+        }
+
         log::info!("Reading initial device config from: {device_config_fname}");
         let cfg_buf = std::fs::read_to_string(device_config_fname)
             .with_context(|| format!("opening file {device_config_fname}"))?;
