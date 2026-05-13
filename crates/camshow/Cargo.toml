@@ -12,6 +12,7 @@ authors = [
 [dependencies]
 camino.workspace = true
 chrono = { workspace = true, default-features = true, features = ["serde"] }
+home.workspace = true
 clap = { workspace = true, features = ["derive"] }
 color-eyre.workspace = true
 eyre.workspace = true
