@@ -66,29 +66,57 @@ impl eframe::App for CamshowApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && is_fullscreen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+
+        if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.ctrl) && !is_fullscreen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
+
         if let Some(sender) = self.egui_ctx_tx.take() {
             let _ = sender.send(ctx.clone());
         }
 
         self.refresh_texture(ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(tex) = self.texture.as_ref() {
-                ui.add(egui::Image::new(tex).shrink_to_fit());
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("waiting for camera…");
-                });
-            }
-            if self.last_recording {
-                ui.painter().text(
-                    ui.max_rect().right_top() + egui::vec2(-12.0, 12.0),
-                    egui::Align2::RIGHT_TOP,
-                    "● REC",
-                    egui::FontId::proportional(20.0),
-                    Color32::from_rgb(255, 60, 60),
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(Color32::BLACK))
+            .show(ctx, |ui| {
+                let panel_rect = ui.max_rect();
+                if let Some(tex) = self.texture.as_ref() {
+                    ui.add(egui::Image::new(tex).shrink_to_fit());
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("waiting for camera…");
+                    });
+                }
+                let painter = ui.painter();
+                if self.last_recording {
+                    painter.text(
+                        panel_rect.right_top() + egui::vec2(-12.0, 12.0),
+                        egui::Align2::RIGHT_TOP,
+                        "● REC",
+                        egui::FontId::proportional(20.0),
+                        Color32::from_rgb(255, 60, 60),
+                    );
+                }
+                let hint = if is_fullscreen {
+                    "Fullscreen mode: Press Esc to exit"
+                } else {
+                    "Windowed mode: Press Ctrl-F for fullscreen"
+                };
+                let font_id = egui::FontId::proportional(16.0);
+                let anchor = panel_rect.left_bottom() + egui::vec2(12.0, -12.0);
+                painter.text(
+                    anchor,
+                    egui::Align2::LEFT_BOTTOM,
+                    hint,
+                    font_id,
+                    Color32::WHITE,
                 );
-            }
-        });
+            });
     }
 }
