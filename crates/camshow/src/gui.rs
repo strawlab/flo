@@ -66,6 +66,10 @@ impl eframe::App for CamshowApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
+
         if ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
         {
