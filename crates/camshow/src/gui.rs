@@ -74,6 +74,7 @@ impl eframe::App for CamshowApp {
             && ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
         }
 
         if let Some(sender) = self.egui_ctx_tx.take() {

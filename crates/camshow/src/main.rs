@@ -95,6 +95,7 @@ fn main() -> Result<()> {
     let eframe_opts = eframe::NativeOptions {
         window_builder: Some(Box::new(move |mut vb| {
             vb.fullscreen = Some(!windowed);
+            vb.decorations = Some(true);
             vb
         })),
         ..Default::default()
