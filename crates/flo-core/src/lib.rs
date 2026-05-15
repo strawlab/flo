@@ -515,6 +515,9 @@ pub struct DeviceState {
 pub struct LocalFloStateInner {
     /// The current GNSS RTK mode, if known.
     pub gnss_rtk_mode: GnssRtkMode,
+    /// True when LOCAL_POSITION_NED is >=10km from global origin.
+    #[serde(default)]
+    pub local_position_out_of_bounds: bool,
 }
 
 /// FLO state which is not shared with the BUI.

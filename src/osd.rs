@@ -19,6 +19,7 @@ use crate::extension::OsdOverlay;
 const SCREEN_L_FLO: i32 = 0; // line where "FLO" is displayed
 const SCREEN_L_CAM_STALE: i32 = 1; // line where camera stale message is displayed
 const SCREEN_L_GNSS_STATUS: i32 = 2; // line where GNSS status is displayed
+const SCREEN_L_LOCAL_POS_ERROR: i32 = 3; // line where local-position error is displayed
 const SCREEN_L_DIST: i32 = -1; // line where distance to bee is displayed
 
 // Right screen.
@@ -184,7 +185,13 @@ pub(crate) async fn run_osd_loop(
                     canvas.clear();
 
                     canvas.print(b"FLO", 0, SCREEN_L_FLO, Align::Left);
-                    let gnss_rtk_mode = { local_flo_state.read().unwrap().gnss_rtk_mode.clone() };
+                    let (gnss_rtk_mode, local_position_out_of_bounds) = {
+                        let local_state = local_flo_state.read().unwrap();
+                        (
+                            local_state.gnss_rtk_mode.clone(),
+                            local_state.local_position_out_of_bounds,
+                        )
+                    };
                     draw_gnss_status(
                         &mut canvas,
                         &gnss_rtk_mode,
@@ -192,6 +199,9 @@ pub(crate) async fn run_osd_loop(
                         SCREEN_L_GNSS_STATUS,
                         Align::Left,
                     );
+                    if local_position_out_of_bounds {
+                        canvas.print(b"FAIL: POS", 0, SCREEN_L_LOCAL_POS_ERROR, Align::Left);
+                    }
 
                     draw_battery(
                         &mut canvas,

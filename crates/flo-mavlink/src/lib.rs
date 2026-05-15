@@ -65,6 +65,12 @@ fn convert_gnss_rtk_mode(fix_type: mavlink::ardupilotmega::GpsFixType) -> GnssRt
     }
 }
 
+fn is_local_position_out_of_bounds(v: &mavlink::ardupilotmega::LOCAL_POSITION_NED_DATA) -> bool {
+    const MAX_LOCAL_POSITION_DIST_METERS: f32 = 10_000.0;
+    (v.x * v.x + v.y * v.y + v.z * v.z)
+        >= (MAX_LOCAL_POSITION_DIST_METERS * MAX_LOCAL_POSITION_DIST_METERS)
+}
+
 struct DroneCoordinator {
     mavlink_cfg: flo_core::drone_structs::MavlinkConfig,
     mavconn: tokio_mavlink::MavlinkConnection<MavMessage>,
@@ -75,6 +81,7 @@ struct DroneCoordinator {
     rc_program_state: flo_core::drone_structs::RcProgramState,
     armed_cd: flo_core::utils::ChangeDetector<bool>,
     flight_mode_cd: flo_core::utils::ChangeDetector<u32>,
+    local_position_out_of_bounds_cd: flo_core::utils::ChangeDetector<bool>,
     last_message_timestamp: Option<MyTimestamp>,
     sys_start: MyTimestamp,
     prev_time_boot_ms: u32,
@@ -103,6 +110,8 @@ impl DroneCoordinator {
             // Set a non-existing initial value so that true first value is detected as change.
             armed_cd: flo_core::utils::ChangeDetector::new_with_initial_state(&false),
             flight_mode_cd: flo_core::utils::ChangeDetector::new_with_initial_state(&0),
+            local_position_out_of_bounds_cd:
+                flo_core::utils::ChangeDetector::new_with_initial_state(&false),
             last_message_timestamp: Default::default(),
             sys_start: now(),
             prev_time_boot_ms: 0,
@@ -376,7 +385,15 @@ impl DroneCoordinator {
                 save("GPS_RAW_INT", logger, &v)?;
             }
             MavMessage::LOCAL_POSITION_NED(v) => {
-                if (v.x * v.x + v.y * v.y + v.z * v.z) >= (10000.0 * 10000.0) {
+                let local_position_out_of_bounds = is_local_position_out_of_bounds(&v);
+                self.local_flo_state
+                    .write()
+                    .unwrap()
+                    .local_position_out_of_bounds = local_position_out_of_bounds;
+                if self
+                    .local_position_out_of_bounds_cd
+                    .update_and_has_changed_to(&local_position_out_of_bounds, &true)
+                {
                     tracing::error!("local position {v:?} is more than 10km from global origin");
                 }
                 save("LOCAL_POSITION_NED", logger, &v)?;
@@ -690,4 +707,31 @@ pub fn spawn_mavlink(
     });
 
     Ok(main_jh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_position_out_of_bounds;
+
+    #[test]
+    fn local_position_out_of_bounds_is_false_when_inside_limit() {
+        let data = mavlink::ardupilotmega::LOCAL_POSITION_NED_DATA {
+            x: 6_000.0,
+            y: 7_000.0,
+            z: 0.0,
+            ..Default::default()
+        };
+        assert!(!is_local_position_out_of_bounds(&data));
+    }
+
+    #[test]
+    fn local_position_out_of_bounds_is_true_at_limit() {
+        let data = mavlink::ardupilotmega::LOCAL_POSITION_NED_DATA {
+            x: 10_000.0,
+            y: 0.0,
+            z: 0.0,
+            ..Default::default()
+        };
+        assert!(is_local_position_out_of_bounds(&data));
+    }
 }
