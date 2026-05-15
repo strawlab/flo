@@ -118,6 +118,12 @@ fn main() -> Result<()> {
         window_builder: Some(Box::new(move |mut vb| {
             vb.fullscreen = Some(!windowed);
             vb.decorations = Some(true);
+            // On Linux, monitor power cycles can emit tiny restored sizes.
+            // Keep windowed mode usable by enforcing sensible bounds.
+            vb.min_inner_size = Some(eframe::egui::vec2(640.0, 360.0));
+            if windowed {
+                vb.inner_size = Some(eframe::egui::vec2(1280.0, 720.0));
+            }
             vb
         })),
         ..Default::default()
