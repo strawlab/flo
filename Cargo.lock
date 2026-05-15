@@ -687,7 +687,9 @@ dependencies = [
  "color-eyre",
  "eframe",
  "eyre",
+ "flo-tracing",
  "futures",
+ "home",
  "image",
  "machine-vision-formats",
  "nokhwa",
@@ -698,12 +700,9 @@ dependencies = [
  "srt-writer",
  "strand-cam-remote-control",
  "strand-dynamic-frame",
- "time",
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-panic",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1781,6 +1780,7 @@ dependencies = [
  "csv",
  "flo-core",
  "flo-mavlink",
+ "flo-tracing",
  "flo-webserver",
  "futures",
  "glob",
@@ -1815,13 +1815,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tilta-dongle-comms",
- "time",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tracing",
- "tracing-panic",
- "tracing-subscriber",
  "trinamic",
  "walkdir",
  "zip",
@@ -1898,6 +1895,20 @@ dependencies = [
  "tokio",
  "tokio-mavlink",
  "tracing",
+]
+
+[[package]]
+name = "flo-tracing"
+version = "0.1.0"
+dependencies = [
+ "ansi_term",
+ "camino",
+ "chrono",
+ "eyre",
+ "time",
+ "tracing",
+ "tracing-panic",
+ "tracing-subscriber",
 ]
 
 [[package]]
