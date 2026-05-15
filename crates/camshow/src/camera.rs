@@ -4,8 +4,12 @@
 //! Communicates with the rest of the app through tokio channels.
 
 use std::{
-    sync::{Arc, mpsc::Receiver as StdReceiver},
-    time::Duration,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Receiver as StdReceiver,
+    },
+    time::{Duration, Instant},
 };
 
 use eyre::{Result, WrapErr};
@@ -26,6 +30,17 @@ use crate::state::{DisplayFrame, OsdSnapshot, RecordingCommand};
 /// How long to keep showing the last received OSD canvas after flo stops
 /// sending updates. After this many seconds, the overlay is blanked.
 const OSD_STALE_AFTER: Duration = Duration::from_secs(2);
+
+/// If the camera does not produce any frame for this long, terminate the
+/// process so the systemd unit can restart it.
+///
+/// The app gets a longer grace period before the first frame arrives because
+/// some cameras need time to warm up after the process starts.
+const CAMERA_FRAME_WATCHDOG_STARTUP_GRACE: Duration = Duration::from_secs(30);
+
+/// If the camera is already streaming and then stops producing frames, fail
+/// fast so the systemd unit can restart it.
+const CAMERA_FRAME_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(1);
 
 const WEBCAM_MP4_TEMPLATE: &str = "webcam%Y%m%d_%H%M%S.%f.mp4";
 
@@ -126,14 +141,57 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         .recv()
         .map_err(|e| eyre::eyre!("never received egui context: {e}"))?;
 
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let last_frame_at = Arc::new(Mutex::new(Instant::now()));
+    let first_frame_seen = Arc::new(AtomicBool::new(false));
+    let watchdog_started_at = Instant::now();
+
     // Watch for the GUI exiting; close the egui window when the app is told
     // to shut down.
     let egui_ctx_for_shutdown = egui_ctx.clone();
+    let shutting_down_for_shutdown = Arc::clone(&shutting_down);
     std::thread::Builder::new()
         .name("camshow-shutdown-watch".into())
         .spawn(move || {
             let _ = shutdown_rx.blocking_recv();
+            shutting_down_for_shutdown.store(true, Ordering::Release);
             egui_ctx_for_shutdown.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+        })
+        .ok();
+
+    let shutting_down_for_watchdog = Arc::clone(&shutting_down);
+    let last_frame_for_watchdog = Arc::clone(&last_frame_at);
+    let first_frame_seen_for_watchdog = Arc::clone(&first_frame_seen);
+    std::thread::Builder::new()
+        .name("camshow-frame-watchdog".into())
+        .spawn(move || {
+            loop {
+                if shutting_down_for_watchdog.load(Ordering::Acquire) {
+                    break;
+                }
+
+                let (elapsed, timeout) = if first_frame_seen_for_watchdog.load(Ordering::Acquire) {
+                    (
+                        match last_frame_for_watchdog.lock() {
+                            Ok(last) => last.elapsed(),
+                            Err(poisoned) => poisoned.into_inner().elapsed(),
+                        },
+                        CAMERA_FRAME_WATCHDOG_TIMEOUT,
+                    )
+                } else {
+                    (watchdog_started_at.elapsed(), CAMERA_FRAME_WATCHDOG_STARTUP_GRACE)
+                };
+
+                if elapsed > timeout {
+                    error!(
+                        "camera frame watchdog tripped after {:?} without frames; exiting for restart",
+                        elapsed
+                    );
+                    std::process::exit(1);
+                }
+
+                std::thread::sleep(Duration::from_millis(100));
+            }
         })
         .ok();
 
@@ -168,6 +226,13 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
                 continue;
             }
         };
+        match last_frame_at.lock() {
+            Ok(mut last) => *last = Instant::now(),
+            Err(poisoned) => {
+                *poisoned.into_inner() = Instant::now();
+            }
+        }
+        first_frame_seen.store(true, Ordering::Release);
         let timestamp = chrono::Local::now();
         let decoded = match frame.decode_image::<RgbFormat>() {
             Ok(d) => d,
