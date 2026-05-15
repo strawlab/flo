@@ -131,3 +131,53 @@ Then run FLO with something like this:
 
 Note that in the FLO config file you can configure imops and other aspects of
 strand-cam automatically in the `on_attach_json_commands` section.
+
+## `camshow` binary
+
+`camshow` is a separate desktop process that shows a USB webcam feed and draws
+an OSD overlay received from `flo` over TCP. Keeping it as a separate process
+means camera preview can keep running even while `flo` is restarted.
+
+### Build and run
+
+Build:
+
+    cargo build --release -p camshow
+
+Run with defaults:
+
+    cargo run --release -p camshow
+
+Useful options:
+
+- `--listen <ADDR>` TCP listen address for `flo` connections.
+  Default: `127.0.0.1:2224`.
+- `--windowed` Run in a window instead of fullscreen.
+- `--fpv-cam <HUMAN_NAME>` Prefer a specific webcam name. If not set, the
+  first available camera is used.
+- `--test-pattern` Show a fixed OSD test pattern whenever `flo` is not
+  currently sending OSD updates.
+- `--log-dir <DIR>` Directory for log files (defaults to the home directory).
+
+Example:
+
+    cargo run --release -p camshow -- --windowed --listen 127.0.0.1:2224
+
+### Connect `flo` to `camshow`
+
+Configure `camshow` from FLO config:
+
+```yaml
+osd_config:
+  camshow_addr: 127.0.0.1:2224
+  # Optional: override webcam MP4 encoder settings sent to camshow.
+  # camshow_mp4_cfg: ...
+```
+
+Or override from CLI when running `flo`:
+
+    flo --config config-mini.yaml --camshow 127.0.0.1:2224 --pwm-serial /dev/ttyACM0
+
+When recording is enabled in `flo`, recording start/stop is forwarded to
+`camshow`. `camshow` writes webcam MP4 output (and a matching OSD SRT sidecar)
+into the recording directory selected by `flo`.
