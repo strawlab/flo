@@ -1,0 +1,49 @@
+name: Build release binaries
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libclang-dev librust-alsa-sys-dev
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.1
+        with:
+          version: 'v0.21.14'
+
+      - name: Build workspace
+        run: cargo build --release --locked --workspace
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp target/release/flo release-artifacts/
+          cp target/release/burn-osd release-artifacts/
+          cp target/release/h264-recorder-cli release-artifacts/
+          cp target/release/mavlink-dump release-artifacts/
+          cp target/release/platform-uuid release-artifacts/
+          cp target/release/camshow release-artifacts/
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: flo-release-binaries-linux
+          path: release-artifacts/
+          if-no-files-found: error
