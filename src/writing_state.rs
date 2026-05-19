@@ -88,7 +88,12 @@ impl WriteCloser {
 impl Drop for WriteCloser {
     fn drop(&mut self) {
         tracing::trace!("quitting writer because WriteCloser dropped");
-        self.flo_write_tx.send(SaveToDiskMsg::Quit).unwrap();
+        match self.flo_write_tx.send(SaveToDiskMsg::Quit) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::info!("WriteCloser could not send quit message: {:?}", e);
+            }
+        }
     }
 }
 
