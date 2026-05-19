@@ -291,7 +291,7 @@ async fn run_gimbal_loop_internal(
                                 )
                             };
 
-                            let vpan_vtilt_imu = {
+                            let (vpan_imu, vtilt_imu) = {
                                 //convert imu rotation rates
                                 let (roll, pitch, yaw) = (
                                     msg_data.gyro_data.roll,
@@ -307,7 +307,7 @@ async fn run_gimbal_loop_internal(
                                     yaw as FloatType * UNIT,
                                 );
 
-                                Some((yaw * pan_rev, -roll * tilt_rev)) //why not pitch? probably it is because of how imu is mounted
+                                (Some(yaw * pan_rev), Some(-roll * tilt_rev)) //why not pitch? probably it is because of how imu is mounted
                             };
 
                             let ret = MotorPositionResult {
@@ -316,7 +316,8 @@ async fn run_gimbal_loop_internal(
                                 tilt_enc,
                                 pan_imu,
                                 tilt_imu,
-                                vpan_vtilt_imu,
+                                vpan_imu,
+                                vtilt_imu,
                             };
 
                             motor_position_tx.send(ret).await.unwrap();

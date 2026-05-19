@@ -616,7 +616,8 @@ pub struct MotorPositionResult {
     pub pan_imu: Angle,
     pub tilt_imu: Angle,
     /// IMU angular speeds (gimbal only). Rotation speed around camera axes; may differ from motor speeds even with a stationary frame.
-    pub vpan_vtilt_imu: Option<(FloatType, FloatType)>,
+    pub vpan_imu: Option<FloatType>,
+    pub vtilt_imu: Option<FloatType>,
 }
 
 impl Default for MotorPositionResult {
@@ -627,7 +628,8 @@ impl Default for MotorPositionResult {
             tilt_enc: Angle(0.0),
             pan_imu: Angle(0.0),
             tilt_imu: Angle(0.0),
-            vpan_vtilt_imu: None,
+            vpan_imu: None,
+            vtilt_imu: None,
         }
     }
 }
@@ -1246,6 +1248,39 @@ fn test_serde_nan() -> eyre::Result<()> {
     let with_nans: MyStruct = serde_json::from_str(&buf)?;
     assert!(with_nans.angle.0.is_nan());
     assert!(with_nans.dist.0.is_nan());
+
+    Ok(())
+}
+
+#[test]
+fn test_motor_position_result_csv_serialize_with_imu_velocity() -> eyre::Result<()> {
+    use std::io::Write;
+
+    let motor_position = MotorPositionResult {
+        local: chrono::Local::now(),
+        pan_enc: Angle(0.1),
+        tilt_enc: Angle(0.2),
+        pan_imu: Angle(0.3),
+        tilt_imu: Angle(0.4),
+        vpan_imu: Some(0.5),
+        vtilt_imu: Some(0.6),
+    };
+
+    let motor_position_no_imu = MotorPositionResult {
+        local: chrono::Local::now(),
+        pan_enc: Angle(1.1),
+        tilt_enc: Angle(1.2),
+        pan_imu: Angle(1.3),
+        tilt_imu: Angle(1.4),
+        vpan_imu: None,
+        vtilt_imu: None,
+    };
+
+    let wtr: Box<dyn Write + Send> = Box::new(Vec::<u8>::new());
+    let mut motor_position_wtr = csv::Writer::from_writer(wtr);
+    motor_position_wtr.serialize(motor_position)?;
+    motor_position_wtr.serialize(motor_position_no_imu)?;
+    motor_position_wtr.flush()?;
 
     Ok(())
 }

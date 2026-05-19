@@ -80,7 +80,8 @@ pub(crate) async fn run_trinamic_loop(
                 tilt_enc: tilt_trinamic_config.convert_back(tilt_pos),
                 pan_imu: pan_trinamic_config.convert_back(pan_pos),
                 tilt_imu: tilt_trinamic_config.convert_back(tilt_pos),
-                vpan_vtilt_imu: None,
+                vpan_imu: None,
+                vtilt_imu: None,
             })
             .await?;
     }

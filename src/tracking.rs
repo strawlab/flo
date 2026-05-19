@@ -138,23 +138,24 @@ pub(crate) fn kalman_step(
     let mut motor_pos_estimate = None;
     // write motor feedback to tracking state
     if let Some(motor_readout) = motor_readout {
-        //include motor readout lag into lag compensation
+        // include motor readout lag into lag compensation
         let centroid_lag = cfg.centroid_lag - cfg.encoder_lag;
 
         tracking_state.last_motor_readout = Some(motor_readout.clone());
         let cam_pan = motor_readout.pan_imu.0;
         let cam_tilt = motor_readout.tilt_imu.0;
-        let (cam_vpan, cam_vtilt) =
-            if let Some((vpan_imu, vtilt_imu)) = motor_readout.vpan_vtilt_imu {
-                //use gyro if available ...
-                (vpan_imu, vtilt_imu)
-            } else {
-                //... otherwise, use prediction
-                (
-                    tracking_state.pan_velocity.0,
-                    tracking_state.tilt_velocity.0,
-                )
-            };
+        let (cam_vpan, cam_vtilt) = if let (Some(vpan_imu), Some(vtilt_imu)) =
+            (motor_readout.vpan_imu, motor_readout.vtilt_imu)
+        {
+            // use gyro if available ...
+            (vpan_imu, vtilt_imu)
+        } else {
+            // ... otherwise, use prediction
+            (
+                tracking_state.pan_velocity.0,
+                tracking_state.tilt_velocity.0,
+            )
+        };
 
         // Offset based on where motors were pointing.
         (pan_observed, tilt_observed) = (
