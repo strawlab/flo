@@ -1,8 +1,9 @@
 use axum::{
     Json,
+    body::Body,
     extract::State,
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, Sse},
     },
     routing::{get, post},
@@ -10,7 +11,7 @@ use axum::{
 use base64::Engine;
 use eyre as anyhow;
 use futures_util::stream::Stream;
-use http::{StatusCode, header::ACCEPT, request::Parts};
+use http::{Request, StatusCode, header::ACCEPT, request::Parts};
 use preferences_serde1::{AppInfo, Preferences};
 use std::{
     convert::Infallible,
@@ -18,6 +19,7 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 use tokio::sync::watch;
+use tower::ServiceExt;
 use tower_http::trace::TraceLayer;
 
 use flo_core::{BuiEventData, DeviceState, EVENT_NAME, FloCommand, FloControllerConfig, FloEvent};
@@ -123,19 +125,54 @@ fn expand_unspecified_ip(ip: IpAddr) -> std::io::Result<Vec<IpAddr>> {
     }
 }
 
-async fn handle_auth_error(err: tower::BoxError) -> (StatusCode, &'static str) {
+async fn serve_unauthorized_page<S>(serve_dir: S) -> Response
+where
+    S: tower::Service<Request<Body>> + Clone + Send + 'static,
+    S::Response: IntoResponse,
+    S::Error: Into<tower::BoxError>,
+    S::Future: Send,
+{
+    let req = Request::builder()
+        .uri("/401.html")
+        .body(Body::empty())
+        .expect("valid request");
+
+    match serve_dir.oneshot(req).await {
+        Ok(response) => {
+            let mut response = response.into_response();
+            if response.status() == StatusCode::NOT_FOUND {
+                tracing::warn!("401.html not found in static assets");
+                (StatusCode::UNAUTHORIZED, "Request is not authorized").into_response()
+            } else {
+                *response.status_mut() = StatusCode::UNAUTHORIZED;
+                response
+            }
+        }
+        Err(_err) => {
+            tracing::error!("Failed to serve 401.html");
+            (StatusCode::UNAUTHORIZED, "Request is not authorized").into_response()
+        }
+    }
+}
+
+async fn handle_auth_error<S>(err: tower::BoxError, serve_dir: S) -> Response
+where
+    S: tower::Service<Request<Body>> + Clone + Send + 'static,
+    S::Response: IntoResponse,
+    S::Error: Into<tower::BoxError>,
+    S::Future: Send,
+{
     match err.downcast::<axum_token_auth::ValidationErrors>() {
         Ok(err) => {
             tracing::error!(
                 "Validation error(s): {:?}",
                 err.errors().collect::<Vec<_>>()
             );
-            // TODO: serve 401.html page here.
-            (StatusCode::UNAUTHORIZED, "Request is not authorized")
+            serve_unauthorized_page(serve_dir).await
         }
         Err(orig_err) => {
             tracing::error!("Unhandled internal error: {orig_err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
         }
     }
 }
@@ -266,6 +303,7 @@ pub async fn main_loop(
             .join("flo-bui")
             .join("pkg"),
     );
+    let serve_dir_for_errors = serve_dir.clone();
 
     // Create axum router.
     let router = axum::Router::new()
@@ -277,9 +315,10 @@ pub async fn main_loop(
                 .layer(TraceLayer::new_for_http())
                 // Auth layer will produce an error if the request cannot be
                 // authorized so we must handle that.
-                .layer(axum::error_handling::HandleErrorLayer::new(
-                    handle_auth_error,
-                ))
+                .layer(axum::error_handling::HandleErrorLayer::new(move |err| {
+                    let serve_dir = serve_dir_for_errors.clone();
+                    async move { handle_auth_error(err, serve_dir).await }
+                }))
                 .layer(auth_layer),
         )
         .with_state(app_state);
