@@ -130,6 +130,7 @@ async fn handle_auth_error(err: tower::BoxError) -> (StatusCode, &'static str) {
                 "Validation error(s): {:?}",
                 err.errors().collect::<Vec<_>>()
             );
+            // TODO: serve 401.html page here.
             (StatusCode::UNAUTHORIZED, "Request is not authorized")
         }
         Err(orig_err) => {
@@ -253,10 +254,10 @@ pub async fn main_loop(
     let auth_layer = cfg.into_layer();
 
     #[cfg(feature = "bundle_files")]
-    static ASSETS_DIR: include_dir::Dir<'static> = include_dir::include_dir!("$DIST_DIR"); // Built by build script in `flo-bui`
-
-    #[cfg(feature = "bundle_files")]
-    let serve_dir = tower_serve_static::ServeDir::new(&ASSETS_DIR);
+    let serve_dir = {
+        static ASSETS_DIR: include_dir::Dir<'static> = include_dir::include_dir!("$DIST_DIR"); // Built by build script in `flo-bui`
+        tower_serve_static::ServeDir::new(&ASSETS_DIR)
+    };
 
     #[cfg(feature = "serve_files")]
     let serve_dir = tower_http::services::fs::ServeDir::new(
