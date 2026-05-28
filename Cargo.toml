@@ -114,6 +114,9 @@ strand-cam-storetype.workspace = true
 # for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
 # sudo apt install librust-alsa-sys-dev
 
+[dev-dependencies]
+floz-parser.workspace = true
+
 [target.'cfg(target_os = "windows")'.dependencies]
 ansi_term = "0.12.1"
 
@@ -162,6 +165,7 @@ flo-core = { path = "crates/flo-core", default-features = false }
 flo-tracing = { path = "crates/flo-tracing" }
 osd-overlay = { path = "crates/osd-overlay" }
 flo-mavlink = { path = "crates/flo-mavlink" }
+floz-parser = { path = "crates/floz-parser" }
 h264-recorder = { path = "crates/h264-recorder" }
 osd-displayport = { path = "crates/osd-displayport" }
 osd-utils = { path = "crates/osd-utils" }
@@ -181,6 +185,7 @@ strand-bui-backend-session-types = { git = "https://github.com/strawlab/strand-b
 strand-cam-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 strand-dynamic-frame = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+zip-or-dir  = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 
 [features]
 default = ["bundle_files"]
