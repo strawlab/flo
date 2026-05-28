@@ -276,13 +276,18 @@ button[disabled] {
 }
 
 .plot-card {
-    min-height: 300px;
     overflow: hidden;
-    padding: 8px;
+    padding: 8px 8px 4px;
+}
+
+.plot-label {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin: 8px 4px 2px;
 }
 
 .plot {
-    height: 280px;
+    height: 260px;
     width: 100%;
 }
 

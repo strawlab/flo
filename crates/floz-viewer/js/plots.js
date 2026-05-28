@@ -134,13 +134,10 @@ const commonConfig = {
     scrollZoom: true,
 };
 
-// Convert an array of ms-since-epoch numbers to ISO strings that Plotly
-// understands as dates.
-function msToIso(msArray) {
-    return msArray.map((ms) => new Date(ms).toISOString());
-}
-
 // ---- Public plot functions ------------------------------------------------
+// timesMs: Float64Array of Unix timestamps in milliseconds.
+// Plotly's date axis accepts numeric ms-since-epoch directly — no conversion
+// to ISO strings needed, saving O(n) Date object + string allocations.
 
 export function plotMotorPositions(containerId, timesMs, panVals, tiltVals) {
     const Plotly = getPlotly();
@@ -149,13 +146,11 @@ export function plotMotorPositions(containerId, timesMs, panVals, tiltVals) {
         throw new Error(`Plot container not found: ${containerId}`);
     }
 
-    const timestamps = msToIso(timesMs);
-
     Plotly.react(
         node,
         [
             {
-                x: timestamps,
+                x: timesMs,
                 y: panVals,
                 name: "pan",
                 type: "scattergl",
@@ -164,7 +159,7 @@ export function plotMotorPositions(containerId, timesMs, panVals, tiltVals) {
                 hovertemplate: "%{x}<br>pan %{y:.4f}<extra></extra>",
             },
             {
-                x: timestamps,
+                x: timesMs,
                 y: tiltVals,
                 name: "tilt",
                 type: "scattergl",
@@ -186,13 +181,11 @@ export function plotDistance(containerId, timesMs, estDistVals, distObsVals) {
         throw new Error(`Plot container not found: ${containerId}`);
     }
 
-    const timestamps = msToIso(timesMs);
-
     Plotly.react(
         node,
         [
             {
-                x: timestamps,
+                x: timesMs,
                 y: distObsVals,
                 name: "observed",
                 type: "scattergl",
@@ -201,7 +194,7 @@ export function plotDistance(containerId, timesMs, estDistVals, distObsVals) {
                 hovertemplate: "%{x}<br>dist obs %{y:.2f}<extra></extra>",
             },
             {
-                x: timestamps,
+                x: timesMs,
                 y: estDistVals,
                 name: "estimated",
                 type: "scattergl",

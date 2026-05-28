@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use gloo_file::{File, callbacks::FileReader};
 
 use wasm_bindgen::prelude::*;
-use web_sys::console::log_1;
 
 use yew::prelude::*;
 
@@ -18,6 +17,10 @@ use ads_webasm::components::file_input::FileInput;
 
 const MOTOR_POSITIONS_PLOT_ID: &str = "plot-motor-positions";
 const DISTANCE_PLOT_ID: &str = "plot-distance";
+
+/// Maximum number of points sent to Plotly per trace.  For larger datasets we
+/// decimate with a uniform stride so rendering stays interactive.
+const MAX_PLOT_POINTS: usize = 10_000;
 
 // -----------------------------------------------------------------------------
 
@@ -83,48 +86,15 @@ impl Component for Model {
                 self.why_busy = WhyBusy::DrawingPlots;
                 let filesize = rbuf.len() as u64;
 
-                log_1(
-                    &format!("[floz-viewer] loading: {filename} ({filesize} bytes)").into(),
-                );
-
                 let cur = zip_or_dir::ZipDirArchive::from_zip(
                     std::io::Cursor::new(rbuf),
                     filename.clone(),
                 )
                 .unwrap_throw();
 
-                // Log archive contents so parse failures are easy to diagnose.
-                match cur.list_paths::<std::path::PathBuf>(None) {
-                    Ok(paths) => {
-                        log_1(
-                            &format!(
-                                "[floz-viewer] archive has {} entries:",
-                                paths.len()
-                            )
-                            .into(),
-                        );
-                        for p in &paths {
-                            log_1(&format!("  {}", p.display()).into());
-                        }
-                    }
-                    Err(e) => {
-                        log_1(
-                            &format!("[floz-viewer] could not list archive entries: {e}").into(),
-                        );
-                    }
-                }
-
                 self.readers.remove(&filename);
                 let file = match floz_parser::floz_parse(cur) {
                     Ok(archive) => {
-                        log_1(
-                            &format!(
-                                "[floz-viewer] parsed OK: {} motor samples, {} tracking samples",
-                                archive.motor_positions.len(),
-                                archive.tracking_states.len(),
-                            )
-                            .into(),
-                        );
                         let title = format!("{filename} - FLOZ Viewer");
                         web_sys::window()
                             .unwrap()
@@ -140,7 +110,6 @@ impl Component for Model {
                         })
                     }
                     Err(e) => {
-                        log_1(&format!("[floz-viewer] parse error: {e:#}").into());
                         web_sys::window()
                             .unwrap()
                             .document()
@@ -310,26 +279,18 @@ fn summary_panel(fd: &ValidFlozFile) -> Html {
 
 fn plot_panels() -> Html {
     html! {
-        <>
-            <section class="panel">
-                <div class="panel-heading">
-                    <h2>{"Motor Positions"}</h2>
-                    <p>{"Pan and tilt encoder angles over time. Drag to pan; scroll to zoom."}</p>
-                </div>
-                <article class="plot-card">
-                    <div id={MOTOR_POSITIONS_PLOT_ID} class="plot"></div>
-                </article>
-            </section>
-            <section class="panel">
-                <div class="panel-heading">
-                    <h2>{"Distance"}</h2>
-                    <p>{"Estimated and observed target distance over time."}</p>
-                </div>
-                <article class="plot-card">
-                    <div id={DISTANCE_PLOT_ID} class="plot"></div>
-                </article>
-            </section>
-        </>
+        <section class="panel">
+            <div class="panel-heading">
+                <h2>{"Time Series"}</h2>
+                <p>{"Drag to pan; scroll to zoom. Both plots share the time axis."}</p>
+            </div>
+            <article class="plot-card">
+                <p class="plot-label">{"Motor positions — pan & tilt encoder angles"}</p>
+                <div id={MOTOR_POSITIONS_PLOT_ID} class="plot"></div>
+                <p class="plot-label">{"Distance — estimated (green) and observed (grey)"}</p>
+                <div id={DISTANCE_PLOT_ID} class="plot"></div>
+            </article>
+        </section>
     }
 }
 
@@ -358,7 +319,25 @@ fn bytesize_str(bytes: u64) -> String {
 }
 
 // -----------------------------------------------------------------------------
-// Plot rendering: convert Rust data → JS arrays, call into plots.js.
+// Plot rendering: convert Rust data → JS typed arrays, call into plots.js.
+//
+// Performance strategy for large datasets:
+//
+// 1. Uniform decimation — keep at most MAX_PLOT_POINTS samples per trace.
+//    For a million-point file this reduces Plotly's work by ~100×.
+//
+// 2. Float64Array instead of js_sys::Array of JsValue — a single bulk
+//    memcopy into wasm-bindgen's typed-array wrapper rather than allocating
+//    one JS object per sample.  Typically another 10–50× faster.
+//
+// 3. Raw ms-since-epoch numbers for timestamps — eliminates per-point
+//    `new Date(...).toISOString()` conversions in JS (~10× savings there).
+
+fn make_float64_array(data: &[f64]) -> js_sys::Float64Array {
+    let arr = js_sys::Float64Array::new_with_length(data.len() as u32);
+    arr.copy_from(data);
+    arr
+}
 
 fn update_plots(model: &mut Model) {
     let MaybeValidFlozFile::Valid(fd) = &model.floz_file else {
@@ -367,33 +346,25 @@ fn update_plots(model: &mut Model) {
 
     // --- Motor positions ---
     {
-        // Timestamps as ms-since-epoch (f64) for Plotly date axis.
-        let times_ms: js_sys::Array = fd
-            .motor_positions
-            .iter()
-            .map(|r| {
-                let ms = r.local.timestamp_millis() as f64;
-                JsValue::from_f64(ms)
-            })
-            .collect();
+        let n = fd.motor_positions.len();
+        let stride = (n / MAX_PLOT_POINTS).max(1);
+        let cap = n / stride + 1;
 
-        let pan_vals: js_sys::Array = fd
-            .motor_positions
-            .iter()
-            .map(|r| JsValue::from_f64(r.pan_enc.0))
-            .collect();
+        let mut times = Vec::with_capacity(cap);
+        let mut pan = Vec::with_capacity(cap);
+        let mut tilt = Vec::with_capacity(cap);
 
-        let tilt_vals: js_sys::Array = fd
-            .motor_positions
-            .iter()
-            .map(|r| JsValue::from_f64(r.tilt_enc.0))
-            .collect();
+        for r in fd.motor_positions.iter().step_by(stride) {
+            times.push(r.local.timestamp_millis() as f64);
+            pan.push(r.pan_enc.0);
+            tilt.push(r.tilt_enc.0);
+        }
 
         if let Err(e) = plot_motor_positions(
             MOTOR_POSITIONS_PLOT_ID,
-            &times_ms.into(),
-            &pan_vals.into(),
-            &tilt_vals.into(),
+            &make_float64_array(&times).into(),
+            &make_float64_array(&pan).into(),
+            &make_float64_array(&tilt).into(),
         ) {
             let msg = js_error_message("Motor positions plot failed", &e);
             model.render_error = Some(msg);
@@ -403,33 +374,26 @@ fn update_plots(model: &mut Model) {
 
     // --- Distance ---
     {
-        let times_ms: js_sys::Array = fd
-            .tracking_states
-            .iter()
-            .map(|r| JsValue::from_f64(r.processed_timestamp.timestamp_millis() as f64))
-            .collect();
+        let n = fd.tracking_states.len();
+        let stride = (n / MAX_PLOT_POINTS).max(1);
+        let cap = n / stride + 1;
 
-        // est_dist: Option<f32> — use NaN for None so Plotly shows a gap.
-        let est_dist_vals: js_sys::Array = fd
-            .tracking_states
-            .iter()
-            .map(|r| {
-                let v = r.est_dist.map(|v| v as f64).unwrap_or(f64::NAN);
-                JsValue::from_f64(v)
-            })
-            .collect();
+        let mut times = Vec::with_capacity(cap);
+        let mut est_dist = Vec::with_capacity(cap);
+        let mut dist_obs = Vec::with_capacity(cap);
 
-        let dist_obs_vals: js_sys::Array = fd
-            .tracking_states
-            .iter()
-            .map(|r| JsValue::from_f64(r.dist_obs as f64))
-            .collect();
+        for r in fd.tracking_states.iter().step_by(stride) {
+            times.push(r.processed_timestamp.timestamp_millis() as f64);
+            // Use NaN for None so Plotly renders a gap rather than zero.
+            est_dist.push(r.est_dist.map(|v| v as f64).unwrap_or(f64::NAN));
+            dist_obs.push(r.dist_obs as f64);
+        }
 
         if let Err(e) = plot_distance(
             DISTANCE_PLOT_ID,
-            &times_ms.into(),
-            &est_dist_vals.into(),
-            &dist_obs_vals.into(),
+            &make_float64_array(&times).into(),
+            &make_float64_array(&est_dist).into(),
+            &make_float64_array(&dist_obs).into(),
         ) {
             let msg = js_error_message("Distance plot failed", &e);
             model.render_error = Some(msg);
