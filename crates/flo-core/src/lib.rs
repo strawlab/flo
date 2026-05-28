@@ -33,7 +33,7 @@ pub const UNICAST_UDP_DEFAULT: &str = const_format::concatcp!("0.0.0.0:", UNICAS
 pub type CamNameString = String;
 
 pub const MOTOR_POSITIONS_FNAME: &str = "motor_positions.csv";
-pub const TRACKING_STATE_FNAME: &str = "tracking_states.csv";
+pub const TRACKING_STATE_FNAME: &str = "tracking_state.csv";
 
 pub use pwm_motor_types::{
     DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,

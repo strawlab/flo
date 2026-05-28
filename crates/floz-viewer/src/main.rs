@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use gloo_file::{File, callbacks::FileReader};
 
 use wasm_bindgen::prelude::*;
+use web_sys::console::log_1;
 
 use yew::prelude::*;
 
@@ -82,15 +83,48 @@ impl Component for Model {
                 self.why_busy = WhyBusy::DrawingPlots;
                 let filesize = rbuf.len() as u64;
 
+                log_1(
+                    &format!("[floz-viewer] loading: {filename} ({filesize} bytes)").into(),
+                );
+
                 let cur = zip_or_dir::ZipDirArchive::from_zip(
                     std::io::Cursor::new(rbuf),
                     filename.clone(),
                 )
                 .unwrap_throw();
 
+                // Log archive contents so parse failures are easy to diagnose.
+                match cur.list_paths::<std::path::PathBuf>(None) {
+                    Ok(paths) => {
+                        log_1(
+                            &format!(
+                                "[floz-viewer] archive has {} entries:",
+                                paths.len()
+                            )
+                            .into(),
+                        );
+                        for p in &paths {
+                            log_1(&format!("  {}", p.display()).into());
+                        }
+                    }
+                    Err(e) => {
+                        log_1(
+                            &format!("[floz-viewer] could not list archive entries: {e}").into(),
+                        );
+                    }
+                }
+
                 self.readers.remove(&filename);
                 let file = match floz_parser::floz_parse(cur) {
                     Ok(archive) => {
+                        log_1(
+                            &format!(
+                                "[floz-viewer] parsed OK: {} motor samples, {} tracking samples",
+                                archive.motor_positions.len(),
+                                archive.tracking_states.len(),
+                            )
+                            .into(),
+                        );
                         let title = format!("{filename} - FLOZ Viewer");
                         web_sys::window()
                             .unwrap()
@@ -106,6 +140,7 @@ impl Component for Model {
                         })
                     }
                     Err(e) => {
+                        log_1(&format!("[floz-viewer] parse error: {e:#}").into());
                         web_sys::window()
                             .unwrap()
                             .document()
@@ -118,6 +153,8 @@ impl Component for Model {
 
                 self.floz_file = file;
                 self.render_error = None;
+                // Always dismiss the spinner, even when parsing fails.
+                self.why_busy = WhyBusy::NotBusy;
                 self.render_after_next_paint =
                     matches!(self.floz_file, MaybeValidFlozFile::Valid(_));
             }

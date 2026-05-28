@@ -25,6 +25,7 @@ ads-webasm.workspace = true
 version = "0.3.72"
 features = [
     "Blob",
+    "console",
     "Event",
     "File",
     "FileList",
