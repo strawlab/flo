@@ -32,6 +32,9 @@ pub const UNICAST_UDP_DEFAULT: &str = const_format::concatcp!("0.0.0.0:", UNICAS
 
 pub type CamNameString = String;
 
+pub const MOTOR_POSITIONS_FNAME: &str = "motor_positions.csv";
+pub const TRACKING_STATE_FNAME: &str = "tracking_states.csv";
+
 pub use pwm_motor_types::{
     DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,
 };
@@ -194,6 +197,84 @@ impl TrackingState {
             drivemode: MotorDriveMode::Position,
             rel_frame,
             focus: self.focus_command_motpos + self.focus_backlash_correction,
+        }
+    }
+}
+
+// These are all f32 to keep file size down.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct SaveTrackingState {
+    pub centroid_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub est_pan: Option<f32>,
+    pub est_tilt: Option<f32>,
+    pub est_dist: Option<f32>,
+    pub pan_obs: f32,
+    pub tilt_obs: f32,
+    pub dist_obs: f32,
+    pub cam_pan: f32,
+    pub cam_tilt: f32,
+    pub motor_cmd_pan: f32,
+    pub motor_cmd_tilt: f32,
+    pub motor_cmd_focus: f32,
+    pub pan_predicted: f32,
+    pub tilt_predicted: f32,
+    pub pan_error_integral: f32,
+    pub tilt_error_integral: f32,
+    pub processed_timestamp: chrono::DateTime<chrono::Local>,
+}
+
+impl From<StampedTrackingState> for SaveTrackingState {
+    fn from(orig: StampedTrackingState) -> Self {
+        let (est_pan, est_tilt) = if let Some(ke) = orig.tracking_state.kalman_estimates.as_ref() {
+            (Some(ke.0.state()[0]), Some(ke.0.state()[1]))
+        } else {
+            (None, None)
+        };
+
+        let est_dist = orig
+            .tracking_state
+            .kalman_estimates_distance
+            .as_ref()
+            .map(|ke| ke.0.state()[0]);
+
+        let to_f32 = |x: FloatType| x as f32;
+        let (cam_pan, cam_tilt) = if let Some(pos) = orig.tracking_state.last_motor_readout {
+            (to_f32(pos.pan_imu.0), to_f32(pos.tilt_imu.0))
+        } else {
+            (0.0, 0.0)
+        };
+
+        Self {
+            centroid_timestamp: orig.centroid_timestamp,
+            est_pan: est_pan.map(to_f32),
+            est_tilt: est_tilt.map(to_f32),
+            est_dist: est_dist.map(to_f32),
+            pan_obs: to_f32(orig.tracking_state.pan_obs),
+            tilt_obs: to_f32(orig.tracking_state.tilt_obs),
+            dist_obs: to_f32(orig.tracking_state.dist_obs),
+            cam_pan,
+            cam_tilt,
+            motor_cmd_pan: to_f32(orig.tracking_state.pan_command.as_float()),
+            motor_cmd_tilt: to_f32(orig.tracking_state.tilt_command.as_float()),
+            motor_cmd_focus: to_f32(orig.tracking_state.focus_command.as_float()),
+            pan_predicted: to_f32(orig.tracking_state.pan.as_float()),
+            tilt_predicted: to_f32(orig.tracking_state.tilt.as_float()),
+            pan_error_integral: to_f32(orig.tracking_state.pan_err_integral),
+            tilt_error_integral: to_f32(orig.tracking_state.tilt_err_integral),
+            processed_timestamp: orig.processed_timestamp,
+        }
+    }
+}
+
+trait AsFloat {
+    fn as_float(&self) -> f64;
+}
+
+impl AsFloat for Option<RadialDistance> {
+    fn as_float(&self) -> f64 {
+        match self {
+            None => f64::NAN,
+            Some(v) => v.0,
         }
     }
 }

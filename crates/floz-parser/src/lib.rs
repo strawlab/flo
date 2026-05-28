@@ -7,6 +7,8 @@ use std::{
 
 pub struct FlozArchive<R: Read + Seek> {
     archive: zip_or_dir::ZipDirArchive<R>,
+    pub motor_positions: Vec<flo_core::MotorPositionResult>,
+    pub tracking_states: Vec<flo_core::SaveTrackingState>,
 }
 
 impl<R: Read + Seek> FlozArchive<R> {
@@ -26,28 +28,56 @@ impl<R: Read + Seek> FlozArchive<R> {
     }
 }
 
-pub fn floz_parse_reader<R: Read + Seek>(
-    rdr: R,
-    display_name: String,
-) -> Result<FlozArchive<R>> {
+pub fn floz_parse_reader<R: Read + Seek>(rdr: R, display_name: String) -> Result<FlozArchive<R>> {
     let zs = zip_or_dir::ZipDirArchive::from_zip(rdr, display_name)?;
     let parsed = floz_parse(zs)?;
     Ok(parsed)
 }
 
-pub fn floz_parse_path<P: AsRef<std::path::Path>>(
-    path: P,
-) -> Result<FlozArchive<BufReader<File>>> {
+pub fn floz_parse_path<P: AsRef<std::path::Path>>(path: P) -> Result<FlozArchive<BufReader<File>>> {
     let zs = zip_or_dir::ZipDirArchive::auto_from_path(&path)?;
     let parsed = floz_parse(zs)?;
     Ok(parsed)
 }
 
 pub fn floz_parse<R: Read + Seek>(
-    archive: zip_or_dir::ZipDirArchive<R>,
+    mut archive: zip_or_dir::ZipDirArchive<R>,
 ) -> Result<FlozArchive<R>> {
+    // Open main motor positions data.
+    let motor_positions = {
+        let motor_positions_fname = archive
+            .path_starter()
+            .join(&flo_core::MOTOR_POSITIONS_FNAME);
+
+        let rdr = motor_positions_fname.open()?;
+        let motor_positions_rdr = csv::Reader::from_reader(rdr);
+
+        let mut motor_positions = Vec::new();
+        for row in motor_positions_rdr.into_deserialize() {
+            let row: flo_core::MotorPositionResult = row?;
+            motor_positions.push(row);
+        }
+        motor_positions
+    };
+
+    let tracking_states = {
+        let tracking_states_fname = archive.path_starter().join(flo_core::TRACKING_STATE_FNAME);
+
+        let rdr = tracking_states_fname.open()?;
+        let tracking_states_rdr = csv::Reader::from_reader(rdr);
+
+        let mut tracking_states = Vec::new();
+        for row in tracking_states_rdr.into_deserialize() {
+            let row: flo_core::SaveTrackingState = row?;
+            tracking_states.push(row);
+        }
+        tracking_states
+    };
+
     Ok(FlozArchive {
         archive,
+        motor_positions,
+        tracking_states,
     })
 }
 

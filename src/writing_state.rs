@@ -3,7 +3,7 @@ use std::io::{Seek, Write};
 use color_eyre::eyre::Result;
 use flo_core::{
     FloControllerConfig, FloatType, GimbalEncoderData, GimbalEncoderOffsets, MomentCentroid,
-    RadialDistance, SaveToDiskMsg, StampedBMsg, StampedJson, StampedTrackingState, TimestampSource,
+    SaveToDiskMsg, StampedBMsg, StampedJson, TimestampSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -257,19 +257,6 @@ pub(crate) fn writer_task_main(
     Ok(())
 }
 
-trait AsFloat {
-    fn as_float(&self) -> f64;
-}
-
-impl AsFloat for Option<RadialDistance> {
-    fn as_float(&self) -> f64 {
-        match self {
-            None => f64::NAN,
-            Some(v) => v.0,
-        }
-    }
-}
-
 const README_MD_FNAME: &str = "README.md";
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -277,71 +264,6 @@ struct FloMetadata {
     git_revision: String,
     creation_time: chrono::DateTime<chrono::FixedOffset>,
     timezone: String,
-}
-
-// These are all f32 to keep file size down.
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-struct SaveTrackingState {
-    centroid_timestamp: Option<chrono::DateTime<chrono::Utc>>,
-    est_pan: Option<f32>,
-    est_tilt: Option<f32>,
-    est_dist: Option<f32>,
-    pan_obs: f32,
-    tilt_obs: f32,
-    dist_obs: f32,
-    cam_pan: f32,
-    cam_tilt: f32,
-    motor_cmd_pan: f32,
-    motor_cmd_tilt: f32,
-    motor_cmd_focus: f32,
-    pan_predicted: f32,
-    tilt_predicted: f32,
-    pan_error_integral: f32,
-    tilt_error_integral: f32,
-    processed_timestamp: chrono::DateTime<chrono::Local>,
-}
-
-impl From<StampedTrackingState> for SaveTrackingState {
-    fn from(orig: StampedTrackingState) -> Self {
-        let (est_pan, est_tilt) = if let Some(ke) = orig.tracking_state.kalman_estimates.as_ref() {
-            (Some(ke.0.state()[0]), Some(ke.0.state()[1]))
-        } else {
-            (None, None)
-        };
-
-        let est_dist = orig
-            .tracking_state
-            .kalman_estimates_distance
-            .as_ref()
-            .map(|ke| ke.0.state()[0]);
-
-        let to_f32 = |x: FloatType| x as f32;
-        let (cam_pan, cam_tilt) = if let Some(pos) = orig.tracking_state.last_motor_readout {
-            (to_f32(pos.pan_imu.0), to_f32(pos.tilt_imu.0))
-        } else {
-            (0.0, 0.0)
-        };
-
-        Self {
-            centroid_timestamp: orig.centroid_timestamp,
-            est_pan: est_pan.map(to_f32),
-            est_tilt: est_tilt.map(to_f32),
-            est_dist: est_dist.map(to_f32),
-            pan_obs: to_f32(orig.tracking_state.pan_obs),
-            tilt_obs: to_f32(orig.tracking_state.tilt_obs),
-            dist_obs: to_f32(orig.tracking_state.dist_obs),
-            cam_pan,
-            cam_tilt,
-            motor_cmd_pan: to_f32(orig.tracking_state.pan_command.as_float()),
-            motor_cmd_tilt: to_f32(orig.tracking_state.tilt_command.as_float()),
-            motor_cmd_focus: to_f32(orig.tracking_state.focus_command.as_float()),
-            pan_predicted: to_f32(orig.tracking_state.pan.as_float()),
-            tilt_predicted: to_f32(orig.tracking_state.tilt.as_float()),
-            pan_error_integral: to_f32(orig.tracking_state.pan_err_integral),
-            tilt_error_integral: to_f32(orig.tracking_state.tilt_err_integral),
-            processed_timestamp: orig.processed_timestamp,
-        }
-    }
 }
 
 struct WritingState {
@@ -437,14 +359,14 @@ impl WritingState {
 
         let tracking_state_wtr = {
             let mut csv_path = output_dirname.clone();
-            csv_path.push("tracking_state.csv");
+            csv_path.push(flo_core::TRACKING_STATE_FNAME);
             let wtr = Box::new(bufwriter(csv_path)?);
             csv::Writer::from_writer(wtr as Box<dyn Write + Send>)
         };
 
         let motor_position_wtr = {
             let mut csv_path = output_dirname.clone();
-            csv_path.push("motor_positions.csv");
+            csv_path.push(&flo_core::MOTOR_POSITIONS_FNAME);
             let wtr = Box::new(bufwriter(csv_path)?);
             csv::Writer::from_writer(wtr as Box<dyn Write + Send>)
         };
@@ -550,7 +472,7 @@ impl WritingState {
         stamped_tracking_state: flo_core::StampedTrackingState,
     ) -> Result<()> {
         self.tracking_state_wtr
-            .serialize(SaveTrackingState::from(stamped_tracking_state))?;
+            .serialize(flo_core::SaveTrackingState::from(stamped_tracking_state))?;
         Ok(())
     }
 
