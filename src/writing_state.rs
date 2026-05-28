@@ -53,6 +53,60 @@ fn test_stamped_is_superset() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_writer_task_creates_floz_on_toggle_off() -> Result<()> {
+    use chrono::TimeZone;
+    use std::io::Read;
+
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let handle = std::thread::spawn(move || writer_task_main(rx, &config));
+
+    let creation_time = chrono::FixedOffset::east_opt(0)
+        .expect("valid fixed offset")
+        .with_ymd_and_hms(2026, 5, 28, 12, 0, 0)
+        .single()
+        .expect("valid datetime");
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        creation_time.into(),
+        output_dir.clone(),
+    ))))?;
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+
+    handle.join().expect("writer thread panicked")?;
+
+    let floz_path = output_dir.with_extension("floz");
+    assert!(
+        floz_path.exists(),
+        "expected floz file at {}",
+        floz_path.as_std_path().display()
+    );
+    assert!(
+        !output_dir.exists(),
+        "expected output dir removed: {}",
+        output_dir.as_std_path().display()
+    );
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&floz_path)?)?;
+    let mut readme = archive.by_name(README_MD_FNAME)?;
+    let mut readme_contents = String::new();
+    readme.read_to_string(&mut readme_contents)?;
+    assert!(
+        readme_contents.contains("This is data saved by flo."),
+        "README.md did not contain expected marker"
+    );
+
+    Ok(())
+}
+
 fn with_received_timestamp(
     mc: MomentCentroid,
     received_timestamp: chrono::DateTime<chrono::Local>,
