@@ -22,7 +22,7 @@ members = [
   "crates/simplebgc-derive",
   "crates/tilta-dongle-comms",
   "crates/tokio-mavlink",
-  "crates/trinamic",
+  "crates/trinamic", "crates/floz-parser",
 ]
 exclude = [
   "firmware/beamdriver",
@@ -171,6 +171,7 @@ simplebgc-derive = { path = "crates/simplebgc-derive" }
 tokio-mavlink = { path = "crates/tokio-mavlink" }
 
 bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+download-verify = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 ffmpeg-rewriter = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 ffmpeg-writer = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 frame-source = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }

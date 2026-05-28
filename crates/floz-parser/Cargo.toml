@@ -1,0 +1,11 @@
+[package]
+name = "floz-parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracing.workspace = true
+
+[dev-dependencies]
+download-verify.workspace = true
+tracing-subscriber.workspace = true
