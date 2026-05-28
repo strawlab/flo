@@ -23,6 +23,7 @@ members = [
   "crates/tilta-dongle-comms",
   "crates/tokio-mavlink",
   "crates/trinamic", "crates/floz-parser",
+  "crates/floz-viewer",
 ]
 exclude = [
   "firmware/beamdriver",
@@ -138,7 +139,10 @@ home = "0.5.4"
 if-addrs = "0.14"
 image = { version = "0.25", default-features = false }
 indicatif = "0.18"
+gloo-file = "0.2"
 log = "0.4.17"
+wasm-logger = "0.2.0"
+yew = { version = "0.21.0", features = ["csr"] }
 machine-vision-formats = "0.1.5"
 mavlink = { version = "0.17", default-features = false }
 multiwii_serial_protocol_v2 = "0.1.12"
@@ -186,6 +190,7 @@ strand-bui-backend-session-types = { git = "https://github.com/strawlab/strand-b
 strand-cam-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 strand-dynamic-frame = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
+ads-webasm  = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 zip-or-dir  = { git = "https://github.com/strawlab/strand-braid", rev = "73db61f9ba3b13a1adca09b243ff71a1f1231e65" }
 
 [features]
