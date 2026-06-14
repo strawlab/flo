@@ -118,6 +118,12 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:2222")]
     http_addr: String,
 
+    /// Client network(s) (CIDR, e.g. 100.64.0.0/10) trusted to have already
+    /// authenticated the peer (e.g. Tailscale/WireGuard). Clients from these
+    /// networks need no access token. May be repeated or comma-separated.
+    #[arg(long = "trusted-network", value_delimiter = ',')]
+    trusted_networks: Vec<String>,
+
     /// The address to bind for the UDP listener
     #[arg(long, default_value = UNICAST_UDP_DEFAULT)]
     udp_addr: String,
@@ -767,6 +773,8 @@ async fn initialize_strand_cam_session(
         // We have the cookie from Strand Cam now, so store it to disk.
         let jar = jar.read().unwrap();
         Preferences::save(&*jar, &flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY)?;
+        // The jar holds live session cookies; keep its file owner-only.
+        flo_webserver::harden_prefs_file(&flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY);
         tracing::debug!("saved cookie store {STRAND_CAM_COOKIE_KEY}");
     }
 
@@ -1372,10 +1380,15 @@ async fn app_main(
     // Create a channel to send copies of our device state.
     let (from_device_http_tx, from_device_http_rx) = watch::channel(my_state.clone());
 
-    // Create HTTP server for user interface.
-    let (tcp_listener, token_config) = flo_webserver::start_listener(&cli.http_addr)
-        .await
-        .with_context(|| format!("Opening TCP listener at address \"{}\"", cli.http_addr))?;
+    // Create HTTP server for user interface. Load the persistent secret once:
+    // it both mints the self-expiring access token in `start_listener` and
+    // validates it in the auth layer inside `main_loop`.
+    let persistent_secret = flo_webserver::load_persistent_secret()?;
+    let trusted_networks = flo_webserver::parse_trusted_networks(&cli.trusted_networks)?;
+    let (tcp_listener, token_config) =
+        flo_webserver::start_listener(&cli.http_addr, &persistent_secret)
+            .await
+            .with_context(|| format!("Opening TCP listener at address \"{}\"", cli.http_addr))?;
 
     // Run web server main loop
     let _http_server_join_handle = {
@@ -1385,6 +1398,8 @@ async fn app_main(
             flo_webserver::main_loop(
                 tcp_listener,
                 token_config,
+                persistent_secret,
+                trusted_networks,
                 from_device_http_rx,
                 device_config,
                 event_tx,
