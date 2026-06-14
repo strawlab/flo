@@ -10,7 +10,7 @@ tokio = { workspace = true, features = ["net", "sync", "rt-multi-thread"] }
 http.workspace = true
 tokio-stream = { workspace = true, features = ["sync"] }
 axum.workspace = true
-axum-token-auth = "0.2.0"
+axum-token-auth = "0.3.0"
 camino = { workspace = true, optional = true }
 if-addrs.workspace = true
 tower = "0.5.2"

@@ -170,8 +170,95 @@ fn display_qr_url(url: &str) {
     writeln!(stdout_handle).expect("write failed");
 }
 
+/// Duration for which a freshly minted access token remains valid.
+///
+/// A token is only needed for a client's first request: a successful auth hands
+/// back a session cookie that carries the session afterward. Keeping the token
+/// short-lived bounds the window in which a token leaked via a URL (terminal
+/// scrollback, log files, a photographed QR code) can be replayed.
+pub const ACCESS_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Load the persistent cookie/token secret, generating and saving a fresh one
+/// if none exists.
+///
+/// This secret signs both the session cookies and the self-expiring access
+/// tokens, so it must be loaded once and shared between [start_listener] (which
+/// mints the token printed in the URL) and [main_loop] (which validates it).
+/// Keeping the secret stable across restarts keeps already-issued browser
+/// cookies valid through an upgrade.
+pub fn load_persistent_secret() -> anyhow::Result<cookie::Key> {
+    let persistent_secret_base64 = match String::load(&APP_INFO, COOKIE_SECRET_KEY) {
+        Ok(secret_base64) => secret_base64,
+        Err(_) => {
+            tracing::debug!("No secret loaded from preferences file, generating new.");
+            let persistent_secret = cookie::Key::generate();
+            let persistent_secret_base64 =
+                base64::engine::general_purpose::STANDARD.encode(persistent_secret.master());
+            persistent_secret_base64.save(&APP_INFO, COOKIE_SECRET_KEY)?;
+            persistent_secret_base64
+        }
+    };
+
+    // The secret can forge any session cookie and mint any token, so ensure its
+    // on-disk file is owner-only.
+    harden_prefs_file(&APP_INFO, COOKIE_SECRET_KEY);
+
+    let persistent_secret =
+        base64::engine::general_purpose::STANDARD.decode(persistent_secret_base64)?;
+    Ok(cookie::Key::try_from(persistent_secret.as_slice())?)
+}
+
+/// Restrict the on-disk `preferences_serde1` file backing `key` to owner-only
+/// access (Unix mode 0600), warning if it was previously reachable by other
+/// local users.
+///
+/// The cookie/token secret is effectively a master credential and the persisted
+/// cookie jar holds live session cookies, so neither should be group- or
+/// world-readable. `preferences_serde1` creates the file with the process umask
+/// (typically 0644); this tightens it after the fact. No-op on non-Unix
+/// platforms, whose permission model differs.
+pub fn harden_prefs_file(app: &AppInfo, key: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Mirror `preferences_serde1`'s path layout: <config>/<app>/<key>.prefs.json
+        let Some(mut path) = preferences_serde1::prefs_base_dir() else {
+            return;
+        };
+        path.push(app.name);
+        path.push(key);
+        let Some(mut name) = path.file_name().map(|n| n.to_os_string()) else {
+            return;
+        };
+        name.push(".prefs.json");
+        path.set_file_name(name);
+
+        let Ok(md) = std::fs::metadata(&path) else {
+            // No file on disk: nothing to do.
+            return;
+        };
+        let mode = md.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                "Restricting permissions on sensitive file {} from {mode:o} to 600 \
+                 (it was accessible to other local users).",
+                path.display(),
+            );
+        }
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("Could not restrict permissions on {}: {e}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, key);
+    }
+}
+
 pub async fn start_listener(
     address_string: &str,
+    persistent_secret: &cookie::Key,
 ) -> anyhow::Result<(
     tokio::net::TcpListener,
     Option<axum_token_auth::TokenConfig>,
@@ -184,18 +271,26 @@ pub async fn start_listener(
     let listener_local_addr = listener.local_addr()?;
     let all_addrs = expand_unspecified_addr(&listener_local_addr)?;
 
+    // With self-expiring signed tokens the `TokenConfig` carries no value; it
+    // only signals that a token is required. The token string handed to the
+    // user is minted separately below from the persistent secret.
     let token_config: Option<axum_token_auth::TokenConfig> =
         if !listener_local_addr.ip().is_loopback() {
-            Some(axum_token_auth::TokenConfig::new_token("token"))
+            Some(axum_token_auth::TokenConfig::new("token"))
         } else {
             None
         };
 
     for addr in all_addrs.iter() {
         let url = {
-            let query = match &token_config {
-                None => "".to_string(),
-                Some(tok) => format!("token={}", tok.value),
+            let query = if token_config.is_some() {
+                // Mint a short-lived, self-expiring token signed with the
+                // persistent secret. The auth layer (same secret) validates it
+                // by signature and expiry; nothing is stored.
+                let token = axum_token_auth::generate_token(&persistent_secret, ACCESS_TOKEN_TTL);
+                format!("token={token}")
+            } else {
+                "".to_string()
             };
             http::uri::Builder::new()
                 .scheme("http")
@@ -215,9 +310,23 @@ pub async fn start_listener(
     Ok((listener, token_config))
 }
 
+/// Parse a list of CIDR strings (e.g. `"100.64.0.0/10"`) into the network type
+/// expected by [`main_loop`]'s `trusted_networks` argument, returning a
+/// descriptive error for the first one that fails to parse.
+pub fn parse_trusted_networks(nets: &[String]) -> anyhow::Result<Vec<axum_token_auth::CidrBlock>> {
+    nets.iter()
+        .map(|s| {
+            s.parse::<axum_token_auth::CidrBlock>()
+                .map_err(|e| anyhow::Error::msg(format!("invalid trusted network CIDR {s:?}: {e}")))
+        })
+        .collect()
+}
+
 pub async fn main_loop(
     tcp_listener: tokio::net::TcpListener,
     token_config: Option<axum_token_auth::TokenConfig>,
+    persistent_secret: cookie::Key,
+    trusted_networks: Vec<axum_token_auth::CidrBlock>,
     from_device_rx: watch::Receiver<DeviceState>,
     cfg: FloControllerConfig,
     user_commands_tx: tokio::sync::broadcast::Sender<FloEvent>,
@@ -228,28 +337,18 @@ pub async fn main_loop(
         cfg,
     };
 
-    let persistent_secret_base64 = match String::load(&APP_INFO, COOKIE_SECRET_KEY) {
-        Ok(secret_base64) => secret_base64,
-        Err(_) => {
-            tracing::debug!("No secret loaded from preferences file, generating new.");
-            let persistent_secret = cookie::Key::generate();
-            let persistent_secret_base64 =
-                base64::engine::general_purpose::STANDARD.encode(persistent_secret.master());
-            persistent_secret_base64.save(&APP_INFO, COOKIE_SECRET_KEY)?;
-            persistent_secret_base64
-        }
-    };
-
-    let persistent_secret =
-        base64::engine::general_purpose::STANDARD.decode(persistent_secret_base64)?;
-    let persistent_secret = cookie::Key::try_from(persistent_secret.as_slice())?;
-
-    let cfg = axum_token_auth::AuthConfig {
-        token_config,
-        persistent_secret,
-        cookie_name: "braid-bui-session",
-        cookie_expires: Some(std::time::Duration::from_secs(60 * 60 * 24 * 400)), // 400 days
-    };
+    // `AuthConfig` is `#[non_exhaustive]`, so build it via `new` and set fields.
+    let mut cfg = axum_token_auth::AuthConfig::new(persistent_secret);
+    cfg.token_config = token_config;
+    cfg.cookie_name = "braid-bui-session";
+    // Sessions slide forward on use and survive up to 400 days of absence,
+    // enforced server-side via the signed cookie. Existing cookies that
+    // predate this field carry no embedded expiry and are treated as
+    // non-expiring until renewed, so they stay valid across the upgrade.
+    cfg.session_expires = Some(std::time::Duration::from_secs(60 * 60 * 24 * 400)); // 400 days
+    // Clients on a trusted overlay network (e.g. Tailscale/WireGuard) are
+    // accepted without a token; the overlay has already authenticated them.
+    cfg.trusted_networks = trusted_networks;
     let auth_layer = cfg.into_layer();
 
     #[cfg(feature = "bundle_files")]
