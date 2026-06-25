@@ -2,7 +2,7 @@ use color_eyre::eyre::Result;
 
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek},
+    io::{BufRead, BufReader, Read, Seek},
 };
 
 pub struct FlozArchive<R: Read + Seek> {
@@ -135,6 +135,41 @@ fn read_optional_config<R: Read + Seek>(
             None
         }
     }
+}
+
+/// Read the `broadway.jsonl` event log from the archive, if present.
+///
+/// Returns the successfully-parsed [`flo_core::StampedBMsg`] events. Lines that
+/// fail to deserialize (e.g. from a newer schema) are skipped with a logged
+/// warning rather than aborting, since callers typically need only a subset of
+/// event types. Returns an empty `Vec` if the log is absent.
+pub fn read_broadway_log<R: Read + Seek>(
+    archive: &mut zip_or_dir::ZipDirArchive<R>,
+) -> Result<Vec<flo_core::StampedBMsg>> {
+    if !archive.is_file(flo_core::BROADWAY_FNAME) {
+        return Ok(Vec::new());
+    }
+    let rdr = archive.path_starter().join(flo_core::BROADWAY_FNAME).open()?;
+    let rdr = BufReader::new(rdr);
+    let mut events = Vec::new();
+    let mut num_skipped = 0usize;
+    for line in rdr.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<flo_core::StampedBMsg>(&line) {
+            Ok(ev) => events.push(ev),
+            Err(_) => num_skipped += 1,
+        }
+    }
+    if num_skipped > 0 {
+        tracing::warn!(
+            "Skipped {num_skipped} unparseable line(s) in {}",
+            flo_core::BROADWAY_FNAME
+        );
+    }
+    Ok(events)
 }
 
 pub fn add(left: u64, right: u64) -> u64 {

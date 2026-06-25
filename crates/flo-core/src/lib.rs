@@ -39,6 +39,9 @@ pub const ENCODER_DATA_FNAME: &str = "encoder_data.csv";
 pub const ENCODER_OFFSETS_FNAME: &str = "encoder_offsets.csv";
 /// Serialized [`FloControllerConfig`] saved alongside the recorded tables.
 pub const FLO_CONFIG_FNAME: &str = "flo-config.yaml";
+/// Newline-delimited JSON log of [`StampedBMsg`] events (detections, mode
+/// changes, commands) recorded during a session.
+pub const BROADWAY_FNAME: &str = "broadway.jsonl";
 
 pub use pwm_motor_types::{
     DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,
