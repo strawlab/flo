@@ -45,9 +45,7 @@ pub fn floz_parse<R: Read + Seek>(
 ) -> Result<FlozArchive<R>> {
     // Open main motor positions data.
     let motor_positions = {
-        let motor_positions_fname = archive
-            .path_starter()
-            .join(&flo_core::MOTOR_POSITIONS_FNAME);
+        let motor_positions_fname = archive.path_starter().join(flo_core::MOTOR_POSITIONS_FNAME);
 
         let rdr = motor_positions_fname.open()?;
         let motor_positions_rdr = csv::Reader::from_reader(rdr);
