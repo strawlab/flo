@@ -24,6 +24,18 @@ struct Opt {
     /// Print all rows in the `tracking_state` table.
     #[arg(short, long)]
     tracking_states: bool,
+
+    /// Print all rows in the `centroid` table.
+    #[arg(short, long)]
+    centroids: bool,
+
+    /// Print all rows in the `encoder_data` table.
+    #[arg(short, long)]
+    encoder_data: bool,
+
+    /// Print all rows in the `encoder_offsets` table.
+    #[arg(short = 'o', long)]
+    encoder_offsets: bool,
 }
 
 /// Summary of a single time-series table within a `.floz` file.
@@ -45,6 +57,9 @@ struct FlozSummary {
     files: Vec<String>,
     motor_positions: TableSummary,
     tracking_states: TableSummary,
+    centroids: TableSummary,
+    encoder_data: TableSummary,
+    encoder_offsets: TableSummary,
 }
 
 fn init_tracing() -> Result<()> {
@@ -82,6 +97,9 @@ fn main() -> Result<()> {
     // and (below) consume the archive to list its raw contents.
     let motor_positions = std::mem::take(&mut floz.motor_positions);
     let tracking_states = std::mem::take(&mut floz.tracking_states);
+    let centroids = std::mem::take(&mut floz.centroids);
+    let encoder_data = std::mem::take(&mut floz.encoder_data);
+    let encoder_offsets = std::mem::take(&mut floz.encoder_offsets);
 
     let motor_summary = TableSummary {
         num_rows: motor_positions.len(),
@@ -93,6 +111,25 @@ fn main() -> Result<()> {
         num_rows: tracking_states.len(),
         start_time: tracking_states.first().map(|row| row.processed_timestamp),
         end_time: tracking_states.last().map(|row| row.processed_timestamp),
+    };
+
+    let centroid_summary = TableSummary {
+        num_rows: centroids.len(),
+        start_time: centroids.first().map(|row| row.received_timestamp),
+        end_time: centroids.last().map(|row| row.received_timestamp),
+    };
+
+    let encoder_data_summary = TableSummary {
+        num_rows: encoder_data.len(),
+        start_time: encoder_data.first().map(|row| row.local),
+        end_time: encoder_data.last().map(|row| row.local),
+    };
+
+    // `encoder_offsets` is calibration data with no per-row timestamp.
+    let encoder_offsets_summary = TableSummary {
+        num_rows: encoder_offsets.len(),
+        start_time: None,
+        end_time: None,
     };
 
     // Consume the archive to enumerate its top-level contents.
@@ -110,6 +147,9 @@ fn main() -> Result<()> {
         files,
         motor_positions: motor_summary,
         tracking_states: tracking_summary,
+        centroids: centroid_summary,
+        encoder_data: encoder_data_summary,
+        encoder_offsets: encoder_offsets_summary,
     };
 
     let yaml_buf = serde_yaml::to_string(&summary)?;
@@ -125,6 +165,27 @@ fn main() -> Result<()> {
     if opt.tracking_states {
         println!("tracking_state table: --------------");
         for row in &tracking_states {
+            println!("{:?}", row);
+        }
+    }
+
+    if opt.centroids {
+        println!("centroid table: --------------");
+        for row in &centroids {
+            println!("{:?}", row);
+        }
+    }
+
+    if opt.encoder_data {
+        println!("encoder_data table: --------------");
+        for row in &encoder_data {
+            println!("{:?}", row);
+        }
+    }
+
+    if opt.encoder_offsets {
+        println!("encoder_offsets table: --------------");
+        for row in &encoder_offsets {
             println!("{:?}", row);
         }
     }

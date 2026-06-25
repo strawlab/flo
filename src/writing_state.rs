@@ -2,29 +2,12 @@ use std::io::{Seek, Write};
 
 use color_eyre::eyre::Result;
 use flo_core::{
-    FloControllerConfig, FloatType, GimbalEncoderData, GimbalEncoderOffsets, MomentCentroid,
-    SaveToDiskMsg, StampedBMsg, StampedJson, TimestampSource,
+    FloControllerConfig, GimbalEncoderData, GimbalEncoderOffsets, MomentCentroid, SaveToDiskMsg,
+    StampedBMsg, StampedJson, StampedMomentCentroid,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::json_lines_writer::JsonLinesWriter;
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-struct StampedMomentCentroid {
-    received_timestamp: chrono::DateTime<chrono::Local>,
-    schema_version: u8,
-    framenumber: u32,
-    timestamp_source: TimestampSource,
-    timestamp: chrono::DateTime<chrono::Utc>,
-    mu00: FloatType,
-    mu01: FloatType,
-    mu10: FloatType,
-    center_x: u32,
-    center_y: u32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    cam_name: String,
-}
 
 /// Test that StampedMomentCentroid contains all fields in MomentCentroid.
 #[test]
@@ -352,7 +335,7 @@ impl WritingState {
 
         let centroid_wtr = {
             let mut csv_path = output_dirname.clone();
-            csv_path.push("centroid.csv");
+            csv_path.push(flo_core::CENTROID_FNAME);
             let wtr = Box::new(bufwriter(csv_path)?);
             csv::Writer::from_writer(wtr as Box<dyn Write + Send>)
         };
@@ -399,7 +382,7 @@ impl WritingState {
     fn save_encoder_offsets(&mut self, encoder_offsets: &GimbalEncoderOffsets) -> Result<()> {
         if self.encoder_offsets_wtr.is_none() {
             let mut csv_path = self.output_dirname.clone();
-            csv_path.push("encoder_offsets.csv");
+            csv_path.push(flo_core::ENCODER_OFFSETS_FNAME);
             let wtr = Box::new(bufwriter(csv_path)?);
             self.encoder_offsets_wtr = Some(csv::Writer::from_writer(wtr as Box<dyn Write + Send>));
         }
@@ -411,7 +394,7 @@ impl WritingState {
     fn save_encoder_data(&mut self, encoder_data: &GimbalEncoderData) -> Result<()> {
         if self.encoder_data_wtr.is_none() {
             let mut csv_path = self.output_dirname.clone();
-            csv_path.push("encoder_data.csv");
+            csv_path.push(flo_core::ENCODER_DATA_FNAME);
             let wtr = Box::new(bufwriter(csv_path)?);
             self.encoder_data_wtr = Some(csv::Writer::from_writer(wtr as Box<dyn Write + Send>));
         }
