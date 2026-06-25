@@ -14,6 +14,13 @@ pub struct FlozArchive<R: Read + Seek> {
     pub encoder_data: Vec<flo_core::GimbalEncoderData>,
     /// Gimbal encoder offset calibration. Only present for gimbal recordings.
     pub encoder_offsets: Vec<flo_core::GimbalEncoderOffsets>,
+    /// The controller configuration in effect during the recording.
+    ///
+    /// `None` if the archive has no `flo-config.yaml`, or if it could not be
+    /// deserialized (e.g. it was written by an incompatible version). A failure
+    /// to parse the config is logged but not treated as fatal, since the
+    /// recorded data tables are still usable on their own.
+    pub config: Option<flo_core::FloControllerConfig>,
 }
 
 impl<R: Read + Seek> FlozArchive<R> {
@@ -90,6 +97,7 @@ pub fn floz_parse<R: Read + Seek>(
     let centroids = read_csv_table(&mut archive, flo_core::CENTROID_FNAME)?;
     let encoder_data = read_optional_csv_table(&mut archive, flo_core::ENCODER_DATA_FNAME)?;
     let encoder_offsets = read_optional_csv_table(&mut archive, flo_core::ENCODER_OFFSETS_FNAME)?;
+    let config = read_optional_config(&mut archive, flo_core::FLO_CONFIG_FNAME);
 
     Ok(FlozArchive {
         archive,
@@ -98,7 +106,35 @@ pub fn floz_parse<R: Read + Seek>(
         centroids,
         encoder_data,
         encoder_offsets,
+        config,
     })
+}
+
+/// Read and deserialize the controller config, returning `None` if it is absent
+/// or cannot be parsed.
+///
+/// We deliberately swallow parse errors (after logging) rather than propagate
+/// them: the config is supplementary diagnostic information and an unparseable
+/// config from a different software version should not prevent inspecting the
+/// recorded data tables.
+fn read_optional_config<R: Read + Seek>(
+    archive: &mut zip_or_dir::ZipDirArchive<R>,
+    fname: &str,
+) -> Option<flo_core::FloControllerConfig> {
+    if !archive.is_file(fname) {
+        return None;
+    }
+    let result = (|| -> Result<flo_core::FloControllerConfig> {
+        let rdr = archive.path_starter().join(fname).open()?;
+        Ok(serde_yaml::from_reader(rdr)?)
+    })();
+    match result {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::warn!("Could not parse {fname}: {e}");
+            None
+        }
+    }
 }
 
 pub fn add(left: u64, right: u64) -> u64 {
