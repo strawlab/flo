@@ -287,7 +287,7 @@ pub async fn start_listener(
                 // Mint a short-lived, self-expiring token signed with the
                 // persistent secret. The auth layer (same secret) validates it
                 // by signature and expiry; nothing is stored.
-                let token = axum_token_auth::generate_token(&persistent_secret, ACCESS_TOKEN_TTL);
+                let token = axum_token_auth::generate_token(persistent_secret, ACCESS_TOKEN_TTL);
                 format!("token={token}")
             } else {
                 "".to_string()
