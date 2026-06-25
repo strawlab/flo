@@ -24,6 +24,7 @@ members = [
   "crates/tokio-mavlink",
   "crates/trinamic", "crates/floz-parser",
   "crates/floz-viewer",
+  "crates/floz-cli",
 ]
 exclude = [
   "firmware/beamdriver",
