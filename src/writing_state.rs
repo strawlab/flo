@@ -280,7 +280,48 @@ fn _test_writing_state_is_send() {
 }
 
 fn readme_contents() -> String {
-    format!("\n\nThis is data saved by {}.\n\n", env!("CARGO_PKG_NAME"))
+    // This text is stored uncompressed and as the first entry in the `.floz`
+    // archive, so its leading bytes also serve to identify the file format.
+    format!(
+        r#"# FLO data file (`.floz`)
+
+This is a data file saved by `{name}` (version {version}), part of the FLO
+(Fast Lock-On) project for high-resolution videography of moving subjects using
+a camera system that automatically tracks the subject.
+
+Project home page: <https://github.com/strawlab/flo>
+
+FLO is described in:
+
+> Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution
+> Outdoor Videography of Insects Using Fast Lock-On Tracking. Science Robotics
+> 9(95), eadm7689 (2024). DOI: 10.1126/scirobotics.adm7689
+
+## File format
+
+A `.floz` file is a standard ZIP archive. You can open it with any ZIP tool, or
+analyze it with the tools at <https://github.com/strawlab/flo-data-analysis>.
+The archive typically contains:
+
+- `README.md` — this file (stored uncompressed and first).
+- `flo-metadata.yaml` — recording metadata (FLO git revision, creation time,
+  timezone).
+- `flo-config.yaml` — the FLO controller configuration in effect for this
+  recording (geometry, Kalman filter and PID gains, calibration functions).
+- `tracking_state.csv` — per-update tracking estimates and motor commands
+  (estimated and observed pan/tilt/distance, motor commands, predictions).
+- `centroid.csv` — subject image coordinates received from the camera.
+- `motor_positions.csv` — measured motor/gimbal positions over time.
+- `encoder_data.csv` — raw gimbal IMU and encoder readings.
+- `encoder_offsets.csv` — gimbal encoder offsets used during the recording.
+- `broadway.jsonl` — line-delimited JSON log of FLO events and commands.
+
+Not every file is present in every recording; the exact set depends on the
+hardware and configuration used.
+"#,
+        name = env!("CARGO_PKG_NAME"),
+        version = env!("CARGO_PKG_VERSION"),
+    )
 }
 
 impl WritingState {
