@@ -134,10 +134,7 @@ impl Component for Model {
                 let link = ctx.link().clone();
                 let filename2 = filename.clone();
                 let reader = gloo_file::callbacks::read_as_bytes(&file, move |res| {
-                    link.send_message(Msg::Loaded(
-                        filename2,
-                        res.expect("failed to read file"),
-                    ))
+                    link.send_message(Msg::Loaded(filename2, res.expect("failed to read file")))
                 });
                 self.readers.insert(filename, reader);
             }
@@ -453,8 +450,7 @@ pub fn main() {
         let statik2 = statik.clone();
 
         let on_launch_params = Closure::new(move |launch_params: JsValue| {
-            let files =
-                js_sys::Reflect::get(&launch_params, &JsValue::from_str("files")).unwrap();
+            let files = js_sys::Reflect::get(&launch_params, &JsValue::from_str("files")).unwrap();
 
             let iterator = js_sys::try_iter(&files)
                 .unwrap()

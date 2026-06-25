@@ -366,7 +366,7 @@ impl WritingState {
 
         let motor_position_wtr = {
             let mut csv_path = output_dirname.clone();
-            csv_path.push(&flo_core::MOTOR_POSITIONS_FNAME);
+            csv_path.push(flo_core::MOTOR_POSITIONS_FNAME);
             let wtr = Box::new(bufwriter(csv_path)?);
             csv::Writer::from_writer(wtr as Box<dyn Write + Send>)
         };
