@@ -1380,6 +1380,12 @@ async fn app_main(
     // Create a channel to send copies of our device state.
     let (from_device_http_tx, from_device_http_rx) = watch::channel(my_state.clone());
 
+    // Channel used to tell the web server it is shutting down. It is flipped to
+    // `true` once the main loop below exits (but before this task returns and
+    // the runtime drops the server task), so every connected browser is told to
+    // show the "FLO has quit" screen and stop reconnecting.
+    let (quit_tx, quit_rx) = watch::channel(false);
+
     // Create HTTP server for user interface. Load the persistent secret once:
     // it both mints the self-expiring access token in `start_listener` and
     // validates it in the auth layer inside `main_loop`.
@@ -1403,6 +1409,7 @@ async fn app_main(
                 from_device_http_rx,
                 device_config,
                 event_tx,
+                quit_rx,
             )
             .await
         })
@@ -1584,6 +1591,15 @@ async fn app_main(
         };
     }
     tracing::debug!("FloCoordinator ending.");
+
+    // Tell every connected browser we are shutting down, so all clients (not
+    // only one) show the "FLO has quit" screen and stop reconnecting. This is
+    // sent while the HTTP server task is still alive: it is only dropped when
+    // this function returns and the tokio runtime is torn down. The brief sleep
+    // gives the SSE message time to flush to clients first.
+    let _ = quit_tx.send(true);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     Ok(())
 }
 

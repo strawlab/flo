@@ -17,6 +17,8 @@ use flo_core::*;
 mod recording_path;
 use recording_path::RecordingPathWidget;
 
+use ads_webasm::components::ConnectDevice;
+
 const JOYGAIN: f64 = 1.0;
 
 #[derive(Clone, PartialEq)]
@@ -66,6 +68,8 @@ struct App {
     _listeners: Vec<EventListener>,
     query_gamepad_interval: Option<Interval>,
     last_gamepad_timestamp: f64,
+    /// Set once the server broadcasts that it is shutting down.
+    server_quit: bool,
 }
 
 enum Msg {
@@ -81,6 +85,8 @@ enum Msg {
     DoRecordMotorPositionsFloz(bool),
     SetDistanceCorrection,
     AdjustFocus(i32),
+    /// The server broadcast that it is shutting down.
+    ServerQuit,
     RenderView,
 }
 
@@ -170,6 +176,20 @@ impl Component for App {
             ));
         }
 
+        {
+            // Listen for the server-is-quitting event so this browser shows the
+            // "FLO has quit" screen and stops trying to reconnect, even if the
+            // shutdown was initiated elsewhere.
+            let quit_callback = ctx.link().callback(|_| Msg::ServerQuit);
+            _listeners.push(EventListener::new(
+                &es,
+                FLO_QUIT_EVENT_NAME,
+                move |_event: &Event| {
+                    quit_callback.emit(());
+                },
+            ));
+        }
+
         let link = ctx.link().clone();
         _listeners.push(EventListener::new(&es, "error", move |_event: &Event| {
             // Trigger a UI redraw on error, because we won't get any state
@@ -191,12 +211,19 @@ impl Component for App {
             _listeners,
             query_gamepad_interval: None,
             last_gamepad_timestamp: 0.0,
+            server_quit: false,
         }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             Msg::RenderView => {}
+            Msg::ServerQuit => {
+                // The server is shutting down. Show the "has quit" screen and
+                // close the event stream so the browser stops reconnecting.
+                self.server_quit = true;
+                self.es.close();
+            }
             Msg::GamepadConnected((_connected, _gamepad)) => {
                 if self.n_connected_gamepads() > 0 {
                     let handle = {
@@ -320,10 +347,17 @@ impl Component for App {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
+        if self.server_quit {
+            // Render only the "has quit" screen. Rendering nothing else stops
+            // the rest of the UI (and any of its timers) from running against
+            // the now-gone server.
+            return self.server_quit_dialog();
+        }
         html! {
             <div>
                 <h1>{"FLO"}</h1>
                 {self.disconnected_dialog()}
+                <div style="text-align: center;"><ConnectDevice /></div>
                 { self.browser_info() }
                 <div class="border-1px">
                     <h2>{"Info"}</h2>
@@ -541,6 +575,16 @@ impl App {
                     <p>{ "Please restart FLO and reload this webpage" }</p>
                 </div>
             }
+        }
+    }
+
+    fn server_quit_dialog(&self) -> Html {
+        html! {
+            <div class="modal-container">
+                <h1> { "FLO has quit" } </h1>
+                <p>{ "The FLO server has shut down. Restart FLO and reload this \
+                      webpage to reconnect." }</p>
+            </div>
         }
     }
 
