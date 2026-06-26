@@ -309,7 +309,9 @@ fn build_distance_report(
         None
     } else {
         let end_idx = best_start + best_len - 1;
-        let start_time = tracking_states.get(best_start).map(|r| r.processed_timestamp);
+        let start_time = tracking_states
+            .get(best_start)
+            .map(|r| r.processed_timestamp);
         let end_time = tracking_states.get(end_idx).map(|r| r.processed_timestamp);
         let duration_secs = match (start_time, end_time) {
             (Some(s), Some(e)) => (e - s).num_microseconds().unwrap_or(0) as f64 / 1e6,
@@ -386,8 +388,7 @@ fn build_distance_report(
             for p in &matched {
                 *counts.entry(p.framenumber_offset).or_default() += 1;
             }
-            let (&modal_offset, &modal_count) =
-                counts.iter().max_by_key(|(_, n)| **n).unwrap();
+            let (&modal_offset, &modal_count) = counts.iter().max_by_key(|(_, n)| **n).unwrap();
             Some(FramenumberOffsetSummary {
                 modal_offset,
                 num_pairs_at_modal_offset: modal_count,
@@ -415,9 +416,8 @@ fn build_distance_report(
         stereopsis_calib_present: config.is_some_and(|c| c.stereopsis_calib.is_some()),
         distance_kalman_params_present: config
             .is_some_and(|c| c.kalman_filter_dist_parameters.is_some()),
-        secondary_camera_configured: config.is_some_and(|c| {
-            c.strand_cam_secondary.is_some() || c.secondary_cam_name.is_some()
-        }),
+        secondary_camera_configured: config
+            .is_some_and(|c| c.strand_cam_secondary.is_some() || c.secondary_cam_name.is_some()),
     };
 
     let diagnosis = build_diagnosis(&est, &dist_obs, &config_summary, &cameras, &stereo_pairs);
@@ -774,7 +774,10 @@ mod tests {
         let matched = match_stereo_pairs(&a, &b, window);
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].framenumber_offset, 101 - 200);
-        assert_eq!(matched[0].received_skew, chrono::TimeDelta::milliseconds(-2));
+        assert_eq!(
+            matched[0].received_skew,
+            chrono::TimeDelta::milliseconds(-2)
+        );
     }
 
     #[test]

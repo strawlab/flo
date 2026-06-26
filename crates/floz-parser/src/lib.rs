@@ -53,10 +53,7 @@ pub fn floz_parse_path<P: AsRef<std::path::Path>>(path: P) -> Result<FlozArchive
 }
 
 /// Read and deserialize every row of a CSV file within the archive.
-fn read_csv_table<R, T>(
-    archive: &mut zip_or_dir::ZipDirArchive<R>,
-    fname: &str,
-) -> Result<Vec<T>>
+fn read_csv_table<R, T>(archive: &mut zip_or_dir::ZipDirArchive<R>, fname: &str) -> Result<Vec<T>>
 where
     R: Read + Seek,
     T: serde::de::DeserializeOwned,
@@ -149,7 +146,10 @@ pub fn read_broadway_log<R: Read + Seek>(
     if !archive.is_file(flo_core::BROADWAY_FNAME) {
         return Ok(Vec::new());
     }
-    let rdr = archive.path_starter().join(flo_core::BROADWAY_FNAME).open()?;
+    let rdr = archive
+        .path_starter()
+        .join(flo_core::BROADWAY_FNAME)
+        .open()?;
     let rdr = BufReader::new(rdr);
     let mut events = Vec::new();
     let mut num_skipped = 0usize;

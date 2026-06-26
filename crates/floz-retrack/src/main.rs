@@ -191,17 +191,18 @@ fn compute_distances(
     for (_, _, off) in &candidates {
         *offset_counts.entry(*off).or_default() += 1;
     }
-    let modal_offset = offset_counts.iter().max_by_key(|(_, n)| **n).map(|(o, _)| *o);
+    let modal_offset = offset_counts
+        .iter()
+        .max_by_key(|(_, n)| **n)
+        .map(|(o, _)| *o);
 
     let mut out = Vec::new();
     for (pi, si, off) in candidates {
         if Some(off) != modal_offset {
             continue;
         }
-        let state = calib.centroids_to_distance((
-            primary[pi].moment.clone(),
-            secondary[si].moment.clone(),
-        ));
+        let state =
+            calib.centroids_to_distance((primary[pi].moment.clone(), secondary[si].moment.clone()));
         let dist = state.as_radial_distance().0 as f32;
         if dist.is_finite() && dist > 0.0 {
             out.push((primary[pi].acquired, dist));
@@ -245,7 +246,11 @@ fn write_retracked_floz<R: std::io::Read + std::io::Seek>(
         .unix_permissions(0o755);
 
     for name in &names {
-        let options = if name == README_FNAME { stored } else { compressed };
+        let options = if name == README_FNAME {
+            stored
+        } else {
+            compressed
+        };
         zip.start_file(name, options)?;
         if name == TRACKING_STATE_FNAME {
             let mut wtr = csv::Writer::from_writer(&mut zip);
@@ -383,7 +388,10 @@ fn main() -> Result<()> {
     }
     tracing::info!("filled distance into {num_filled} tracking_state rows");
 
-    let output = opt.output.clone().unwrap_or_else(|| default_output(&opt.input));
+    let output = opt
+        .output
+        .clone()
+        .unwrap_or_else(|| default_output(&opt.input));
     write_retracked_floz(&mut archive, &tracking_states, &output)?;
     tracing::info!("wrote {}", output.display());
     println!("{}", output.display());
