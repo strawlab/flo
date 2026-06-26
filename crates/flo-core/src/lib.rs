@@ -1389,6 +1389,13 @@ pub fn all_addrs(orig_addr: std::net::SocketAddr) -> Option<Vec<std::net::Socket
 // HTTP stuff
 pub const EVENT_NAME: &str = "flo-evt";
 
+/// Event name for the server-is-quitting SSE message.
+///
+/// Broadcast to every connected browser just before the server shuts down so
+/// that all clients (not only the one that initiated the quit) show the "FLO
+/// has quit" screen and stop trying to reconnect.
+pub const FLO_QUIT_EVENT_NAME: &str = "flo-quit";
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RecordingPath {
     path: String,
