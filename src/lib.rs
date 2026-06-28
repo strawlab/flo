@@ -861,7 +861,14 @@ async fn init_strand_cams(
             );
         }
     }
-    Ok((cam_session_main, cam_session_secondary, cam_name_secondary2))
+
+    // Prefer the name reported by the secondary Strand Cam HTTP session. When
+    // there is no such session (e.g. hardware-free testing where centroids are
+    // injected over UDP by `floz-replay`), fall back to the deprecated
+    // `secondary_cam_name` config so stereopsis still works headless.
+    let secondary_cam_name =
+        cam_name_secondary2.or_else(|| device_config.secondary_cam_name.clone());
+    Ok((cam_session_main, cam_session_secondary, secondary_cam_name))
 }
 
 trait BroadwaySend {
