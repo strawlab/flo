@@ -132,6 +132,67 @@ Then run FLO with something like this:
 Note that in the FLO config file you can configure imops and other aspects of
 strand-cam automatically in the `on_attach_json_commands` section.
 
+## Running without hardware (simulation / testing)
+
+You can run the full `flo` controller — tracking, Kalman filter, distance
+estimation, recording, and web UI — with no camera or motor hardware attached.
+The `floz-replay` tool feeds centroid data to `flo` over the same UDP channel
+that Strand Camera's `imops` normally uses, so the controller behaves as if a
+camera were present. This is useful for checking that new code runs, runs
+usefully, and that the UI works, before testing on real hardware.
+
+This always involves **two processes**, and you must **start `flo` first** so it
+is listening on its UDP port. If you start `floz-replay` with nothing listening,
+the send fails immediately with `Sending UDP packet: Connection refused` (the
+operating system reports the unreachable port). That is the cause of a
+connection-refused error from a bare `floz-replay synth ...` command.
+
+1. Start `flo` with a hardware-free config — one with no `strand_cam_*` blocks
+   (so nothing connects to Strand Camera) and no motor flags (so motor commands
+   are computed and harmlessly discarded). The bundled `config-sim-stereo.yaml`
+   is such a config, set up for stereo distance testing:
+
+   ```
+   flo --config config-sim-stereo.yaml
+   ```
+
+   By default `flo` listens for centroids on UDP `0.0.0.0:8080` and serves the
+   web UI on `--http-addr` (default port `2222`). Open the UI to watch tracking.
+
+2. In a second terminal, drive `flo` one of two ways. Both subcommands send to
+   `127.0.0.1:8080` by default, matching `flo`'s default UDP port; use
+   `--target <addr>` if you changed `flo`'s `--udp-addr`.
+
+   **Synthetic trajectory (`synth`)** generates centroids from a parametric
+   virtual-insect trajectory, projected through the config's calibration so the
+   angles and stereopsis distance the controller recovers match the requested
+   trajectory:
+
+   ```
+   cargo run -r -p floz-replay -- synth --config config-sim-stereo.yaml
+   ```
+
+   Pass `--config` the same file you gave `flo`, so the projection and the
+   controller agree. Useful options: `--distance <m>` and
+   `--distance-amplitude <m>` (target range and its sinusoidal variation, for
+   distance testing), `--azimuth-deg` / `--elevation-deg` / `--period` (the
+   angular sweep), `--rate <hz>`, `--duration <s>`, and `--loop`.
+   `config-sim-stereo.yaml` includes a `stereopsis_calib` and a secondary
+   camera, so distance tracking is exercised; pass `--no-stereo` (or use a
+   config without `stereopsis_calib`) to send only the primary camera.
+
+   **Replay a recording (`replay`)** re-emits the centroids saved in a `.floz`
+   file at their original cadence:
+
+   ```
+   cargo run -r -p floz-replay -- replay recording.floz
+   ```
+
+   Useful options: `--speed <x>`, `--loop`, `--start <s>`, `--duration <s>`, and
+   `--primary-cam` / `--secondary-cam` to relabel the recording's camera names
+   to the ones the controller expects (e.g. `synth-secondary` to match
+   `config-sim-stereo.yaml`).
+
 ## `camshow` binary
 
 `camshow` is a separate desktop process that shows a USB webcam feed and draws
