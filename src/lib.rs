@@ -27,7 +27,6 @@ use clap::Parser;
 use color_eyre::eyre::{self, Result, WrapErr};
 use futures::StreamExt;
 use preferences_serde1::Preferences;
-use serde::{Deserialize, Serialize};
 use std::{
     future::{Future, pending},
     pin::Pin,
@@ -46,7 +45,7 @@ use flo_core::{
     FloControllerConfig, FloEvent, FloatType, FocusMotorType, GimbalConfig, LocalFloState,
     ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType, MotorValueCache, OsdState,
     PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg, StrandCamConfig, UNICAST_UDP_DEFAULT,
-    drone_structs::DroneEvent,
+    UdpMsg, drone_structs::DroneEvent,
 };
 use tracking::{centroid_to_sensor_angles, compute_motor_output, kalman_step};
 
@@ -155,11 +154,6 @@ fn get_device_id() -> Result<flo_core::DeviceId> {
     let device_id = flo_core::DeviceId::new(digest[..flo_core::DEVICE_ID_LEN].try_into()?);
     log::info!("This is device {device_id:?}");
     Ok(device_id)
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub(crate) enum UdpMsg {
-    Centroid(MomentCentroid),
 }
 
 struct FloCoordinator<'a> {
