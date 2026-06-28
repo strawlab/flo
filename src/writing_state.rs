@@ -46,7 +46,8 @@ fn test_writer_task_creates_floz_on_toggle_off() -> Result<()> {
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let config = FloControllerConfig::default();
-    let handle = std::thread::spawn(move || writer_task_main(rx, &config));
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || writer_task_main(rx, &config, buffered_secs_tx));
 
     let creation_time = chrono::FixedOffset::east_opt(0)
         .expect("valid fixed offset")
@@ -57,6 +58,7 @@ fn test_writer_task_creates_floz_on_toggle_off() -> Result<()> {
     tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
         creation_time.into(),
         output_dir.clone(),
+        false,
     ))))?;
 
     tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
@@ -78,6 +80,124 @@ fn test_writer_task_creates_floz_on_toggle_off() -> Result<()> {
     );
 
     floz_parser::floz_parse_path(&floz_path)?;
+
+    Ok(())
+}
+
+#[test]
+fn test_precapture_buffer_is_written_to_recording() -> Result<()> {
+    // Data sent *before* recording starts, while a pre-capture window is set,
+    // must end up in the recording (the "time travel" capture).
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || writer_task_main(rx, &config, buffered_secs_tx));
+
+    // Enable a generous pre-capture window, then send a centroid while NOT
+    // recording. It should be buffered in RAM.
+    tx.send(SaveToDiskMsg::SetPreCaptureSeconds(60.0))?;
+    let buffered_centroid = MomentCentroid {
+        framenumber: 42,
+        ..Default::default()
+    };
+    tx.send(SaveToDiskMsg::CentroidData((
+        chrono::Local::now(),
+        buffered_centroid,
+    )))?;
+
+    // Now start a pre-capture recording. The buffered centroid must be
+    // flushed into it.
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        chrono::Local::now(),
+        output_dir.clone(),
+        true,
+    ))))?;
+
+    // A live centroid after recording started.
+    let live_centroid = MomentCentroid {
+        framenumber: 43,
+        ..Default::default()
+    };
+    tx.send(SaveToDiskMsg::CentroidData((
+        chrono::Local::now(),
+        live_centroid,
+    )))?;
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+
+    handle.join().expect("writer thread panicked")?;
+
+    let floz_path = output_dir.with_extension("floz");
+    let archive = floz_parser::floz_parse_path(&floz_path)?;
+    let framenumbers: Vec<u32> = archive.centroids.iter().map(|c| c.framenumber).collect();
+    assert_eq!(
+        framenumbers,
+        vec![42, 43],
+        "pre-captured centroid (42) must precede the live one (43)"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_normal_recording_excludes_precapture_buffer() -> Result<()> {
+    // A normal recording (include_precapture = false) must NOT pull in data
+    // buffered before it started.
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || writer_task_main(rx, &config, buffered_secs_tx));
+
+    tx.send(SaveToDiskMsg::SetPreCaptureSeconds(60.0))?;
+    let buffered_centroid = MomentCentroid {
+        framenumber: 42,
+        ..Default::default()
+    };
+    tx.send(SaveToDiskMsg::CentroidData((
+        chrono::Local::now(),
+        buffered_centroid,
+    )))?;
+
+    // Normal recording: include_precapture = false.
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        chrono::Local::now(),
+        output_dir.clone(),
+        false,
+    ))))?;
+
+    let live_centroid = MomentCentroid {
+        framenumber: 43,
+        ..Default::default()
+    };
+    tx.send(SaveToDiskMsg::CentroidData((
+        chrono::Local::now(),
+        live_centroid,
+    )))?;
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+
+    handle.join().expect("writer thread panicked")?;
+
+    let floz_path = output_dir.with_extension("floz");
+    let archive = floz_parser::floz_parse_path(&floz_path)?;
+    let framenumbers: Vec<u32> = archive.centroids.iter().map(|c| c.framenumber).collect();
+    assert_eq!(
+        framenumbers,
+        vec![43],
+        "normal recording must contain only the live centroid (43)"
+    );
 
     Ok(())
 }
@@ -137,6 +257,7 @@ impl Drop for WriteCloser {
 pub(crate) fn writer_task_main(
     mut flo_write_rx: tokio::sync::mpsc::UnboundedReceiver<SaveToDiskMsg>,
     config: &FloControllerConfig,
+    buffered_secs_tx: tokio::sync::watch::Sender<f64>,
 ) -> Result<()> {
     use SaveToDiskMsg::*;
     use std::time::{Duration, Instant};
@@ -151,6 +272,11 @@ pub(crate) fn writer_task_main(
 
     let mut encoder_offsets = None;
 
+    // Pre-capture ("post-trigger") RAM buffer. Holds recent data messages
+    // while not recording so that starting a recording also writes the
+    // preceding window to disk.
+    let mut precapture = PreCaptureBuffer::new();
+
     // Ideally we would have a timeout here, but this is not available.
 
     while let Some(msg) = flo_write_rx.blocking_recv() {
@@ -159,32 +285,38 @@ pub(crate) fn writer_task_main(
             Quit => {
                 break;
             }
-            CentroidData((stamp, centroid_data)) => {
-                if let Some(ref mut ws) = writing_state {
-                    let centroid_data = with_received_timestamp(centroid_data, stamp);
-                    ws.save_centroid(centroid_data)?;
-                }
-            }
-            StampedTrackingState(stamped_tracking_state) => {
-                if let Some(ref mut ws) = writing_state {
-                    ws.save_stamped_tracking_state(*stamped_tracking_state)?;
-                }
-            }
-            MotorPosition(motor_position) => {
-                if let Some(ref mut ws) = writing_state {
-                    ws.save_motor_position(*motor_position)?;
-                }
+            SetPreCaptureSeconds(secs) => {
+                precapture.set_window_secs(secs);
+                let _ = buffered_secs_tx.send(precapture.buffered_secs());
             }
             ToggleSavingFloz(values) => {
-                if let Some((creation_time, output_dirname)) = values {
+                if let Some((creation_time, output_dirname, include_precapture)) = values {
                     tracing::info!("Saving FLO data to {output_dirname}");
                     if writing_state.is_none() {
-                        writing_state = Some(WritingState::new(
+                        let mut ws = WritingState::new(
                             creation_time,
                             output_dirname,
                             encoder_offsets.as_ref(),
                             config,
-                        )?);
+                        )?;
+                        // For a pre-capture ("post-trigger") recording, flush
+                        // the buffered window into the new recording first so
+                        // it begins in the past. A normal recording leaves the
+                        // buffer untouched and starts from now.
+                        if include_precapture {
+                            let buffered = precapture.drain();
+                            if !buffered.is_empty() {
+                                tracing::info!(
+                                    "Writing {} pre-captured messages to recording",
+                                    buffered.len()
+                                );
+                            }
+                            for (_stamp, buffered_msg) in buffered {
+                                ws.save_data_msg(buffered_msg)?;
+                            }
+                            let _ = buffered_secs_tx.send(precapture.buffered_secs());
+                        }
+                        writing_state = Some(ws);
                     }
                 } else {
                     tracing::info!("Done saving FLO data");
@@ -199,28 +331,14 @@ pub(crate) fn writer_task_main(
                 // Cache value.
                 encoder_offsets = Some(offsets);
             }
-            GimbalEncoderData(encoder_data) => {
+            // All remaining variants carry per-event data. While recording,
+            // write them straight to disk; otherwise feed the pre-capture
+            // buffer (which itself ignores them when the window is zero).
+            data_msg => {
                 if let Some(ref mut ws) = writing_state.as_mut() {
-                    ws.save_encoder_data(&encoder_data)?;
-                }
-            }
-            MavlinkData(v) => {
-                if let Some(ref mut ws) = writing_state.as_mut() {
-                    ws.save_mavlink_data(&v)?;
-                }
-            }
-            BroadwaySaveToDiskMsg(msg) => {
-                if let Some(ref mut ws) = writing_state.as_mut() {
-                    ws.save_broadway_msg(msg)?;
-                }
-            }
-            ExtensionRecord {
-                file_name,
-                stamp,
-                record,
-            } => {
-                if let Some(ref mut ws) = writing_state.as_mut() {
-                    ws.save_extension_record(file_name, stamp, record)?;
+                    ws.save_data_msg(data_msg)?;
+                } else if precapture.push(data_msg) {
+                    let _ = buffered_secs_tx.send(precapture.buffered_secs());
                 }
             }
         }
@@ -238,6 +356,83 @@ pub(crate) fn writer_task_main(
     }
     tracing::info!("Done with floz writer task.");
     Ok(())
+}
+
+/// RAM ring buffer of recent data messages for pre-capture recording.
+///
+/// Messages are retained with the wall-clock time they were dequeued. The
+/// buffer keeps at most `window_secs` worth of data, trimming the oldest
+/// messages as new ones arrive. A zero window disables buffering entirely.
+struct PreCaptureBuffer {
+    window_secs: f64,
+    inner: std::collections::VecDeque<(chrono::DateTime<chrono::Local>, SaveToDiskMsg)>,
+}
+
+impl PreCaptureBuffer {
+    fn new() -> Self {
+        Self {
+            window_secs: 0.0,
+            inner: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Update the buffer window. Zero (or negative) disables buffering and
+    /// discards anything currently held.
+    fn set_window_secs(&mut self, secs: f64) {
+        if secs > 0.0 {
+            self.window_secs = secs;
+            self.trim(chrono::Local::now());
+        } else {
+            self.window_secs = 0.0;
+            self.inner.clear();
+        }
+    }
+
+    /// Buffer a data message. Returns `true` if it was retained (i.e. the
+    /// buffer is enabled), so callers can avoid recomputing the buffered span
+    /// when nothing changed.
+    fn push(&mut self, msg: SaveToDiskMsg) -> bool {
+        if self.window_secs <= 0.0 {
+            return false;
+        }
+        let now = chrono::Local::now();
+        self.inner.push_back((now, msg));
+        self.trim(now);
+        true
+    }
+
+    /// Drop messages older than the window relative to `now`.
+    fn trim(&mut self, now: chrono::DateTime<chrono::Local>) {
+        while let Some((stamp, _)) = self.inner.front() {
+            if secs_between(*stamp, now) > self.window_secs {
+                self.inner.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Number of seconds of data currently buffered (span between the oldest
+    /// and newest retained message).
+    fn buffered_secs(&self) -> f64 {
+        match (self.inner.front(), self.inner.back()) {
+            (Some((first, _)), Some((last, _))) => secs_between(*first, *last),
+            _ => 0.0,
+        }
+    }
+
+    /// Take all buffered messages, leaving the buffer empty.
+    fn drain(&mut self) -> std::collections::VecDeque<(chrono::DateTime<chrono::Local>, SaveToDiskMsg)>
+    {
+        std::mem::take(&mut self.inner)
+    }
+}
+
+fn secs_between(
+    earlier: chrono::DateTime<chrono::Local>,
+    later: chrono::DateTime<chrono::Local>,
+) -> f64 {
+    (later - earlier).num_milliseconds() as f64 / 1000.0
 }
 
 const README_MD_FNAME: &str = "README.md";
@@ -413,6 +608,48 @@ impl WritingState {
         }
 
         Ok(result)
+    }
+
+    /// Write a single per-event data message to the appropriate file.
+    ///
+    /// Used both for live messages while recording and for replaying the
+    /// pre-capture buffer. Control messages (`Quit`, `ToggleSavingFloz`,
+    /// `SetPreCaptureSeconds`, `GimbalEncoderOffsets`) are handled by the
+    /// caller and never reach here.
+    fn save_data_msg(&mut self, msg: SaveToDiskMsg) -> Result<()> {
+        use SaveToDiskMsg::*;
+        match msg {
+            CentroidData((stamp, centroid_data)) => {
+                let centroid_data = with_received_timestamp(centroid_data, stamp);
+                self.save_centroid(centroid_data)?;
+            }
+            StampedTrackingState(stamped_tracking_state) => {
+                self.save_stamped_tracking_state(*stamped_tracking_state)?;
+            }
+            MotorPosition(motor_position) => {
+                self.save_motor_position(*motor_position)?;
+            }
+            GimbalEncoderData(encoder_data) => {
+                self.save_encoder_data(&encoder_data)?;
+            }
+            MavlinkData(v) => {
+                self.save_mavlink_data(&v)?;
+            }
+            BroadwaySaveToDiskMsg(msg) => {
+                self.save_broadway_msg(msg)?;
+            }
+            ExtensionRecord {
+                file_name,
+                stamp,
+                record,
+            } => {
+                self.save_extension_record(file_name, stamp, record)?;
+            }
+            other => {
+                tracing::warn!("unexpected control message in save_data_msg: {other:?}");
+            }
+        }
+        Ok(())
     }
 
     fn save_centroid(&mut self, centroid_data: StampedMomentCentroid) -> Result<()> {
