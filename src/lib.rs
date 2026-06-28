@@ -440,10 +440,11 @@ impl<'a> FloCoordinator<'a> {
         self.motors_tx.send(current_motors.clone())?;
         self.my_state.cached_motors = current_motors;
         if let Some(next_mode) = next_mode {
-            self.handle_command(
-                FloCommand::SwitchMode(next_mode.0, next_mode.1),
-                CommandSource::Automation,
-            )?;
+            // Equivalent to handling FloCommand::SwitchMode from
+            // CommandSource::Automation, but called directly so this hot,
+            // synchronous path need not go through the (now async) command
+            // handler.
+            self.switch_to_mode(next_mode.0, next_mode.1)?;
         }
         Ok(())
     }
@@ -472,10 +473,10 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    fn handle_event(&mut self, evt: FloEvent) -> Result<()> {
+    async fn handle_event(&mut self, evt: FloEvent) -> Result<()> {
         use FloEvent as E;
         if let E::Command(cmd, src) = evt {
-            self.handle_command(cmd, src)?;
+            self.handle_command(cmd, src).await?;
         }
         Ok(())
     }
@@ -576,7 +577,59 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    fn handle_command(&mut self, msg: FloCommand, src: CommandSource) -> Result<()> {
+    /// Send a `CamArg` to every connected tracking-camera control session.
+    async fn send_cam_arg_to_all(&mut self, arg: strand_cam_remote_control::CamArg) {
+        for sess in [&mut self.cam_session_main, &mut self.cam_session_secondary]
+            .into_iter()
+            .flatten()
+        {
+            post_cam_arg(sess, arg.clone()).await;
+        }
+    }
+
+    /// Size each tracking camera's post-trigger buffer to match `secs` of
+    /// pre-capture, using that camera's configured `expected_fps`. Cameras
+    /// without a configured frame rate are skipped with a warning, since the
+    /// seconds→frames conversion is impossible without it.
+    async fn set_cam_precapture_buffer(&mut self, secs: f64) {
+        // Read frame rates up front so the camera config (immutable borrow) and
+        // the sessions (mutable borrow) are not borrowed simultaneously.
+        let main_fps = self
+            .device_config
+            .strand_cam_main
+            .as_ref()
+            .and_then(|c| c.expected_fps);
+        let secondary_fps = self
+            .device_config
+            .strand_cam_secondary
+            .as_ref()
+            .and_then(|c| c.expected_fps);
+
+        for (sess, fps) in [
+            (&mut self.cam_session_main, main_fps),
+            (&mut self.cam_session_secondary, secondary_fps),
+        ] {
+            let Some(sess) = sess.as_mut() else { continue };
+            match fps {
+                Some(fps) if fps > 0.0 => {
+                    let frames = (secs * fps).ceil().max(0.0) as usize;
+                    post_cam_arg(
+                        sess,
+                        strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames),
+                    )
+                    .await;
+                }
+                _ => {
+                    tracing::warn!(
+                        "Cannot size Strand Cam pre-capture buffer: no `expected_fps` \
+                         configured for this camera"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, msg: FloCommand, src: CommandSource) -> Result<()> {
         let was_closed_loop = self.tracking_state.mode == DeviceMode::ClosedLoop;
 
         match msg {
@@ -676,6 +729,11 @@ impl<'a> FloCoordinator<'a> {
                 // buffered pre-capture window. Stopping uses the normal
                 // SetRecordingState(false) path.
                 self.start_recording(true)?;
+                // Have the tracking cameras flush their own post-trigger
+                // buffers into their MP4s too, so the recorded video also
+                // begins in the past.
+                self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::PostTrigger)
+                    .await;
             }
             FloCommand::SetPreCaptureSeconds(secs) => {
                 let secs = secs.max(0.0);
@@ -690,6 +748,9 @@ impl<'a> FloCoordinator<'a> {
                     .send(SaveToDiskMsg::SetPreCaptureSeconds(secs))
                     .unwrap();
                 self.from_device_http_tx.send(self.my_state.clone())?;
+                // Mirror the window onto the tracking cameras' own post-trigger
+                // buffers so their video can be pre-captured too.
+                self.set_cam_precapture_buffer(secs).await;
             }
         };
         Ok(())
@@ -709,29 +770,10 @@ impl<'a> FloCoordinator<'a> {
                 }
 
                 // start/stop saving .mp4 file on tracking cameras
-                for cam_session in
-                    [&mut self.cam_session_main, &mut self.cam_session_secondary].iter_mut()
-                {
-                    if let Some(sess) = cam_session.as_mut() {
-                        let body =
-                            axum::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
-                                serde_json::to_vec(&strand_cam_storetype::CallbackType::ToCamera(
-                                    strand_cam_remote_control::CamArg::SetIsRecordingMp4(
-                                        want_recording,
-                                    ),
-                                ))
-                                .unwrap(),
-                            )));
-                        match sess.post("callback", body).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Ignoring error requesting Strand Cam to record: {e}"
-                                );
-                            }
-                        }
-                    }
-                }
+                self.send_cam_arg_to_all(
+                    strand_cam_remote_control::CamArg::SetIsRecordingMp4(want_recording),
+                )
+                .await;
             }
             _ => {}
         };
@@ -794,6 +836,20 @@ fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
         stamp.elapsed() > std::time::Duration::from_secs(1)
     } else {
         true
+    }
+}
+
+/// POST a single `CamArg` to a Strand Cam control session. Errors are logged
+/// and otherwise ignored, since the camera may be transiently unreachable.
+async fn post_cam_arg(sess: &mut HttpSession, arg: strand_cam_remote_control::CamArg) {
+    let body = axum::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
+        serde_json::to_vec(&strand_cam_storetype::CallbackType::ToCamera(arg)).unwrap(),
+    )));
+    match sess.post("callback", body).await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("Ignoring error sending command to Strand Cam: {e}");
+        }
     }
 }
 
@@ -1664,7 +1720,7 @@ async fn app_main(
             }
             flo_event = flo_events_rx_stream.next() => {
                 let flo_event = flo_event.ok_or_else(|| eyre::eyre!("FLO events channel closed"))??;
-                coordinator.handle_event(flo_event)?;
+                coordinator.handle_event(flo_event).await?;
             }
             motor_position = motor_position_rx.recv() => {
                 let motor_position = motor_position.ok_or_else(|| eyre::eyre!("motor position channel closed"))?;

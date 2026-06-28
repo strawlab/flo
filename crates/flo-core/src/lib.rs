@@ -822,6 +822,15 @@ pub struct StrandCamConfig {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub on_attach_json_commands: Vec<String>,
+
+    /// Expected recording frame rate of this camera, in frames per second.
+    ///
+    /// Used to convert the pre-capture window (configured in seconds) into the
+    /// frame count that Strand Cam's post-trigger buffer expects
+    /// (`CamArg::SetPostTriggerBufferSize`). When omitted, `flo` cannot size
+    /// the camera's pre-capture buffer and will skip configuring it.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub expected_fps: Option<FloatType>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
