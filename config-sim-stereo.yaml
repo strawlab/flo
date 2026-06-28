@@ -14,9 +14,9 @@
 #     Strand Camera. Centroids arrive over UDP instead.
 #   * No motor flags on the `flo` command line: motor commands are computed and
 #     discarded.
-#   * `secondary_cam_name` must match `floz-replay synth --secondary-cam`
-#     (default `synth-secondary`); the synth tool's `--primary-cam` default is
-#     `synth-primary`.
+#   * `strand_cam_secondary.cam_name` must match `floz-replay synth
+#     --secondary-cam` (default `synth-secondary`); the synth tool's
+#     `--primary-cam` default is `synth-primary`.
 # Config schema version. Version 2 means kalman_filter_parameters holds
 # RMS values; version 1 (or a missing field) meant variances and is
 # auto-converted on load with a warning.
@@ -68,10 +68,11 @@ tracking_thresholds:
   # how long to stay in SuspendedClosedLoop before centering
   msecs_to_acquire_lock: 30000
 motor_timeconstant_secs: .001
-# Name of the second (stereo) camera. With no `strand_cam_secondary` HTTP
-# session to report it, the controller falls back to this value so stereopsis
-# works headless. Must match `floz-replay synth --secondary-cam`.
-secondary_cam_name: synth-secondary
+# Declare the second (stereo) camera. With no `url`, no HTTP session is opened;
+# the camera is identified purely by `cam_name`, so stereopsis works headless.
+# Must match `floz-replay synth --secondary-cam`.
+strand_cam_secondary:
+  cam_name: synth-secondary
 # Stereopsis calibration: distance r (m) maps to the main-vs-stereo x disparity
 # (px) as disparity = x_offset(r). These are example values; `floz-replay synth`
 # inverts exactly this model, so recovered distance matches the requested range.

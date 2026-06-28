@@ -749,19 +749,20 @@ fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
     }
 }
 
+/// Open the HTTP control session for a camera and return it together with the
+/// name the camera reports.
+///
+/// Only called when the camera config has a `url`. The camera's own `/cam-name`
+/// response is the authoritative name.
 async fn initialize_strand_cam_session(
+    url: &str,
     cfg: &StrandCamConfig,
     jar: Arc<RwLock<cookie_store::CookieStore>>,
-) -> Result<HttpSession> {
-    let info = strand_bui_backend_session_types::BuiServerAddrInfo::parse_url_with_token(&cfg.url)?;
+) -> Result<(HttpSession, String)> {
+    let info = strand_bui_backend_session_types::BuiServerAddrInfo::parse_url_with_token(url)?;
     let mut session = strand_bui_backend_session::create_session(&info, jar.clone())
         .await
-        .with_context(|| {
-            format!(
-                "while opening HTTP connection to main Strand Cam at {}",
-                cfg.url
-            )
-        })?;
+        .with_context(|| format!("while opening HTTP connection to Strand Cam at {url}"))?;
 
     {
         // We have the cookie from Strand Cam now, so store it to disk.
@@ -783,7 +784,7 @@ async fn initialize_strand_cam_session(
         String::from_utf8(body_bytes.to_vec())?
     };
 
-    tracing::info!("opened camera {cam_name} at {url}", url = &cfg.url);
+    tracing::info!("opened camera {cam_name} at {url}");
 
     for cmd in cfg.on_attach_json_commands.iter() {
         session
@@ -791,7 +792,50 @@ async fn initialize_strand_cam_session(
             .await
             .with_context(|| format!("Making callback to {cam_name}: {cmd}"))?;
     }
-    Ok(session)
+    Ok((session, cam_name))
+}
+
+/// Resolve a configured camera into an optional live HTTP control session and
+/// the camera's name.
+///
+/// * With a `url`: open the HTTP session, ask the camera its name (the
+///   authoritative source), run the `on_attach` commands, and — if `cam_name`
+///   is also set in config — check the two agree.
+/// * Without a `url`: open no session (e.g. hardware-free / simulation use,
+///   where centroids arrive over UDP). The name is taken from `cam_name`, which
+///   is then required.
+async fn resolve_strand_cam(
+    role: &str,
+    cfg: &StrandCamConfig,
+    jar: Arc<RwLock<cookie_store::CookieStore>>,
+) -> Result<(Option<HttpSession>, String)> {
+    match cfg.url.as_ref() {
+        Some(url) => {
+            let (session, cam_name) = initialize_strand_cam_session(url, cfg, jar).await?;
+            if let Some(configured) = cfg.cam_name.as_ref()
+                && configured != &cam_name
+            {
+                eyre::bail!(
+                    "{role} camera name in config (`cam_name: {configured}`) does not match \
+                     \"{cam_name}\" reported by the camera at {url}",
+                );
+            }
+            Ok((Some(session), cam_name))
+        }
+        None => {
+            let cam_name = cfg.cam_name.clone().ok_or_else(|| {
+                eyre::eyre!(
+                    "{role} `strand_cam` config has neither `url` nor `cam_name`; one is \
+                     required (set `cam_name` to identify the camera for hardware-free / \
+                     simulation use, where centroids are injected over UDP)"
+                )
+            })?;
+            tracing::info!(
+                "{role} camera {cam_name:?} configured without `url`: no HTTP session opened"
+            );
+            Ok((None, cam_name))
+        }
+    }
 }
 
 async fn init_strand_cams(
@@ -812,62 +856,55 @@ async fn init_strand_cams(
 
     let jar = Arc::new(RwLock::new(jar.clone()));
 
-    let cam_session_main = futures::future::OptionFuture::from(
+    let main = futures::future::OptionFuture::from(
         device_config
             .strand_cam_main
             .as_ref()
-            .map(|cfg| initialize_strand_cam_session(cfg, jar.clone())),
+            .map(|cfg| resolve_strand_cam("main", cfg, jar.clone())),
     )
     .await
     .transpose()?;
 
-    let mut cam_session_secondary = futures::future::OptionFuture::from(
+    let secondary = futures::future::OptionFuture::from(
         device_config
             .strand_cam_secondary
             .as_ref()
-            .map(|cfg| initialize_strand_cam_session(cfg, jar)),
+            .map(|cfg| resolve_strand_cam("secondary", cfg, jar)),
     )
     .await
     .transpose()?;
 
-    let cam_name_secondary2_resp = futures::future::OptionFuture::from(
-        cam_session_secondary
-            .as_mut()
-            .map(|sess| sess.get("cam-name")),
-    )
-    .await
-    .transpose()
-    .with_context(|| "Making request for camera name")?;
-
-    let cam_name_secondary2 = if let Some(cam_name_secondary2_resp) = cam_name_secondary2_resp {
-        use http_body_util::BodyExt;
-        let body_bytes = cam_name_secondary2_resp.collect().await?.to_bytes();
-        Some(String::from_utf8(body_bytes.to_vec())?)
-    } else {
-        None
+    // The primary camera's name is not needed: any centroid not from the
+    // secondary camera is treated as primary.
+    let cam_session_main = main.and_then(|(session, _name)| session);
+    let (cam_session_secondary, mut secondary_cam_name) = match secondary {
+        Some((session, name)) => (session, Some(name)),
+        None => (None, None),
     };
 
-    if let Some(secondary_cam_name) = device_config.secondary_cam_name.as_ref() {
-        tracing::warn!("use of deprecated config `secondary_cam_name`");
-        if let Some(cam_name_secondary2) = cam_name_secondary2.as_ref()
-            && cam_name_secondary2 != secondary_cam_name
-        {
-            eyre::bail!(
-                "Camera name specified in config file \"{}\" (in field `secondary_cam_name`) \
-                does not match \"{}\" as returned from {}/cam-name",
-                secondary_cam_name,
-                cam_name_secondary2,
-                device_config.strand_cam_secondary.as_ref().unwrap().url,
-            );
+    // Backward compatibility for the deprecated top-level `secondary_cam_name`.
+    // Prefer `strand_cam_secondary.cam_name`; honor the old field with a warning
+    // so configs in the wild keep working while users migrate.
+    if let Some(deprecated) = device_config.secondary_cam_name.as_ref() {
+        tracing::warn!(
+            "config field `secondary_cam_name` is deprecated; \
+             set `strand_cam_secondary.cam_name` instead"
+        );
+        match secondary_cam_name.as_ref() {
+            Some(resolved) if resolved != deprecated => {
+                eyre::bail!(
+                    "deprecated `secondary_cam_name` ({deprecated:?}) does not match the \
+                     secondary camera name ({resolved:?}) resolved from `strand_cam_secondary`",
+                );
+            }
+            Some(_) => {} // agrees with the resolved name; nothing to do
+            None => {
+                // No `strand_cam_secondary` block: use the deprecated name on its own.
+                secondary_cam_name = Some(deprecated.clone());
+            }
         }
     }
 
-    // Prefer the name reported by the secondary Strand Cam HTTP session. When
-    // there is no such session (e.g. hardware-free testing where centroids are
-    // injected over UDP by `floz-replay`), fall back to the deprecated
-    // `secondary_cam_name` config so stereopsis still works headless.
-    let secondary_cam_name =
-        cam_name_secondary2.or_else(|| device_config.secondary_cam_name.clone());
     Ok((cam_session_main, cam_session_secondary, secondary_cam_name))
 }
 

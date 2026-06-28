@@ -100,7 +100,7 @@ pub struct SynthArgs {
     primary_cam: String,
 
     /// Secondary (stereo) camera name. Should match the controller's
-    /// `secondary_cam_name` / `strand_cam_secondary`.
+    /// `strand_cam_secondary.cam_name`.
     #[arg(long, default_value = "synth-secondary")]
     secondary_cam: String,
 

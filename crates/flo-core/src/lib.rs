@@ -520,7 +520,13 @@ pub struct FloControllerConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub encoder_lag: FloatType,
 
-    /// DEPRECATED. Name of second camera used for stereopsis.
+    /// DEPRECATED. Name of the second (stereo) camera.
+    ///
+    /// Superseded by `strand_cam_secondary.cam_name`. Still honored for
+    /// backward compatibility (with a deprecation warning): if
+    /// `strand_cam_secondary` is also present, the two names must agree;
+    /// otherwise this name identifies the secondary camera on its own. New
+    /// configs should set `strand_cam_secondary.cam_name` instead.
     #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub secondary_cam_name: Option<CamNameString>,
 
@@ -891,7 +897,23 @@ impl Default for TrinamicAxisConfig {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct StrandCamConfig {
-    pub url: String,
+    /// URL of the Strand Cam HTTP control session for this camera.
+    ///
+    /// When omitted, `flo` opens no HTTP session to this camera. This is the
+    /// hardware-free / simulation case: centroids are injected over UDP (e.g.
+    /// by `floz-replay`) rather than produced by a live camera. The camera is
+    /// then identified solely by `cam_name`, which is required in that case.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub url: Option<String>,
+
+    /// The camera's name, matching the `cam_name` field of incoming centroids.
+    ///
+    /// Required when `url` is omitted (it is how the controller identifies this
+    /// camera's centroids). When `url` is present this is optional; if given, it
+    /// is checked against the name the camera reports over HTTP.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub cam_name: Option<CamNameString>,
+
     #[serde(default, skip_serializing_if = "is_default")]
     pub on_attach_json_commands: Vec<String>,
 }
