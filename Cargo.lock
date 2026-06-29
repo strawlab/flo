@@ -42,7 +42,7 @@ checksum = "aae1277d39aeec15cb388266ecc24b11c80469deae6067e17a1a7aa9e5c1f234"
 [[package]]
 name = "ads-webasm"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "chrono",
  "gloo-file 0.2.3",
@@ -216,7 +216,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -227,7 +227,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -410,7 +410,7 @@ dependencies = [
 [[package]]
 name = "bg-movie-writer"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "chrono",
  "ffmpeg-rewriter",
@@ -557,7 +557,7 @@ dependencies = [
 [[package]]
 name = "braid-mvg"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "cam-geom",
  "nalgebra",
@@ -1538,7 +1538,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "download-verify"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "hex",
  "sha2",
@@ -1562,7 +1562,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 [[package]]
 name = "dynlink-cuda"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "libloading 0.7.4",
  "thiserror 2.0.18",
@@ -1571,7 +1571,7 @@ dependencies = [
 [[package]]
 name = "dynlink-nvidia-encode"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "dynlink-cuda",
  "libloading 0.7.4",
@@ -1776,7 +1776,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1830,7 +1830,7 @@ dependencies = [
 [[package]]
 name = "ffmpeg-rewriter"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "chrono",
  "ffmpeg-writer",
@@ -1849,7 +1849,7 @@ dependencies = [
 [[package]]
 name = "ffmpeg-writer"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "convert-image",
  "machine-vision-formats",
@@ -2152,7 +2152,7 @@ dependencies = [
 [[package]]
 name = "flydra-feature-detector-types"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -2162,7 +2162,7 @@ dependencies = [
 [[package]]
 name = "fmf"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "byteorder",
  "chrono",
@@ -2251,7 +2251,7 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 [[package]]
 name = "frame-source"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "bytes",
  "chrono",
@@ -3166,7 +3166,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3184,7 +3184,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.60.1",
 ]
 
 [[package]]
@@ -3672,7 +3672,7 @@ dependencies = [
 [[package]]
 name = "less-avc-wrapper"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "convert-image",
  "less-avc",
@@ -4048,7 +4048,7 @@ dependencies = [
 [[package]]
 name = "mkv-parser-kit"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "bitstream-io 1.10.0",
  "chrono",
@@ -4057,7 +4057,7 @@ dependencies = [
 [[package]]
 name = "mkv-strand-reader"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "chrono",
  "mkv-parser-kit",
@@ -4115,7 +4115,7 @@ dependencies = [
 [[package]]
 name = "mp4-writer"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "bitvec",
  "chrono",
@@ -4449,7 +4449,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4586,7 +4586,7 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "nvenc"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "dynlink-cuda",
  "dynlink-nvidia-encode",
@@ -5839,7 +5839,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6304,7 +6304,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6319,7 +6319,7 @@ dependencies = [
 [[package]]
 name = "srt-writer"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 
 [[package]]
 name = "stable_deref_trait"
@@ -6336,7 +6336,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "strand-bui-backend-session"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "axum",
  "bytes",
@@ -6356,7 +6356,7 @@ dependencies = [
 [[package]]
 name = "strand-bui-backend-session-types"
 version = "0.1.1"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "serde",
  "uuid",
@@ -6365,7 +6365,7 @@ dependencies = [
 [[package]]
 name = "strand-cam-bui-types"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "chrono",
  "serde",
@@ -6374,12 +6374,12 @@ dependencies = [
 [[package]]
 name = "strand-cam-enum-iter"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 
 [[package]]
 name = "strand-cam-remote-control"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "chrono",
  "serde",
@@ -6391,7 +6391,7 @@ dependencies = [
 [[package]]
 name = "strand-cam-storetype"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "braid-mvg",
  "flydra-feature-detector-types",
@@ -6409,7 +6409,7 @@ dependencies = [
 [[package]]
 name = "strand-cam-types"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "serde",
  "strand-cam-enum-iter",
@@ -6418,7 +6418,7 @@ dependencies = [
 [[package]]
 name = "strand-datetime-conversion"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "chrono",
 ]
@@ -6426,7 +6426,7 @@ dependencies = [
 [[package]]
 name = "strand-dynamic-frame"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "convert-image",
  "machine-vision-formats",
@@ -6435,7 +6435,7 @@ dependencies = [
 [[package]]
 name = "strand-http-video-streaming-types"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "serde",
  "strand-bui-backend-session-types",
@@ -6444,7 +6444,7 @@ dependencies = [
 [[package]]
 name = "strand-led-box-comms"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "serde",
  "strand-cam-enum-iter",
@@ -6560,7 +6560,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7697,7 +7697,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8423,7 +8423,7 @@ source = "git+https://github.com/astraw/y4m?rev=6992473b73838c84cb659387b21d2ab2
 [[package]]
 name = "y4m-writer"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "convert-image",
  "machine-vision-formats",
@@ -8633,7 +8633,7 @@ dependencies = [
 [[package]]
 name = "zip-or-dir"
 version = "0.1.0"
-source = "git+https://github.com/strawlab/strand-braid?rev=b440c24f14a95543112082c215530b2c6a0787a7#b440c24f14a95543112082c215530b2c6a0787a7"
+source = "git+https://github.com/strawlab/strand-braid?rev=6bfc6570431e10cd604f1e62fcf415906bed09ae#6bfc6570431e10cd604f1e62fcf415906bed09ae"
 dependencies = [
  "libflate",
  "thiserror 2.0.18",
