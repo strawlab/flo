@@ -422,8 +422,9 @@ impl PreCaptureBuffer {
     }
 
     /// Take all buffered messages, leaving the buffer empty.
-    fn drain(&mut self) -> std::collections::VecDeque<(chrono::DateTime<chrono::Local>, SaveToDiskMsg)>
-    {
+    fn drain(
+        &mut self,
+    ) -> std::collections::VecDeque<(chrono::DateTime<chrono::Local>, SaveToDiskMsg)> {
         std::mem::take(&mut self.inner)
     }
 }
