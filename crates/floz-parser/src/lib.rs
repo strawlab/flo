@@ -123,7 +123,8 @@ fn read_optional_config<R: Read + Seek>(
     }
     let result = (|| -> Result<flo_core::FloControllerConfig> {
         let rdr = archive.path_starter().join(fname).open()?;
-        Ok(serde_yaml::from_reader(rdr)?)
+        let value: serde_yaml::Value = serde_yaml::from_reader(rdr)?;
+        Ok(deserialize_config_compat(value)?)
     })();
     match result {
         Ok(config) => Some(config),
@@ -131,6 +132,53 @@ fn read_optional_config<R: Read + Seek>(
             tracing::warn!("Could not parse {fname}: {e}");
             None
         }
+    }
+}
+
+/// Deserialize a recorded config, accepting fields written by known older FLO
+/// versions without weakening strict parsing for current configs.
+fn deserialize_config_compat(
+    mut value: serde_yaml::Value,
+) -> Result<flo_core::FloControllerConfig, serde_yaml::Error> {
+    match serde_yaml::from_value(value.clone()) {
+        Ok(config) => Ok(config),
+        Err(original_error) => {
+            let Some(osd_config) = value
+                .as_mapping_mut()
+                .and_then(|root| root.get_mut("osd_config"))
+                .and_then(serde_yaml::Value::as_mapping_mut)
+            else {
+                return Err(original_error);
+            };
+            if osd_config.remove("display_webcam").is_none() {
+                return Err(original_error);
+            }
+            serde_yaml::from_value(value)
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_compat_tests {
+    #[test]
+    fn config_compat_accepts_legacy_display_webcam() {
+        let config = flo_core::FloControllerConfig::default();
+        let mut value = serde_yaml::to_value(&config).unwrap();
+        value["osd_config"] = serde_yaml::from_str(
+            "display_webcam:\n  windowed: false\n  fpv_cam_human_name: legacy camera\n",
+        )
+        .unwrap();
+
+        assert!(super::deserialize_config_compat(value).is_ok());
+    }
+
+    #[test]
+    fn config_compat_still_rejects_unknown_osd_fields() {
+        let config = flo_core::FloControllerConfig::default();
+        let mut value = serde_yaml::to_value(&config).unwrap();
+        value["osd_config"] = serde_yaml::from_str("unexpected_field: true\n").unwrap();
+
+        assert!(super::deserialize_config_compat(value).is_err());
     }
 }
 
