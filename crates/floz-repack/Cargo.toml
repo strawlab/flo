@@ -1,0 +1,18 @@
+[package]
+name = "floz-repack"
+version = "0.1.0"
+edition = "2024"
+authors = ["Andrew Straw <strawman@astraw.com>"]
+description = "Re-compress a .floz file's ZIP archive with maximum compression, in place"
+
+[dependencies]
+# deps published on crates.io
+clap = { workspace = true, features = ["derive"] }
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-panic.workspace = true
+zip = { version = "2.2.2", features = ["deflate", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -25,6 +25,7 @@ members = [
   "crates/trinamic", "crates/floz-parser",
   "crates/floz-viewer",
   "crates/floz-cli",
+  "crates/floz-repack",
   "crates/floz-retrack",
   "crates/floz-replay",
 ]
