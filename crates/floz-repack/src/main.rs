@@ -112,12 +112,46 @@ struct RepackReport {
     backup_path: PathBuf,
 }
 
+enum RepackOutcome {
+    AlreadyCompressed,
+    Repacked(RepackReport),
+}
+
+/// Check the central directory without inflating file contents. A completed
+/// FLOZ archive has README.md stored first and every subsequent regular file
+/// Deflated. Directory entries do not carry useful compression semantics.
+fn is_already_compressed(input: &Path) -> Result<bool> {
+    let file =
+        std::fs::File::open(input).with_context(|| format!("Opening {}", input.display()))?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .with_context(|| format!("Reading zip archive {}", input.display()))?;
+
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        if index == 0 {
+            if entry.name() != README_FNAME || entry.compression() != zip::CompressionMethod::Stored
+            {
+                return Ok(false);
+            }
+        } else if entry.name() == README_FNAME
+            || (!entry.is_dir() && entry.compression() != zip::CompressionMethod::Deflated)
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(!archive.is_empty())
+}
+
 /// Repack `input` in place: write the recompressed archive to a hidden
 /// temporary file, then, only once that succeeds, move the original to
 /// `<input>.bak` and the rewritten file to `input`.
-fn repack_in_place(input: &Path, compression_level: i64) -> Result<RepackReport> {
+fn repack_in_place(input: &Path, compression_level: i64) -> Result<RepackOutcome> {
     if !input.is_file() {
         bail!("Input `{}` is not a file", input.display());
+    }
+    if is_already_compressed(input)? {
+        return Ok(RepackOutcome::AlreadyCompressed);
     }
 
     let tmp_path = hidden_tmp_path(input);
@@ -166,11 +200,11 @@ fn repack_in_place(input: &Path, compression_level: i64) -> Result<RepackReport>
         )
     })?;
 
-    Ok(RepackReport {
+    Ok(RepackOutcome::Repacked(RepackReport {
         original_bytes,
         repacked_bytes,
         backup_path: backup,
-    })
+    }))
 }
 
 fn init_tracing() -> Result<()> {
@@ -196,17 +230,22 @@ fn main() -> Result<()> {
     init_tracing()?;
     let opt = Opt::parse();
 
-    let report = repack_in_place(&opt.input, opt.compression_level)?;
-
-    let pct = 100.0 * report.repacked_bytes as f64 / report.original_bytes as f64;
-    tracing::info!(
-        "done: {} ({} -> {} bytes, {pct:.1}% of original); original backed up to {}",
-        opt.input.display(),
-        report.original_bytes,
-        report.repacked_bytes,
-        report.backup_path.display(),
-    );
-    println!("{}", opt.input.display());
+    match repack_in_place(&opt.input, opt.compression_level)? {
+        RepackOutcome::AlreadyCompressed => {
+            println!("already compressed, not recompressing");
+        }
+        RepackOutcome::Repacked(report) => {
+            let pct = 100.0 * report.repacked_bytes as f64 / report.original_bytes as f64;
+            tracing::info!(
+                "done: {} ({} -> {} bytes, {pct:.1}% of original); original backed up to {}",
+                opt.input.display(),
+                report.original_bytes,
+                report.repacked_bytes,
+                report.backup_path.display(),
+            );
+            println!("{}", opt.input.display());
+        }
+    }
     Ok(())
 }
 
@@ -246,7 +285,8 @@ mod tests {
         let mut file = std::io::BufWriter::new(file);
         file.write_all(FLOZ_HEADER.as_bytes()).unwrap();
         let mut zip_wtr = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
         zip_wtr.start_file(README_FNAME, options).unwrap();
         zip_wtr.write_all(readme).unwrap();
         zip_wtr.start_file("tracking_state.csv", options).unwrap();
@@ -322,7 +362,11 @@ mod tests {
         write_test_floz(&input, &readme, &csv);
         let original_bytes = std::fs::metadata(&input).unwrap().len();
 
-        let report = repack_in_place(&input, DEFAULT_COMPRESSION_LEVEL).unwrap();
+        let RepackOutcome::Repacked(report) =
+            repack_in_place(&input, DEFAULT_COMPRESSION_LEVEL).unwrap()
+        else {
+            panic!("stored input should be repacked");
+        };
 
         assert_eq!(report.original_bytes, original_bytes);
         assert!(report.backup_path.exists());
@@ -330,6 +374,24 @@ mod tests {
         assert!(!hidden_tmp_path(&input).exists());
         assert_eq!(read_entry(&input, "tracking_state.csv"), csv);
         assert_eq!(read_entry(&report.backup_path, "tracking_state.csv"), csv);
+    }
+
+    #[test]
+    fn repack_in_place_leaves_compressed_input_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = dir.path().join("stored.floz");
+        let input = dir.path().join("compressed.floz");
+        write_test_floz(&stored, b"# hello\n", &b"a,b,c\n1,2,3\n".repeat(1000));
+        repack(&stored, &input, DEFAULT_COMPRESSION_LEVEL).unwrap();
+        let before = std::fs::read(&input).unwrap();
+
+        assert!(matches!(
+            repack_in_place(&input, DEFAULT_COMPRESSION_LEVEL).unwrap(),
+            RepackOutcome::AlreadyCompressed
+        ));
+        assert_eq!(std::fs::read(&input).unwrap(), before);
+        assert!(!backup_path(&input).exists());
+        assert!(!hidden_tmp_path(&input).exists());
     }
 
     #[test]
