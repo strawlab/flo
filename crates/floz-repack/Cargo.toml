@@ -3,7 +3,7 @@ name = "floz-repack"
 version = "0.1.0"
 edition = "2024"
 authors = ["Andrew Straw <strawman@astraw.com>"]
-description = "Re-compress a .floz file's ZIP archive with maximum compression, in place"
+description = "Re-compress a .floz file's ZIP archive in place"
 
 [dependencies]
 # deps published on crates.io
