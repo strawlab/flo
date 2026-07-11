@@ -17,17 +17,17 @@
 //! failure or interruption never leaves the original file missing or
 //! half-replaced.
 
+#[cfg(test)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use color_eyre::eyre::{Context, Result, bail};
 
-/// Text written before the ZIP data in a `.floz` file (the format is a ZIP
-/// file with a small identifying prefix). Mirrors what the FLO recorder
-/// writes.
-const FLOZ_HEADER: &str = "FLOZ file. This is a standard ZIP file with a specific schema.\n";
-const README_FNAME: &str = "README.md";
+use floz_writer::{FlozWriter, README_FNAME};
+
+#[cfg(test)]
+use floz_writer::FLOZ_HEADER;
 
 /// Deflate compression level passed to the `zip` crate. Levels above 9 (up to
 /// 264) switch from the `flate2` encoder to the much slower but stronger
@@ -85,32 +85,15 @@ fn repack(src_path: &Path, dest_path: &Path) -> Result<()> {
 
     let dest_file = std::fs::File::create_new(dest_path)
         .with_context(|| format!("Creating {}", dest_path.display()))?;
-    let mut dest_file = std::io::BufWriter::new(dest_file);
-    dest_file
-        .write_all(FLOZ_HEADER.as_bytes())
-        .context("Writing FLOZ header")?;
-
-    let mut zip_wtr = zip::ZipWriter::new(dest_file);
+    let dest_file = std::io::BufWriter::new(dest_file);
+    let mut zip_wtr =
+        FlozWriter::new(dest_file, Some(MAX_COMPRESSION_LEVEL)).context("Writing FLOZ header")?;
     // Data tables get maximum-effort compression. The README is stored
     // uncompressed and first (see the sort above) so the start of the file is
     // human-readable, matching the `.braidz` convention.
-    let compressed = zip::write::SimpleFileOptions::default()
-        .large_file(true)
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(MAX_COMPRESSION_LEVEL))
-        .unix_permissions(0o755);
-    let stored = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .unix_permissions(0o755);
-
     for name in &names {
-        let options = if name == README_FNAME {
-            stored
-        } else {
-            compressed
-        };
         zip_wtr
-            .start_file(name, options)
+            .start_file(name)
             .with_context(|| format!("Starting entry `{name}`"))?;
         let mut entry = src_zip
             .by_name(name)

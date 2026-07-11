@@ -1,0 +1,12 @@
+[package]
+name = "floz-writer"
+version = "0.1.0"
+edition = "2024"
+authors = ["Andrew Straw <strawman@astraw.com>"]
+description = "Shared writer for FLOZ ZIP archives"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Select the faster pure-Rust backend for the flate2 instance used by zip.
+flate2.workspace = true
+zip.workspace = true

@@ -27,6 +27,7 @@ members = [
   "crates/floz-cli",
   "crates/floz-repack",
   "crates/floz-retrack",
+  "crates/floz-writer",
   "crates/floz-replay",
 ]
 exclude = [
@@ -83,6 +84,7 @@ rodio = { version = "0.20", default-features = false, features = [
   "vorbis",
 ] }
 flo-tracing.workspace = true
+floz-writer.workspace = true
 hyper = "1.1"
 tempfile = "3"
 tracing.workspace = true
@@ -168,7 +170,7 @@ tracing = { version = "0.1.41" }
 tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
 tracing-panic = "0.1.1"
 base64 = "0.22"
-flate2 = "1.0"
+flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 zip = { version = "2.2.2", default-features = false, features = ["deflate", "time"] }
 
 camshow-protocol = { path = "crates/camshow-protocol" }
@@ -177,6 +179,7 @@ flo-tracing = { path = "crates/flo-tracing" }
 osd-overlay = { path = "crates/osd-overlay" }
 flo-mavlink = { path = "crates/flo-mavlink" }
 floz-parser = { path = "crates/floz-parser" }
+floz-writer = { path = "crates/floz-writer" }
 h264-recorder = { path = "crates/h264-recorder" }
 osd-displayport = { path = "crates/osd-displayport" }
 osd-utils = { path = "crates/osd-utils" }

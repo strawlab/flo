@@ -14,5 +14,7 @@ tracing-subscriber.workspace = true
 tracing-panic.workspace = true
 zip.workspace = true
 
+floz-writer.workspace = true
+
 [dev-dependencies]
 tempfile = "3"

@@ -778,19 +778,6 @@ fn dummy_csv() -> csv::Writer<Box<dyn Write + Send>> {
     csv::Writer::from_writer(fd)
 }
 
-fn recording_zip_options(is_readme: bool) -> zip::write::SimpleFileOptions {
-    let compression_method = if is_readme {
-        zip::CompressionMethod::Stored
-    } else {
-        zip::CompressionMethod::Deflated
-    };
-
-    zip::write::SimpleFileOptions::default()
-        .large_file(true)
-        .unix_permissions(0o755)
-        .compression_method(compression_method)
-}
-
 impl Drop for WritingState {
     #[tracing::instrument(skip_all)]
     fn drop(&mut self) {
@@ -837,11 +824,7 @@ impl Drop for WritingState {
             tracing::info!("creating zip file {output_zipfile}");
             // zip the output_dirname directory
             {
-                let mut file = bufwriter(output_zipfile).unwrap();
-
-                let header = "FLOZ file. This is a standard ZIP file with a \
-            specific schema.\n";
-                file.write_all(header.as_bytes()).unwrap();
+                let file = bufwriter(output_zipfile).unwrap();
 
                 let walkdir = walkdir::WalkDir::new(&output_dirname);
 
@@ -858,25 +841,19 @@ impl Drop for WritingState {
                         files.push(entry);
                     }
                 }
-                let mut zip_wtr = zip::ZipWriter::new(file);
+                let mut zip_wtr = floz_writer::FlozWriter::new(file, Some(6)).unwrap();
 
                 if let Some(entry) = readme_entry {
                     crate::zip_dir::zip_dir(
                         &mut std::iter::once(entry),
                         &output_dirname,
                         &mut zip_wtr,
-                        recording_zip_options(true),
                     )
                     .expect("zip README.md");
                 }
 
-                crate::zip_dir::zip_dir(
-                    &mut files.into_iter(),
-                    &output_dirname,
-                    &mut zip_wtr,
-                    recording_zip_options(false),
-                )
-                .expect("zip remaining recording files");
+                crate::zip_dir::zip_dir(&mut files.into_iter(), &output_dirname, &mut zip_wtr)
+                    .expect("zip remaining recording files");
                 zip_wtr.finish().unwrap();
             }
 
@@ -891,31 +868,5 @@ impl Drop for WritingState {
             tracing::info!("done creating zip file, removing {output_dirname}");
             std::fs::remove_dir_all(&output_dirname).unwrap();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn recording_zip_compression_keeps_readme_uncompressed() -> zip::result::ZipResult<()> {
-        use std::io::Write as _;
-
-        let mut zip_wtr = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip_wtr.start_file("README.md", super::recording_zip_options(true))?;
-        zip_wtr.write_all(b"read me")?;
-        zip_wtr.start_file("data.csv", super::recording_zip_options(false))?;
-        zip_wtr.write_all(b"some recorded data")?;
-
-        let buf = zip_wtr.finish()?.into_inner();
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf))?;
-        assert_eq!(
-            archive.by_name("README.md")?.compression(),
-            zip::CompressionMethod::Stored
-        );
-        assert_eq!(
-            archive.by_name("data.csv")?.compression(),
-            zip::CompressionMethod::Deflated
-        );
-        Ok(())
     }
 }

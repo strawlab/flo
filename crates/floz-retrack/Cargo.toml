@@ -18,6 +18,7 @@ zip.workspace = true
 
 # flo and strand-braid deps
 floz-parser.workspace = true
+floz-writer.workspace = true
 flo-core.workspace = true
 zip-or-dir.workspace = true
 

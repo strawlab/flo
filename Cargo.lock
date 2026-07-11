@@ -1803,6 +1803,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -1825,6 +1826,7 @@ dependencies = [
  "flo-tracing",
  "flo-webserver",
  "floz-parser",
+ "floz-writer",
  "futures",
  "glob",
  "h264-recorder",
@@ -2022,6 +2024,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "color-eyre",
+ "floz-writer",
  "tempfile",
  "tracing",
  "tracing-panic",
@@ -2054,6 +2057,7 @@ dependencies = [
  "csv",
  "flo-core",
  "floz-parser",
+ "floz-writer",
  "tempfile",
  "tracing",
  "tracing-panic",
@@ -2078,6 +2082,14 @@ dependencies = [
  "web-sys",
  "yew",
  "zip-or-dir",
+]
+
+[[package]]
+name = "floz-writer"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "zip",
 ]
 
 [[package]]
@@ -8494,6 +8506,12 @@ dependencies = [
  "thiserror 2.0.18",
  "zip",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5431d5661c32445236631278f27946e444ddafe4684cac70b185272d4f9c52d5"
 
 [[package]]
 name = "zmij"
