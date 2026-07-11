@@ -73,7 +73,7 @@ memchr = "2.5.0"
 sha2 = "0.10.6"
 rand = "0.8.5"
 chrono = { workspace = true, default-features = true, features = ["serde"] }
-zip = { version = "2.2.2", default-features = false, features = ["time"] }
+zip.workspace = true
 walkdir = "2.2"
 csv.workspace = true
 home.workspace = true
@@ -169,6 +169,7 @@ tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
 tracing-panic = "0.1.1"
 base64 = "0.22"
 flate2 = "1.0"
+zip = { version = "2.2.2", default-features = false, features = ["deflate", "time"] }
 
 camshow-protocol = { path = "crates/camshow-protocol" }
 flo-core = { path = "crates/flo-core", default-features = false }
