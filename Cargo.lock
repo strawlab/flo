@@ -2084,6 +2084,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "floz-repack"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "tempfile",
+ "tracing",
+ "tracing-panic",
+ "tracing-subscriber",
+ "zip",
+]
+
+[[package]]
 name = "floz-replay"
 version = "0.1.0"
 dependencies = [
