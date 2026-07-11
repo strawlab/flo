@@ -1,15 +1,14 @@
 // Copyright (C) The FLO Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! CLI tool to re-compress a `.floz` file's ZIP archive with maximum
-//! compression, in place.
+//! CLI tool to re-compress a `.floz` file's ZIP archive in place.
 //!
 //! Older `.floz` files (and files produced before the writer's compression
 //! settings were dialed up) can be much larger than necessary. This tool
 //! copies every entry of an existing `.floz` file into a fresh ZIP archive
-//! using maximum-effort Deflate compression, mirroring the entry layout used
-//! by the FLO recorder and `floz-retrack` (README stored first and
-//! uncompressed, all data tables compressed).
+//! using Deflate compression, mirroring the entry layout used by the FLO
+//! recorder and `floz-retrack` (README stored first and uncompressed, all data
+//! tables compressed).
 //!
 //! The rewritten archive is first written to a hidden file alongside the
 //! input. Only once that completes without error is the original file moved
@@ -29,23 +28,24 @@ use floz_writer::{FlozWriter, README_FNAME};
 #[cfg(test)]
 use floz_writer::FLOZ_HEADER;
 
-/// Deflate compression level passed to the `zip` crate. Levels above 9 (up to
-/// 264) switch from the `flate2` encoder to the much slower but stronger
-/// Zopfli encoder, running `level - 9` Zopfli iterations (see
-/// `zip::write::FileOptions::compression_level`). `24` (15 Zopfli iterations)
-/// is the crate's own documented default for Zopfli-only builds and, per
-/// benchmarking on real tracking-state CSVs, captures nearly all of Zopfli's
-/// size reduction over plain `flate2` (levels 6-9): going from level 24 to
-/// the literal maximum of 264 costs roughly 7x the time for only ~5% smaller
-/// output, which is not worth it for the multi-hundred-MB files this tool may
-/// see.
-const MAX_COMPRESSION_LEVEL: i64 = 24;
+/// Default Deflate compression level, matching the normal default used by ZIP
+/// implementations. Levels above 9 select the much slower Zopfli encoder.
+const DEFAULT_COMPRESSION_LEVEL: i64 = 6;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 struct Opt {
     /// Input .floz filename to re-compress in place.
     input: PathBuf,
+
+    /// Deflate level. Values 0-9 use zlib-rs; 10-264 use Zopfli with
+    /// `level - 9` iterations and can be orders of magnitude slower.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_COMPRESSION_LEVEL,
+        value_parser = clap::value_parser!(i64).range(0..=264)
+    )]
+    compression_level: i64,
 }
 
 /// Path of the hidden scratch file used while rewriting `input`.
@@ -67,12 +67,12 @@ fn backup_path(input: &Path) -> PathBuf {
 }
 
 /// Re-write every entry of the ZIP archive at `src_path` into a new archive
-/// at `dest_path`, using maximum Deflate compression for data tables and
-/// uncompressed storage for the human-readable README.
+/// at `dest_path`, using Deflate compression for data tables and uncompressed
+/// storage for the human-readable README.
 ///
 /// `dest_path` must not already exist; this refuses to overwrite a stray
 /// leftover from a previous run rather than silently clobbering it.
-fn repack(src_path: &Path, dest_path: &Path) -> Result<()> {
+fn repack(src_path: &Path, dest_path: &Path, compression_level: i64) -> Result<()> {
     let src_file =
         std::fs::File::open(src_path).with_context(|| format!("Opening {}", src_path.display()))?;
     let mut src_zip = zip::ZipArchive::new(std::io::BufReader::new(src_file))
@@ -87,10 +87,10 @@ fn repack(src_path: &Path, dest_path: &Path) -> Result<()> {
         .with_context(|| format!("Creating {}", dest_path.display()))?;
     let dest_file = std::io::BufWriter::new(dest_file);
     let mut zip_wtr =
-        FlozWriter::new(dest_file, Some(MAX_COMPRESSION_LEVEL)).context("Writing FLOZ header")?;
-    // Data tables get maximum-effort compression. The README is stored
-    // uncompressed and first (see the sort above) so the start of the file is
-    // human-readable, matching the `.braidz` convention.
+        FlozWriter::new(dest_file, Some(compression_level)).context("Writing FLOZ header")?;
+    // Data tables are compressed. The README is stored uncompressed and first
+    // (see the sort above) so the start of the file is human-readable,
+    // matching the `.braidz` convention.
     for name in &names {
         zip_wtr
             .start_file(name)
@@ -115,7 +115,7 @@ struct RepackReport {
 /// Repack `input` in place: write the recompressed archive to a hidden
 /// temporary file, then, only once that succeeds, move the original to
 /// `<input>.bak` and the rewritten file to `input`.
-fn repack_in_place(input: &Path) -> Result<RepackReport> {
+fn repack_in_place(input: &Path, compression_level: i64) -> Result<RepackReport> {
     if !input.is_file() {
         bail!("Input `{}` is not a file", input.display());
     }
@@ -140,7 +140,7 @@ fn repack_in_place(input: &Path) -> Result<RepackReport> {
         .len();
 
     tracing::info!("repacking {} -> {}", input.display(), tmp_path.display());
-    if let Err(e) = repack(input, &tmp_path) {
+    if let Err(e) = repack(input, &tmp_path, compression_level) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e);
     }
@@ -196,7 +196,7 @@ fn main() -> Result<()> {
     init_tracing()?;
     let opt = Opt::parse();
 
-    let report = repack_in_place(&opt.input)?;
+    let report = repack_in_place(&opt.input, opt.compression_level)?;
 
     let pct = 100.0 * report.repacked_bytes as f64 / report.original_bytes as f64;
     tracing::info!(
@@ -213,6 +213,33 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_defaults_to_normal_deflate_level() {
+        let opt = Opt::try_parse_from(["floz-repack", "recording.floz"]).unwrap();
+        assert_eq!(opt.compression_level, DEFAULT_COMPRESSION_LEVEL);
+    }
+
+    #[test]
+    fn cli_accepts_explicit_zopfli_level() {
+        let opt =
+            Opt::try_parse_from(["floz-repack", "recording.floz", "--compression-level", "24"])
+                .unwrap();
+        assert_eq!(opt.compression_level, 24);
+    }
+
+    #[test]
+    fn cli_rejects_out_of_range_compression_level() {
+        assert!(
+            Opt::try_parse_from([
+                "floz-repack",
+                "recording.floz",
+                "--compression-level",
+                "265",
+            ])
+            .is_err()
+        );
+    }
 
     fn write_test_floz(path: &Path, readme: &[u8], csv: &[u8]) {
         let file = std::fs::File::create(path).unwrap();
@@ -262,7 +289,7 @@ mod tests {
         let csv = b"a,b,c\n1,2,3\n".repeat(1000);
         write_test_floz(&src, &readme, &csv);
 
-        repack(&src, &dest).unwrap();
+        repack(&src, &dest, DEFAULT_COMPRESSION_LEVEL).unwrap();
 
         assert_eq!(read_entry(&dest, README_FNAME), readme);
         assert_eq!(read_entry(&dest, "tracking_state.csv"), csv);
@@ -295,7 +322,7 @@ mod tests {
         write_test_floz(&input, &readme, &csv);
         let original_bytes = std::fs::metadata(&input).unwrap().len();
 
-        let report = repack_in_place(&input).unwrap();
+        let report = repack_in_place(&input, DEFAULT_COMPRESSION_LEVEL).unwrap();
 
         assert_eq!(report.original_bytes, original_bytes);
         assert!(report.backup_path.exists());
@@ -312,7 +339,7 @@ mod tests {
         write_test_floz(&input, b"# hello\n", b"a,b\n1,2\n");
         std::fs::write(backup_path(&input), b"stray leftover").unwrap();
 
-        assert!(repack_in_place(&input).is_err());
+        assert!(repack_in_place(&input, DEFAULT_COMPRESSION_LEVEL).is_err());
         // The original must be left untouched.
         assert!(input.exists());
     }
