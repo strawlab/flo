@@ -154,10 +154,6 @@ impl DroneCoordinator {
                 set_gps_global_origin[1],
                 set_gps_global_origin[2],
             );
-            #[expect(
-                deprecated,
-                reason = "MAV_CMD_SET_GLOBAL_ORIGIN not yet in ardupilotmega dialect"
-            )]
             let data = mavlink::ardupilotmega::MavMessage::SET_GPS_GLOBAL_ORIGIN(
                 mavlink::ardupilotmega::SET_GPS_GLOBAL_ORIGIN_DATA {
                     latitude: (lat * 1e7) as i32,
