@@ -226,6 +226,7 @@ impl DroneCoordinator {
             },
         );
         self_.mavconn.tx.send((self_.my_header, data)).await?;
+ 
         Ok(self_)
     }
 
@@ -526,10 +527,6 @@ impl DroneCoordinator {
         Ok(())
     }
 
-    async fn on_flight_setpoint(&mut self, sp: drone_structs::TrajectorySetpoint) -> Result<()> {
-        self.send_trajectory_setpoint(sp).await
-    }
-
     async fn on_flight_mode_request(&mut self, fm: FlightMode) -> Result<()> {
         if self.flight_mode_cd.old_value != Some(fm as u32) {
             self.switch_flight_mode(fm).await?;
@@ -652,7 +649,7 @@ async fn main_loop(
                 coordinator.handle_message_from_drone(header, msg).await?;
             }
             r = flight_setpoint_rx.recv() => {
-                coordinator.on_flight_setpoint(r.unwrap()).await?;
+                coordinator.send_trajectory_setpoint(r.unwrap()).await?;
             }
             r = flight_mode_request_rx.recv() => {
                 coordinator.on_flight_mode_request(r.unwrap()).await?;
