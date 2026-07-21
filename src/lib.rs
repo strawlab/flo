@@ -531,11 +531,12 @@ impl<'a> FloCoordinator<'a> {
             .as_ref()
             .and_then(|c| c.camshow_mp4_cfg.clone())
             .unwrap_or_default();
-        let camshow_cmd = camshow_client::Command::Start(Box::new(camshow_protocol::RecordingStart {
-            creation_time,
-            data_dir: self.data_dir.to_path_buf(),
-            mp4_cfg,
-        }));
+        let camshow_cmd =
+            camshow_client::Command::Start(Box::new(camshow_protocol::RecordingStart {
+                creation_time,
+                data_dir: self.data_dir.to_path_buf(),
+                mp4_cfg,
+            }));
 
         self.flo_saver_tx
             .send(SaveToDiskMsg::ToggleSavingFloz(Some((
@@ -770,9 +771,9 @@ impl<'a> FloCoordinator<'a> {
                 }
 
                 // start/stop saving .mp4 file on tracking cameras
-                self.send_cam_arg_to_all(
-                    strand_cam_remote_control::CamArg::SetIsRecordingMp4(want_recording),
-                )
+                self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(
+                    want_recording,
+                ))
                 .await;
             }
             _ => {}
