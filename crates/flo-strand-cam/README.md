@@ -22,6 +22,10 @@ flo-strand-cam:
     center_y: 600
 ```
 
+[`config-flo-strand-cam-sim.yaml`](../../config-flo-strand-cam-sim.yaml) is a
+complete headless development configuration. It intentionally has no
+`strand_cam_main` or `strand_cam_secondary` blocks.
+
 `backend` may be `sim`, `pylon`, `vimba`, or `webcam`. `sim` is intended for
 development and automated end-to-end tests; its scenario remains configured by
 `STRAND_CAM_SIM_SPEC` as it is for the standalone Strand Camera binary.

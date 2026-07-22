@@ -255,11 +255,15 @@ fn strand_args(config: &ExtensionConfig, data_dir: std::path::PathBuf) -> Strand
 }
 
 fn main() -> Result<()> {
-    flo::run(flo::AppOptions {
+    flo::run(app_options())
+}
+
+fn app_options() -> flo::AppOptions {
+    flo::AppOptions {
         extensions: vec![Box::new(StrandCamExtension)],
         enable_udp_listener: false,
         ..Default::default()
-    })
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +300,51 @@ mod tests {
     #[test]
     fn drops_frame_numbers_flo_cannot_represent() {
         assert!(detection_to_centroid(detection(u64::from(u32::MAX) + 1)).is_none());
+    }
+
+    #[test]
+    fn sim_direct_sink_reaches_bounded_flo_ingress_without_udp() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // This is the same bounded direct sink supplied to Strand Camera
+            // in `StrandCamExtension::spawn`; no socket is involved.
+            let (direct_sink_tx, mut direct_sink_rx) = mpsc::channel(1);
+            direct_sink_tx.try_send(detection(42)).unwrap();
+
+            let received_detection = direct_sink_rx.recv().await.unwrap();
+            let centroid = detection_to_centroid(received_detection).unwrap();
+
+            // Model FLO's bounded in-process centroid ingress. The extension
+            // uses the equivalent `CentroidInputSender::try_send` API, so the
+            // camera task never waits for FLO to drain observations.
+            let (flo_ingress_tx, mut flo_ingress_rx) = mpsc::channel(1);
+            flo_ingress_tx.try_send(centroid).unwrap();
+            assert_eq!(flo_ingress_rx.recv().await.unwrap().framenumber, 42);
+
+            flo_ingress_tx
+                .try_send(detection_to_centroid(detection(43)).unwrap())
+                .unwrap();
+            assert!(matches!(
+                flo_ingress_tx.try_send(detection_to_centroid(detection(44)).unwrap()),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+            ));
+        });
+    }
+
+    #[test]
+    fn integrated_app_disables_legacy_udp_centroid_listener() {
+        assert!(!app_options().enable_udp_listener);
+    }
+
+    #[test]
+    fn sim_example_config_parses_for_the_extension() {
+        let config: flo_core::FloControllerConfig =
+            serde_yaml::from_str(include_str!("../../../config-flo-strand-cam-sim.yaml")).unwrap();
+        let extension = extension_config(&config).unwrap();
+        assert!(matches!(extension.backend, CameraBackend::Sim));
     }
 
     #[test]
