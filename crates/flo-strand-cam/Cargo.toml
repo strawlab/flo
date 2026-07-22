@@ -1,0 +1,35 @@
+[package]
+name = "flo-strand-cam"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "In-process FLO and Strand Camera application"
+
+[[bin]]
+name = "flo-strand-cam"
+path = "src/main.rs"
+
+[dependencies]
+color-eyre.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+ci2.workspace = true
+ci2-async.workspace = true
+ci2-pylon.workspace = true
+ci2-sim.workspace = true
+ci2-vimba.workspace = true
+ci2-webcam.workspace = true
+
+flo.workspace = true
+flo-core.workspace = true
+strand-cam.workspace = true
+
+[features]
+default = ["bundle_files"]
+
+bundle_files = ["strand-cam/bundle_files"]
+serve_files = ["strand-cam/serve_files"]

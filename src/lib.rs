@@ -1386,16 +1386,24 @@ fn run_tokio_main(
         .build()?;
 
     let handle = tokio_rt.handle();
-    tokio_rt.block_on(app_main(
-        handle,
-        cli,
-        my_state,
-        device_config,
-        shutdown_rx,
-        data_dir,
-        mavlink_port,
-        options,
-    ))
+    // Some camera backends are thread-affine and therefore expose `!Send`
+    // futures. A LocalSet lets in-process integrations keep those tasks on
+    // this caller-owned FLO runtime, while ordinary extensions continue to
+    // use the multi-thread runtime normally.
+    let local = tokio::task::LocalSet::new();
+    local.block_on(
+        &tokio_rt,
+        app_main(
+            handle,
+            cli,
+            my_state,
+            device_config,
+            shutdown_rx,
+            data_dir,
+            mavlink_port,
+            options,
+        ),
+    )
 }
 
 /// The highest-level main loop for the flo app.
@@ -1809,6 +1817,7 @@ async fn app_main(
             (None, Box::pin(pending()))
         };
 
+    let (extension_shutdown_tx, extension_shutdown_rx) = watch::channel(false);
     let mut extension_tasks: tokio::task::JoinSet<eyre::Result<()>> = tokio::task::JoinSet::new();
     for ext in extensions {
         let name = ext.name();
@@ -1820,6 +1829,7 @@ async fn app_main(
             config: &device_config,
             centroid_tx: centroid_tx.clone(),
             processing_feedback: processing_feedback_rx.clone(),
+            shutdown_rx: extension_shutdown_rx.clone(),
         };
         let jh = ext
             .spawn(ctx)
@@ -1851,7 +1861,9 @@ async fn app_main(
         strand_cams,
     );
 
-    // Main loop.
+    // Main loop. Keep its result so extensions receive their shutdown signal
+    // even if a subsystem returns an error rather than taking a normal break.
+    let coordinator_result = async {
     loop {
         // Wait for any of a number of things to happen
         tokio::select! {
@@ -1930,7 +1942,37 @@ async fn app_main(
             }
         };
     }
+    Ok::<(), eyre::Error>(())
+    }
+    .await;
     tracing::debug!("FloCoordinator ending.");
+
+    // Give extensions a bounded opportunity to release external resources
+    // before the runtime cancels their remaining tasks. This is especially
+    // important for in-process camera acquisition, which needs to stop its
+    // frame task before its vendor module is dropped.
+    let _ = extension_shutdown_tx.send(true);
+    let extension_shutdown_deadline = std::time::Duration::from_secs(2);
+    let graceful_extensions = async {
+        while let Some(extension_result) = extension_tasks.join_next().await {
+            match extension_result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "extension failed during shutdown"),
+                Err(error) => tracing::warn!(%error, "extension task failed during shutdown"),
+            }
+        }
+    };
+    if tokio::time::timeout(extension_shutdown_deadline, graceful_extensions)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            ?extension_shutdown_deadline,
+            "extensions did not stop before shutdown deadline; aborting remaining tasks"
+        );
+        extension_tasks.abort_all();
+        while extension_tasks.join_next().await.is_some() {}
+    }
 
     // Tell every connected browser we are shutting down, so all clients (not
     // only one) show the "FLO has quit" screen and stop reconnecting. This is
@@ -1940,7 +1982,7 @@ async fn app_main(
     let _ = quit_tx.send(true);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    Ok(())
+    coordinator_result
 }
 
 fn play_sound(
@@ -2028,5 +2070,22 @@ mod tests {
             DEFAULT_CENTROID_INPUT_CAPACITY
         );
         assert!(options.enable_udp_listener);
+    }
+
+    #[test]
+    fn localset_runs_thread_affine_extension_tasks_on_flo_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let thread_affine = std::rc::Rc::new(());
+            let task = tokio::task::spawn_local(async move {
+                let _thread_affine = thread_affine;
+                Ok::<_, eyre::Error>(())
+            });
+            task.await.unwrap().unwrap();
+        });
     }
 }

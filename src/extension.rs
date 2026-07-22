@@ -30,6 +30,9 @@ pub struct ExtensionContext<'a> {
     /// Latest FLO state relevant to camera processing. The value is updated
     /// after motor readouts and control-loop output changes.
     pub processing_feedback: tokio::sync::watch::Receiver<ProcessingFeedback>,
+    /// Becomes `true` when FLO's coordinator is stopping. Extensions should
+    /// finish their own graceful shutdown promptly after observing this value.
+    pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 /// A long-running subsystem composed into the flo binary at link time.
