@@ -27,7 +27,7 @@ pub use utils::{ChangeDetector, MyTimestamp, Timestamped, elapsed, elapsed_by, n
 pub const EVENTS_PATH: &str = "events";
 /// URL path under which FLO reverse-proxies its configured Strand Cameras.
 /// This matches Braid's camera proxy API.
-pub const CAM_PROXY_PATH: &str = "cam-proxy";
+pub const CAM_PROXY_PATH: &str = "camera";
 
 /// The role a connected Strand Camera has in FLO's tracking configuration.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
@@ -1447,7 +1447,7 @@ fn deserialize_float_null_as_nan<'de, D: Deserializer<'de>>(des: D) -> Result<Fl
 fn strand_cam_proxy_info_uses_braid_compatible_name_encoding() {
     let info = StrandCamProxyInfo::new(StrandCamRole::Main, "camera one/left".to_string());
     assert_eq!(info.name, "camera one/left");
-    assert_eq!(info.proxy_prefix, "/cam-proxy/camera%20one%2Fleft/");
+    assert_eq!(info.proxy_prefix, "/camera/camera%20one%2Fleft/");
 }
 
 /// Test [deserialize_float_null_as_nan] above in both CBOR (which natively

@@ -29,7 +29,7 @@ const COOKIE_SECRET_KEY: &str = "cookie-secret-base64";
 
 /// Authenticated Strand Camera sessions, keyed by the camera name reported by
 /// each server. The names are exposed as the first path component below
-/// `/cam-proxy`, matching Braid's camera proxy API.
+/// `/camera`.
 pub type StrandCamSessions = BTreeMap<String, strand_bui_backend_session::HttpSession>;
 
 #[cfg(not(any(feature = "bundle_files", feature = "serve_files")))]
