@@ -25,6 +25,9 @@ pub mod utils;
 pub use utils::{ChangeDetector, MyTimestamp, Timestamped, elapsed, elapsed_by, now};
 
 pub const EVENTS_PATH: &str = "events";
+/// URL path under which FLO reverse-proxies its configured Strand Cameras.
+/// This matches Braid's camera proxy API.
+pub const CAM_PROXY_PATH: &str = "cam-proxy";
 
 /// The default unicast UDP send/receive port.
 pub const UNICAST_UDP_DEFAULT_PORT: u16 = 8080;
