@@ -149,16 +149,16 @@ the upstream request.
 
 You can run the full `flo` controller — tracking, Kalman filter, distance
 estimation, recording, and web UI — with no camera or motor hardware attached.
-The `floz-replay` tool feeds centroid data to `flo` over the same UDP channel
-that Strand Camera's `imops` normally uses, so the controller behaves as if a
-camera were present. This is useful for checking that new code runs, runs
-usefully, and that the UI works, before testing on real hardware.
+The `floz-replay` tool feeds centroid data to `flo` over FLO's legacy UDP
+channel, so the controller behaves as if a camera were present. This is useful
+for checking that new code runs, runs usefully, and that the UI works, before
+testing on real hardware.
 
-This always involves **two processes**, and you must **start `flo` first** so it
-is listening on its UDP port. If you start `floz-replay` with nothing listening,
-the send fails immediately with `Sending UDP packet: Connection refused` (the
-operating system reports the unreachable port). That is the cause of a
-connection-refused error from a bare `floz-replay synth ...` command.
+The legacy `floz-replay` CLI uses UDP and therefore involves **two processes**:
+start `flo` first so it is listening on its UDP port. If you start
+`floz-replay` with nothing listening, the send fails immediately with `Sending
+UDP packet: Connection refused` (the operating system reports the unreachable
+port).
 
 1. Start `flo` with a hardware-free config — one with no `strand_cam_*` blocks
    (so nothing connects to Strand Camera) and no motor flags (so motor commands
@@ -205,6 +205,24 @@ connection-refused error from a bare `floz-replay synth ...` command.
    `--primary-cam` / `--secondary-cam` to relabel the recording's camera names
    to the ones the controller expects (e.g. `synth-secondary` to match
    `config-sim-stereo.yaml`).
+
+### In-process replay or synthesis (no UDP listener)
+
+`floz-replay-inprocess` composes the same source with FLO through
+`CentroidInputSender`; it deliberately disables the UDP listener. Source
+arguments come first and normal FLO arguments follow `--`. For now, `synth`
+still takes its calibration config explicitly, so pass the same config on both
+sides:
+
+```
+cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
+  synth --config config-sim-stereo.yaml --duration 30 -- \
+  --config config-sim-stereo.yaml
+```
+
+For a recording, replace the source portion with `replay recording.floz`.
+The original `floz-replay` commands remain available as compatibility UDP
+adapters while integrations migrate to the in-process input.
 
 ## `camshow` binary
 

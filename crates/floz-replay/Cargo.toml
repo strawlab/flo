@@ -14,7 +14,9 @@ serde_yaml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-panic.workspace = true
+tokio.workspace = true
 
 # flo and strand-braid deps
 floz-parser.workspace = true
 flo-core.workspace = true
+flo.workspace = true

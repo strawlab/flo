@@ -107,6 +107,18 @@ impl CentroidInputSender {
         self.tx.send(centroid).await
     }
 
+    /// Queue an observation from a blocking producer thread.
+    ///
+    /// This is intended for compatibility sources which reproduce recorded
+    /// wall-clock cadence. New async camera integrations should use
+    /// [`Self::send`] instead.
+    pub fn blocking_send(
+        &self,
+        centroid: MomentCentroid,
+    ) -> std::result::Result<(), mpsc::error::SendError<MomentCentroid>> {
+        self.tx.blocking_send(centroid)
+    }
+
     /// Attempt to queue an observation without waiting for coordinator
     /// capacity.
     pub fn try_send(
@@ -1190,6 +1202,18 @@ impl Default for AppOptions {
 /// Parses CLI args, loads configuration, sets up logging, and runs the
 /// tokio main loop. Returns when the program exits.
 pub fn run(options: AppOptions) -> Result<()> {
+    run_with_args(options, std::env::args_os())
+}
+
+/// Run FLO using explicit command-line arguments.
+///
+/// Composition binaries use this to reserve their own arguments while still
+/// forwarding FLO's normal CLI unchanged. `args` must include a program name.
+pub fn run_with_args<I, T>(options: AppOptions, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
     if std::env::var_os("RUST_LOG").is_none() {
         let envstr = format!("{}=info,info", env!("CARGO_PKG_NAME")).replace('-', "_");
         // SAFETY: We ensure that this only happens in single-threaded code
@@ -1198,7 +1222,7 @@ pub fn run(options: AppOptions) -> Result<()> {
         unsafe { std::env::set_var("RUST_LOG", envstr) };
     }
 
-    let cli = Cli::parse();
+    let cli = parse_cli(args);
     let (log_dir, data_dir) = if let Some(dd) = cli.data_dir.as_ref() {
         (dd.clone(), dd.clone())
     } else {
@@ -1369,6 +1393,14 @@ pub fn run(options: AppOptions) -> Result<()> {
         options,
     )?;
     Ok(())
+}
+
+fn parse_cli<I, T>(args: I) -> Cli
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    Cli::parse_from(args)
 }
 
 /// Create the tokio Runtime and call the main app loop.
@@ -2021,6 +2053,13 @@ fn play_sound_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_cli_accepts_forwarded_composition_arguments() {
+        let cli = parse_cli(["flo", "--config", "sim.yaml", "--udp-addr", "127.0.0.1:0"]);
+        assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
+        assert_eq!(cli.udp_addr, "127.0.0.1:0");
+    }
 
     #[test]
     fn centroid_input_is_bounded() {
