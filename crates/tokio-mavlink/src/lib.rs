@@ -126,8 +126,7 @@ fn reader<M: Message + std::fmt::Debug>(
     protocol_version: MavlinkVersion,
 ) -> Result<NeverOk, RecvError> {
     loop {
-        match mavlink::read_versioned_msg(&mut rdr, protocol_version)
-        {
+        match mavlink::read_versioned_msg(&mut rdr, protocol_version) {
             Ok(val) => tx.blocking_send(Ok(val)).unwrap(),
             Err(MessageReadError::Io(e)) => {
                 return Err(e.into());
