@@ -66,6 +66,69 @@ mod zip_dir;
 pub use extension::{Extension, ExtensionContext, OsdOverlay};
 pub use osd::DroneStatus;
 
+/// Default number of camera observations retained while the coordinator is
+/// busy. The bounded queue provides backpressure rather than allowing a slow
+/// controller to grow memory without limit.
+pub const DEFAULT_CENTROID_INPUT_CAPACITY: usize = 64;
+
+/// Timestamped FLO state that image-processing integrations can use when
+/// interpreting a frame. This is intentionally a compact application-facing
+/// snapshot rather than a view of the coordinator internals.
+#[derive(Clone, Debug)]
+pub struct ProcessingFeedback {
+    /// Time at which FLO last assembled this snapshot.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Most recently reported motor positions, if any motor backend has
+    /// provided them.
+    pub motor_readout: Option<MotorPositionResult>,
+    /// Most recent command sent to the motor-control watch channel.
+    pub motor_command: MotorValueCache,
+    /// Current tracking mode associated with the command.
+    pub tracking_mode: DeviceMode,
+}
+
+/// Sender for the transport-independent camera-observation input of a FLO
+/// application.
+///
+/// This is handed to extensions in [`ExtensionContext`]. A full queue means
+/// the coordinator cannot keep up; camera integrations should choose and log
+/// their own drop/backpressure policy via [`Self::try_send`].
+#[derive(Clone, Debug)]
+pub struct CentroidInputSender {
+    tx: mpsc::Sender<MomentCentroid>,
+}
+
+impl CentroidInputSender {
+    /// Queue an observation, waiting for coordinator capacity if necessary.
+    pub async fn send(
+        &self,
+        centroid: MomentCentroid,
+    ) -> std::result::Result<(), mpsc::error::SendError<MomentCentroid>> {
+        self.tx.send(centroid).await
+    }
+
+    /// Attempt to queue an observation without waiting for coordinator
+    /// capacity.
+    pub fn try_send(
+        &self,
+        centroid: MomentCentroid,
+    ) -> std::result::Result<(), mpsc::error::TrySendError<MomentCentroid>> {
+        self.tx.try_send(centroid)
+    }
+
+    /// Returns whether the coordinator receiver has been dropped.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+}
+
+fn centroid_input_channel(
+    capacity: usize,
+) -> (CentroidInputSender, mpsc::Receiver<MomentCentroid>) {
+    let (tx, rx) = mpsc::channel(capacity);
+    (CentroidInputSender { tx }, rx)
+}
+
 const HIGHMAG_VISIBLE_MP4_PATH_TEMPLATE: &str = "highmag%Y%m%d_%H%M%S.%f.mp4";
 const WEBCAM_MP4_PATH_TEMPLATE: &str = "webcam%Y%m%d_%H%M%S.%f.mp4";
 const FLO_DIRNAME_TEMPLATE: &str = "flo%Y%m%d_%H%M%S.%f";
@@ -177,6 +240,7 @@ struct FloCoordinator<'a> {
     my_state: flo_core::DeviceState,
     _local_flo_state: flo_core::LocalFloState,
     motors_tx: watch::Sender<MotorValueCache>,
+    processing_feedback_tx: watch::Sender<ProcessingFeedback>,
     audio_stream: Option<&'a rodio::OutputStreamHandle>,
     from_device_http_tx: watch::Sender<DeviceState>,
     broadway: flo_core::Broadway,
@@ -197,6 +261,7 @@ impl<'a> FloCoordinator<'a> {
         my_state: flo_core::DeviceState,
         _local_flo_state: LocalFloState,
         motors_tx: watch::Sender<MotorValueCache>,
+        processing_feedback_tx: watch::Sender<ProcessingFeedback>,
         audio_stream: Option<&'a rodio::OutputStreamHandle>,
         from_device_http_tx: watch::Sender<DeviceState>,
         broadway: Broadway,
@@ -227,6 +292,7 @@ impl<'a> FloCoordinator<'a> {
             my_state,
             _local_flo_state,
             motors_tx,
+            processing_feedback_tx,
             audio_stream,
             from_device_http_tx,
             broadway,
@@ -245,6 +311,7 @@ impl<'a> FloCoordinator<'a> {
             motor_position.tilt_enc
         );
         self.last_motor_data = Some(motor_position.clone());
+        self.publish_processing_feedback();
         //rec.pan_pos = motor_position.pan_pos;
         //rec.tilt_pos = motor_position.tilt_pos;
         {
@@ -263,45 +330,31 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    fn on_image_centroid(
-        &mut self,
-        udp_msg: std::result::Result<(UdpMsg, std::net::SocketAddr), udp_codec::Error>,
-    ) -> Result<()> {
-        log::trace!("got UDP message {:?}", udp_msg);
-        // This is the path through which centroid data from Strand Camera
-        // arrives.
-        let centroid = match udp_msg {
-            Ok((UdpMsg::Centroid(centroid), _addr)) => {
-                if centroid.schema_version != 2 {
-                    tracing::error!(
-                        "expected centroid schema version 2, found {}",
-                        centroid.schema_version
-                    );
-                    return Ok(());
-                }
+    /// Ingest a camera observation independently of the transport that
+    /// delivered it. UDP is retained as a legacy adapter in
+    /// [`Self::on_udp_message`].
+    fn on_image_centroid(&mut self, centroid: MomentCentroid) -> Result<()> {
+        if centroid.schema_version != 2 {
+            tracing::error!(
+                "expected centroid schema version 2, found {}",
+                centroid.schema_version
+            );
+            return Ok(());
+        }
 
-                if centroid.mu00 != 0.0 {
-                    // Save data if something was detected.
-                    let msg = SaveToDiskMsg::CentroidData((chrono::Local::now(), centroid.clone()));
-                    self.flo_saver_tx.send(msg)?;
-                }
+        if centroid.mu00 != 0.0 {
+            // Save data if something was detected.
+            let msg = SaveToDiskMsg::CentroidData((chrono::Local::now(), centroid.clone()));
+            self.flo_saver_tx.send(msg)?;
+        }
 
-                // Check if we have a second camera but no secondary camera in configuration.
-                self.all_cam_names_ever_seen
-                    .insert(centroid.cam_name.clone());
+        // Check if we have a second camera but no secondary camera in configuration.
+        self.all_cam_names_ever_seen
+            .insert(centroid.cam_name.clone());
 
-                if self.all_cam_names_ever_seen.len() > 1 && self.secondary_cam_name.is_none() {
-                    eyre::bail!(
-                        "More than one camera sending data, but no secondary camera assigned"
-                    );
-                }
-                centroid
-            }
-            Err(e) => {
-                tracing::error!("Error deserializing UDP message: {e}");
-                return Ok(());
-            }
-        };
+        if self.all_cam_names_ever_seen.len() > 1 && self.secondary_cam_name.is_none() {
+            eyre::bail!("More than one camera sending data, but no secondary camera assigned");
+        }
 
         let cam_name = centroid.cam_name.as_str();
         let mut is_secondary = false;
@@ -340,6 +393,22 @@ impl<'a> FloCoordinator<'a> {
         }
 
         Ok(())
+    }
+
+    /// Adapt a decoded legacy UDP datagram into transport-independent
+    /// coordinator input. This keeps standalone FLO and `floz-replay`
+    /// working while integrated camera code uses [`CentroidInputSender`].
+    fn on_udp_message(
+        &mut self,
+        udp_msg: std::result::Result<(UdpMsg, std::net::SocketAddr), udp_codec::Error>,
+    ) -> Result<()> {
+        match udp_msg {
+            Ok((UdpMsg::Centroid(centroid), _addr)) => self.on_image_centroid(centroid),
+            Err(e) => {
+                tracing::error!("Error deserializing UDP message: {e}");
+                Ok(())
+            }
+        }
     }
 
     fn on_fast_tick(&mut self, dt_secs: f64) -> Result<()> {
@@ -450,7 +519,18 @@ impl<'a> FloCoordinator<'a> {
             // handler.
             self.switch_to_mode(next_mode.0, next_mode.1)?;
         }
+        self.publish_processing_feedback();
         Ok(())
+    }
+
+    fn publish_processing_feedback(&self) {
+        self.processing_feedback_tx
+            .send_replace(ProcessingFeedback {
+                updated_at: chrono::Utc::now(),
+                motor_readout: self.last_motor_data.clone(),
+                motor_command: self.tracking_state.compute_motor_cache(),
+                tracking_mode: self.tracking_state.mode,
+            });
     }
 
     fn on_slow_tick(&mut self) -> Result<()> {
@@ -1082,12 +1162,27 @@ impl BroadwaySend for mpsc::UnboundedSender<SaveToDiskMsg> {
 /// Options used to compose extra subsystems into the flo binary at link time.
 /// The default flo binary passes `AppOptions::default()`; downstream crates
 /// that need to add extensions construct their own `AppOptions`.
-#[derive(Default)]
 pub struct AppOptions {
     /// Long-running subsystems that join the supervisor select loop.
     pub extensions: Vec<Box<dyn Extension>>,
     /// OSD overlays drawn each render tick after the base layer.
     pub osd_overlays: Vec<Box<dyn OsdOverlay + Send + Sync>>,
+    /// Capacity of the bounded in-process centroid input queue.
+    pub centroid_input_capacity: usize,
+    /// Whether to bind the legacy UDP centroid listener. Integrated camera
+    /// applications should disable this and use [`CentroidInputSender`].
+    pub enable_udp_listener: bool,
+}
+
+impl Default for AppOptions {
+    fn default() -> Self {
+        Self {
+            extensions: Vec::new(),
+            osd_overlays: Vec::new(),
+            centroid_input_capacity: DEFAULT_CENTROID_INPUT_CAPACITY,
+            enable_udp_listener: true,
+        }
+    }
 }
 
 /// Run the flo application.
@@ -1408,6 +1503,13 @@ async fn app_main(
         rel_frame: true,
         focus: trinamic_microsteps,
     });
+    let initial_motor_command = motors_rx.borrow().clone();
+    let (processing_feedback_tx, processing_feedback_rx) = watch::channel(ProcessingFeedback {
+        updated_at: chrono::Utc::now(),
+        motor_readout: None,
+        motor_command: initial_motor_command,
+        tracking_mode: DeviceMode::default(),
+    });
 
     // Create channel for motor position feedback.
     let (motor_position_tx, mut motor_position_rx) = mpsc::channel::<MotorPositionResult>(10);
@@ -1577,8 +1679,19 @@ async fn app_main(
         };
     my_state.focusing = focusing;
 
-    // Setup FLO networking
-    let mut udp_framed_recv = udp_handling::setup_udp(&cli.udp_addr).await?;
+    // UDP remains available for standalone and replay use. Integrated camera
+    // applications use the in-process centroid channel and can leave no UDP
+    // port bound at all.
+    let mut udp_framed_recv = if options.enable_udp_listener {
+        Some(udp_handling::setup_udp(&cli.udp_addr).await?)
+    } else {
+        None
+    };
+
+    if options.centroid_input_capacity == 0 {
+        eyre::bail!("centroid_input_capacity must be greater than zero");
+    }
+    let (centroid_tx, mut centroid_rx) = centroid_input_channel(options.centroid_input_capacity);
 
     // Create a channel to send copies of our device state.
     let (from_device_http_tx, from_device_http_rx) = watch::channel(my_state.clone());
@@ -1705,6 +1818,8 @@ async fn app_main(
             saver_tx: flo_saver_tx.clone(),
             data_dir,
             config: &device_config,
+            centroid_tx: centroid_tx.clone(),
+            processing_feedback: processing_feedback_rx.clone(),
         };
         let jh = ext
             .spawn(ctx)
@@ -1726,6 +1841,7 @@ async fn app_main(
         my_state,
         local_flo_state,
         motors_tx,
+        processing_feedback_tx,
         audio_stream_handle.as_ref(),
         from_device_http_tx,
         broadway,
@@ -1776,9 +1892,20 @@ async fn app_main(
                 camshow_result??;
                 break;
             }
-            udp_msg = udp_framed_recv.next() => {
+            udp_msg = async {
+                match udp_framed_recv.as_mut() {
+                    Some(udp_framed_recv) => udp_framed_recv.next().await,
+                    None => pending().await,
+                }
+            } => {
                 let udp_msg = udp_msg.ok_or_else(|| eyre::eyre!("UDP channel closed"))?;
-                coordinator.on_image_centroid(udp_msg)?;
+                coordinator.on_udp_message(udp_msg)?;
+                // TODO: we have fresh data. We should call
+                // `self.on_fast_tick(dt_secs)?;` here?
+            }
+            centroid = centroid_rx.recv() => {
+                let centroid = centroid.ok_or_else(|| eyre::eyre!("centroid input channel closed"))?;
+                coordinator.on_image_centroid(centroid)?;
                 // TODO: we have fresh data. We should call
                 // `self.on_fast_tick(dt_secs)?;` here?
             }
@@ -1847,4 +1974,59 @@ fn play_sound_inner(
         audio_stream.play_raw(source.convert_samples())?;
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centroid_input_is_bounded() {
+        let (tx, mut rx) = centroid_input_channel(1);
+        let first = MomentCentroid::default();
+        let second = MomentCentroid {
+            framenumber: first.framenumber + 1,
+            ..first.clone()
+        };
+
+        tx.try_send(first.clone()).unwrap();
+        assert!(matches!(
+            tx.try_send(second),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert_eq!(rx.try_recv().unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn centroid_input_send_waits_for_capacity() {
+        let (tx, mut rx) = centroid_input_channel(1);
+        let first = MomentCentroid::default();
+        let second = MomentCentroid {
+            framenumber: first.framenumber + 1,
+            ..first.clone()
+        };
+        tx.try_send(first.clone()).unwrap();
+
+        let send_tx = tx.clone();
+        let send_task = tokio::spawn(async move { send_tx.send(second).await });
+        tokio::task::yield_now().await;
+        assert!(!send_task.is_finished());
+
+        assert_eq!(rx.recv().await, Some(first));
+        send_task.await.unwrap().unwrap();
+        assert_eq!(
+            rx.recv().await.map(|centroid| centroid.framenumber),
+            Some(43)
+        );
+    }
+
+    #[test]
+    fn default_options_enable_legacy_udp_and_bound_centroid_queue() {
+        let options = AppOptions::default();
+        assert_eq!(
+            options.centroid_input_capacity,
+            DEFAULT_CENTROID_INPUT_CAPACITY
+        );
+        assert!(options.enable_udp_listener);
+    }
 }
