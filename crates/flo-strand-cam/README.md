@@ -58,3 +58,20 @@ Run with the usual FLO options, for example:
 ```text
 flo-strand-cam --config config-mini.yaml
 ```
+
+Downstream binaries can add optional FLO extensions while retaining this
+crate's first-class camera host:
+
+```rust
+fn main() -> color_eyre::eyre::Result<()> {
+    flo_strand_cam::run(flo::AppOptions {
+        extensions: vec![Box::new(mymodule::MyExtension::new())],
+        ..Default::default()
+    })
+}
+```
+
+Depend on the `flo-strand-cam` package (imported in Rust as
+`flo_strand_cam`) as well as `flo`. The composed crate owns
+`AppOptions.camera_host` and disables the legacy UDP listener; caller-supplied
+extensions and OSD overlays are preserved.

@@ -5,6 +5,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "In-process FLO and Strand Camera application"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "flo-strand-cam"
 path = "src/main.rs"
