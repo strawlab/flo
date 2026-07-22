@@ -1137,6 +1137,49 @@ impl InitializedStrandCams {
     }
 }
 
+/// Wait for an embedded Strand Camera's HTTP server to become available.
+/// Embedded hosts start in the same process and need a short time to open the
+/// camera and bind their BUI listener before FLO can establish its proxy
+/// session.
+async fn initialize_embedded_strand_cam_session(
+    url: &str,
+    expected_name: &str,
+    jar: Arc<RwLock<cookie_store::CookieStore>>,
+) -> Result<HttpSession> {
+    const MAX_ATTEMPTS: usize = 75;
+    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+    let cfg = StrandCamConfig::default();
+    for attempt in 1..=MAX_ATTEMPTS {
+        match initialize_strand_cam_session(url, &cfg, jar.clone()).await {
+            Ok((session, actual_name)) => {
+                if actual_name != expected_name {
+                    eyre::bail!(
+                        "embedded camera at {url} reported name {actual_name:?}, expected {expected_name:?}"
+                    );
+                }
+                return Ok(session);
+            }
+            Err(error) if attempt < MAX_ATTEMPTS => {
+                tracing::debug!(
+                    attempt,
+                    %error,
+                    "waiting for embedded Strand Camera HTTP server at {url}"
+                );
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "waiting for embedded Strand Camera {expected_name:?} at {url} after {MAX_ATTEMPTS} attempts"
+                    )
+                });
+            }
+        }
+    }
+    unreachable!("the retry loop either returns a session or an error")
+}
+
 /// Validate in-process cameras against the legacy camera configuration and
 /// return the identity used by the coordinator for the secondary camera.
 fn merge_camera_registrations(
@@ -1239,15 +1282,15 @@ async fn init_strand_cams(
         device_config
             .strand_cam_secondary
             .as_ref()
-            .map(|cfg| resolve_strand_cam("secondary", cfg, jar)),
+            .map(|cfg| resolve_strand_cam("secondary", cfg, jar.clone())),
     )
     .await
     .transpose()?;
 
     let main_cam_name = main.as_ref().map(|(_, name)| name.clone());
-    let main = main
+    let mut main = main
         .and_then(|(session, name)| session.map(|session| NamedStrandCamSession { name, session }));
-    let (secondary, mut secondary_cam_name) = match secondary {
+    let (mut secondary, mut secondary_cam_name) = match secondary {
         Some((session, name)) => (
             session.map(|session| NamedStrandCamSession {
                 name: name.clone(),
@@ -1283,6 +1326,34 @@ async fn init_strand_cams(
 
     let secondary_cam_name =
         merge_camera_registrations(main_cam_name.as_deref(), secondary_cam_name, &embedded)?;
+
+    for camera in &embedded {
+        let Some(url) = camera.http_url.as_deref() else {
+            continue;
+        };
+        let session =
+            initialize_embedded_strand_cam_session(url, &camera.name, jar.clone()).await?;
+        let named_session = NamedStrandCamSession {
+            name: camera.name.clone(),
+            session,
+        };
+        match camera.role {
+            StrandCamRole::Main => {
+                debug_assert!(
+                    main.is_none(),
+                    "embedded/legacy role conflicts were validated"
+                );
+                main = Some(named_session);
+            }
+            StrandCamRole::Secondary => {
+                debug_assert!(
+                    secondary.is_none(),
+                    "embedded/legacy role conflicts were validated"
+                );
+                secondary = Some(named_session);
+            }
+        }
+    }
 
     Ok(InitializedStrandCams {
         main,
@@ -1924,6 +1995,30 @@ async fn app_main(
         .map(|host| host.registrations())
         .unwrap_or_default();
 
+    let AppOptions {
+        camera_host,
+        extensions,
+        osd_overlays,
+        ..
+    } = options;
+    let (subsystem_shutdown_tx, subsystem_shutdown_rx) = watch::channel(false);
+
+    // Start the host before opening its local HTTP sessions below. A composed
+    // host such as flo-strand-cam owns the Strand Camera servers themselves;
+    // the proxy setup retries until each server has bound its listener.
+    let mut camera_host_task = match camera_host {
+        Some(host) => Some(
+            host.spawn(CameraHostContext {
+                centroid_tx: centroid_tx.clone(),
+                processing_feedback: processing_feedback_rx.clone(),
+                shutdown_rx: subsystem_shutdown_rx.clone(),
+                data_dir,
+            })
+            .with_context(|| "spawning camera host")?,
+        ),
+        None => None,
+    };
+
     // Open each configured Strand Camera session once. The controller keeps
     // the original handles while the web server gets clones for its Braid-style
     // reverse proxy; all clones share the same authenticated cookie jar.
@@ -2001,12 +2096,6 @@ async fn app_main(
     // Build the OSD overlay list. Defaults from AppOptions::osd_overlays
     // first, then each registered extension contributes via
     // make_osd_overlay() if it has a companion overlay.
-    let AppOptions {
-        camera_host,
-        extensions,
-        osd_overlays,
-        ..
-    } = options;
     let mut osd_overlays = osd_overlays;
     for ext in &extensions {
         if let Some(overlay) = ext.make_osd_overlay(&broadway, handle) {
@@ -2042,7 +2131,6 @@ async fn app_main(
             (None, Box::pin(pending()))
         };
 
-    let (subsystem_shutdown_tx, subsystem_shutdown_rx) = watch::channel(false);
     let mut extension_tasks: tokio::task::JoinSet<eyre::Result<()>> = tokio::task::JoinSet::new();
     for ext in extensions {
         let name = ext.name();
@@ -2061,22 +2149,6 @@ async fn app_main(
             .with_context(|| format!("spawning extension {name}"))?;
         extension_tasks.spawn(async move { jh.await? });
     }
-
-    // The camera host is intentionally separate from extensions: it owns
-    // camera acquisition, runs on this LocalSet, and is supervised directly by
-    // FLO's main loop.
-    let mut camera_host_task = match camera_host {
-        Some(host) => Some(
-            host.spawn(CameraHostContext {
-                centroid_tx: centroid_tx.clone(),
-                processing_feedback: processing_feedback_rx.clone(),
-                shutdown_rx: subsystem_shutdown_rx.clone(),
-                data_dir,
-            })
-            .with_context(|| "spawning camera host")?,
-        ),
-        None => None,
-    };
 
     let fast_interval =
         std::time::Duration::from_secs_f64(device_config.control_loop_timestep_secs);
@@ -2365,6 +2437,7 @@ mod tests {
         CameraRegistration {
             role,
             name: name.to_owned(),
+            http_url: None,
             control_tx: None,
             expected_fps: None,
         }

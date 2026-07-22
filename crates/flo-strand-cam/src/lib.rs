@@ -229,6 +229,7 @@ impl StrandCamHost {
         let mut registrations = vec![flo::CameraRegistration {
             role: flo_core::StrandCamRole::Main,
             name: self.config.main.camera_name.clone(),
+            http_url: Some(format!("http://{}", self.config.main.http_address)),
             control_tx: Some(self.controls.main_tx.clone()),
             expected_fps: self.config.main.expected_fps,
         }];
@@ -236,6 +237,7 @@ impl StrandCamHost {
             registrations.push(flo::CameraRegistration {
                 role: flo_core::StrandCamRole::Secondary,
                 name: secondary.camera_name.clone(),
+                http_url: Some(format!("http://{}", secondary.http_address)),
                 control_tx: Some(self.controls.secondary_tx.clone()),
                 expected_fps: secondary.expected_fps,
             });
@@ -1049,10 +1051,18 @@ mod tests {
         assert_eq!(registrations.len(), 2);
         assert_eq!(registrations[0].role, flo_core::StrandCamRole::Main);
         assert_eq!(registrations[0].name, "simcam0");
+        assert_eq!(
+            registrations[0].http_url.as_deref(),
+            Some("http://127.0.0.1:3440")
+        );
         assert_eq!(registrations[0].expected_fps, Some(60.0));
         assert!(registrations[0].control_tx.is_some());
         assert_eq!(registrations[1].role, flo_core::StrandCamRole::Secondary);
         assert_eq!(registrations[1].name, "simcam1");
+        assert_eq!(
+            registrations[1].http_url.as_deref(),
+            Some("http://127.0.0.1:3441")
+        );
     }
 
     #[test]
