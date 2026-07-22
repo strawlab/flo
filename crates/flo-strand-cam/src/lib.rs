@@ -4,7 +4,7 @@
 //! deliberately disables FLO's legacy UDP centroid listener and carries ImOps
 //! detections through bounded Tokio channels instead.
 
-use color_eyre::eyre::{Context, Report, Result, eyre};
+use color_eyre::eyre::{Context, Result, eyre};
 use serde::Deserialize;
 use std::{
     ffi::OsString,
@@ -259,85 +259,64 @@ impl StrandCamHost {
         let data_dir = ctx.data_dir.as_std_path().to_owned();
 
         // Strand Camera's acquisition future is intentionally `!Send`: it
-        // holds vendor camera objects and other thread-affine state. Run it on
-        // a dedicated OS thread with its own LocalSet instead of FLO's control
-        // runtime. Image processing backpressure can then drop camera frames
-        // without delaying the gimbal's serial decoder.
-        let (result_tx, result_rx) = oneshot::channel();
-        std::thread::Builder::new()
-            .name("flo-strand-cam".to_owned())
-            .spawn(move || {
-                let result = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(Report::from)
-                    .and_then(|runtime| {
-                        tokio::task::LocalSet::new().block_on(&runtime, async move {
-                            let _processing_feedback = processing_feedback;
-                            let (detection_tx, mut detection_rx) =
-                                mpsc::channel(CAMERA_DETECTION_QUEUE_CAPACITY);
-                            let main = CameraRuntime::new(
-                                self.config.main,
-                                detection_tx.clone(),
-                                self.controls.main_tx.clone(),
-                                self.controls.take_main_receiver(),
-                            );
-                            let secondary = self.config.secondary.map(|config| {
-                                CameraRuntime::new(
-                                    config,
-                                    detection_tx,
-                                    self.controls.secondary_tx.clone(),
-                                    self.controls.take_secondary_receiver(),
-                                )
-                            });
-                            let mut camera_task = Box::pin(run_cameras(
-                                main,
-                                secondary,
-                                data_dir,
-                                host_shutdown_rx.clone(),
-                            ));
+        // holds vendor camera objects and other thread-affine state. FLO runs
+        // camera hosts inside its caller-owned LocalSet, so keep this task on
+        // that same runtime rather than creating another runtime or process.
+        Ok(tokio::task::spawn_local(async move {
+            let _processing_feedback = processing_feedback;
+            let (detection_tx, mut detection_rx) = mpsc::channel(CAMERA_DETECTION_QUEUE_CAPACITY);
+            let main = CameraRuntime::new(
+                self.config.main,
+                detection_tx.clone(),
+                self.controls.main_tx.clone(),
+                self.controls.take_main_receiver(),
+            );
+            let secondary = self.config.secondary.map(|config| {
+                CameraRuntime::new(
+                    config,
+                    detection_tx,
+                    self.controls.secondary_tx.clone(),
+                    self.controls.take_secondary_receiver(),
+                )
+            });
+            let mut camera_task = Box::pin(run_cameras(
+                main,
+                secondary,
+                data_dir,
+                host_shutdown_rx.clone(),
+            ));
 
-                            loop {
-                                tokio::select! {
-                                    shutdown = host_shutdown_rx.changed() => {
-                                        if shutdown.is_err() || *host_shutdown_rx.borrow() {
-                                            camera_task.await?;
-                                            return Ok(());
-                                        }
-                                    }
-                                    camera = &mut camera_task => {
-                                        camera?;
-                                        return Err(eyre!("Strand Camera stopped unexpectedly"));
-                                    }
-                                    detection = detection_rx.recv() => {
-                                        let Some(detection) = detection else {
-                                            return Err(eyre!("Strand Camera ImOps detection channel closed"));
-                                        };
-                                        let Some(centroid) = detection_to_centroid(detection) else {
-                                            continue;
-                                        };
-                                        match centroid_tx.try_send(centroid) {
-                                            Ok(()) => {}
-                                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                                tracing::warn!("dropping ImOps detection because FLO's centroid queue is full");
-                                            }
-                                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                                return Err(eyre!("FLO centroid input channel closed"));
-                                            }
-                                        }
-                                    }
-                                }
+            loop {
+                tokio::select! {
+                    shutdown = host_shutdown_rx.changed() => {
+                        if shutdown.is_err() || *host_shutdown_rx.borrow() {
+                            camera_task.await?;
+                            return Ok(());
+                        }
+                    }
+                    camera = &mut camera_task => {
+                        camera?;
+                        return Err(eyre!("Strand Camera stopped unexpectedly"));
+                    }
+                    detection = detection_rx.recv() => {
+                        let Some(detection) = detection else {
+                            return Err(eyre!("Strand Camera ImOps detection channel closed"));
+                        };
+                        let Some(centroid) = detection_to_centroid(detection) else {
+                            continue;
+                        };
+                        match centroid_tx.try_send(centroid) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!("dropping ImOps detection because FLO's centroid queue is full");
                             }
-                        })
-                    });
-                let _ = result_tx.send(result);
-            })
-            .wrap_err("spawning flo-strand-cam runtime thread")?;
-
-        Ok(tokio::spawn(async move {
-            result_rx
-                .await
-                .map_err(|_| eyre!("flo-strand-cam runtime thread stopped unexpectedly"))?
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                return Err(eyre!("FLO centroid input channel closed"));
+                            }
+                        }
+                    }
+                }
+            }
         }))
     }
 }
