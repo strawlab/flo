@@ -16,11 +16,13 @@ Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor V
 ## What is in this repository
 
 This repository contains two FLO application binaries. The standalone `flo`
-binary runs the tracking and motor-control application and accepts observations
-through its configured inputs. The integrated `flo-strand-cam` binary runs that
-same FLO application together with camera acquisition and the experimental
-ImOps detector in one process. In the integrated binary, image observations
-travel through bounded Rust channels rather than a network socket.
+binary supports the legacy split-process deployment: it runs tracking and motor
+control, while Strand Camera must be launched separately to acquire and process
+images and send observations to `flo` over the network. The integrated
+`flo-strand-cam` binary is the preferred deployment for this repository. It
+brings the same FLO application together with Strand Camera acquisition and the
+experimental ImOps detector in one process, with image observations traveling
+through bounded Rust channels rather than a network socket.
 
 While FLO was originally designed as a generic camera tracking system for all
 FLO variants, it has over time accumulated substantial specialized code for
