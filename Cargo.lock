@@ -1954,6 +1954,7 @@ dependencies = [
  "base64",
  "camino",
  "cookie",
+ "cookie_store",
  "eyre",
  "flo-core",
  "futures",
