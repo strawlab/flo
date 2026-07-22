@@ -44,11 +44,12 @@ use flo_core::{
     Angle, Broadway, CamStaleBitmask, CommandSource, DeviceId, DeviceMode, DeviceState, FloCommand,
     FloControllerConfig, FloEvent, FloatType, FocusMotorType, GimbalConfig, LocalFloState,
     ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType, MotorValueCache, OsdState,
-    PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg, StrandCamConfig, UNICAST_UDP_DEFAULT,
-    UdpMsg, drone_structs::DroneEvent,
+    PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg, StrandCamConfig, StrandCamRole,
+    UNICAST_UDP_DEFAULT, UdpMsg, drone_structs::DroneEvent,
 };
 use tracking::{centroid_to_sensor_angles, compute_motor_output, kalman_step};
 
+mod camera_host;
 mod camshow_client;
 mod codec;
 mod extension;
@@ -63,6 +64,7 @@ mod udp_handling;
 mod writing_state;
 mod zip_dir;
 
+pub use camera_host::{CameraHost, CameraHostContext, CameraRegistration};
 pub use extension::{Extension, ExtensionContext, OsdOverlay};
 pub use osd::DroneStatus;
 
@@ -258,6 +260,10 @@ struct FloCoordinator<'a> {
     broadway: flo_core::Broadway,
     cam_session_main: Option<HttpSession>,
     cam_session_secondary: Option<HttpSession>,
+    cam_control_main: Option<mpsc::Sender<strand_cam_remote_control::CamArg>>,
+    cam_control_secondary: Option<mpsc::Sender<strand_cam_remote_control::CamArg>>,
+    cam_control_main_expected_fps: Option<f64>,
+    cam_control_secondary_expected_fps: Option<f64>,
     camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
     highmag_visible_recorder: Option<h264_recorder::H264Recorder>,
     /// Seconds of data currently held in the writer's pre-capture buffer.
@@ -286,7 +292,14 @@ impl<'a> FloCoordinator<'a> {
             main,
             secondary,
             secondary_cam_name,
+            embedded,
         } = strand_cams;
+        let main_embedded = embedded
+            .iter()
+            .find(|camera| camera.role == StrandCamRole::Main);
+        let secondary_embedded = embedded
+            .iter()
+            .find(|camera| camera.role == StrandCamRole::Secondary);
         Self {
             data_dir,
             device_config,
@@ -310,6 +323,11 @@ impl<'a> FloCoordinator<'a> {
             broadway,
             cam_session_main: main.map(|cam| cam.session),
             cam_session_secondary: secondary.map(|cam| cam.session),
+            cam_control_main: main_embedded.and_then(|camera| camera.control_tx.clone()),
+            cam_control_secondary: secondary_embedded.and_then(|camera| camera.control_tx.clone()),
+            cam_control_main_expected_fps: main_embedded.and_then(|camera| camera.expected_fps),
+            cam_control_secondary_expected_fps: secondary_embedded
+                .and_then(|camera| camera.expected_fps),
             camshow_recording_tx,
             highmag_visible_recorder: None,
             precapture_buffered_rx,
@@ -548,13 +566,10 @@ impl<'a> FloCoordinator<'a> {
     fn on_slow_tick(&mut self) -> Result<()> {
         // Every second, echo state to all listeners.
 
-        let is_stale_secondary = if self.cam_session_secondary.is_some() {
-            // If we have a secondary camera, is it stale?
-            is_stale(self.stamp_cam_secondary.as_ref())
-        } else {
-            // We have no secondary camera, so it is not stale.
-            false
-        };
+        let is_stale_secondary = secondary_camera_is_stale(
+            self.secondary_cam_name.as_deref(),
+            self.stamp_cam_secondary.as_ref(),
+        );
         self.my_state.cam_stale = CamStaleBitmask::new(
             is_stale(self.stamp_cam_primary.as_ref()),
             is_stale_secondary,
@@ -674,13 +689,20 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    /// Send a `CamArg` to every connected tracking-camera control session.
+    /// Send a `CamArg` to every tracking camera control endpoint, whether it
+    /// is a legacy Strand Cam HTTP session or an in-process extension channel.
     async fn send_cam_arg_to_all(&mut self, arg: strand_cam_remote_control::CamArg) {
         for sess in [&mut self.cam_session_main, &mut self.cam_session_secondary]
             .into_iter()
             .flatten()
         {
             post_cam_arg(sess, arg.clone()).await;
+        }
+        for tx in [&self.cam_control_main, &self.cam_control_secondary]
+            .into_iter()
+            .flatten()
+        {
+            send_in_process_cam_arg(tx, arg.clone()).await;
         }
     }
 
@@ -691,30 +713,40 @@ impl<'a> FloCoordinator<'a> {
     async fn set_cam_precapture_buffer(&mut self, secs: f64) {
         // Read frame rates up front so the camera config (immutable borrow) and
         // the sessions (mutable borrow) are not borrowed simultaneously.
-        let main_fps = self
-            .device_config
-            .strand_cam_main
-            .as_ref()
-            .and_then(|c| c.expected_fps);
-        let secondary_fps = self
-            .device_config
-            .strand_cam_secondary
-            .as_ref()
-            .and_then(|c| c.expected_fps);
+        let main_fps = self.cam_control_main_expected_fps.or_else(|| {
+            self.device_config
+                .strand_cam_main
+                .as_ref()
+                .and_then(|c| c.expected_fps)
+        });
+        let secondary_fps = self.cam_control_secondary_expected_fps.or_else(|| {
+            self.device_config
+                .strand_cam_secondary
+                .as_ref()
+                .and_then(|c| c.expected_fps)
+        });
 
-        for (sess, fps) in [
-            (&mut self.cam_session_main, main_fps),
-            (&mut self.cam_session_secondary, secondary_fps),
+        for (sess, direct_tx, fps) in [
+            (&mut self.cam_session_main, &self.cam_control_main, main_fps),
+            (
+                &mut self.cam_session_secondary,
+                &self.cam_control_secondary,
+                secondary_fps,
+            ),
         ] {
-            let Some(sess) = sess.as_mut() else { continue };
+            if sess.is_none() && direct_tx.is_none() {
+                continue;
+            }
             match fps {
                 Some(fps) if fps > 0.0 => {
                     let frames = (secs * fps).ceil().max(0.0) as usize;
-                    post_cam_arg(
-                        sess,
-                        strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames),
-                    )
-                    .await;
+                    let arg = strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames);
+                    if let Some(sess) = sess.as_mut() {
+                        post_cam_arg(sess, arg.clone()).await;
+                    }
+                    if let Some(tx) = direct_tx {
+                        send_in_process_cam_arg(tx, arg).await;
+                    }
                 }
                 _ => {
                     tracing::warn!(
@@ -936,6 +968,16 @@ fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
     }
 }
 
+/// A secondary camera is expected whenever startup configuration assigned one,
+/// irrespective of whether it uses the legacy Strand Cam HTTP control path or
+/// an in-process extension.
+fn secondary_camera_is_stale(
+    secondary_cam_name: Option<&str>,
+    stamp: Option<&std::time::Instant>,
+) -> bool {
+    secondary_cam_name.is_some() && is_stale(stamp)
+}
+
 /// POST a single `CamArg` to a Strand Cam control session. Errors are logged
 /// and otherwise ignored, since the camera may be transiently unreachable.
 async fn post_cam_arg(sess: &mut HttpSession, arg: strand_cam_remote_control::CamArg) {
@@ -947,6 +989,18 @@ async fn post_cam_arg(sess: &mut HttpSession, arg: strand_cam_remote_control::Ca
         Err(e) => {
             tracing::warn!("Ignoring error sending command to Strand Cam: {e}");
         }
+    }
+}
+
+/// Send a camera command over an in-process extension channel. A closed
+/// receiver means the extension stopped unexpectedly; log it just as a legacy
+/// HTTP control failure is logged and let the controller continue shutting down.
+async fn send_in_process_cam_arg(
+    tx: &mpsc::Sender<strand_cam_remote_control::CamArg>,
+    arg: strand_cam_remote_control::CamArg,
+) {
+    if let Err(error) = tx.send(arg).await {
+        tracing::warn!(%error, "Ignoring error sending command to in-process camera");
     }
 }
 
@@ -1048,6 +1102,7 @@ struct InitializedStrandCams {
     main: Option<NamedStrandCamSession>,
     secondary: Option<NamedStrandCamSession>,
     secondary_cam_name: Option<String>,
+    embedded: Vec<CameraRegistration>,
 }
 
 impl InitializedStrandCams {
@@ -1082,7 +1137,80 @@ impl InitializedStrandCams {
     }
 }
 
-async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<InitializedStrandCams> {
+/// Validate in-process cameras against the legacy camera configuration and
+/// return the identity used by the coordinator for the secondary camera.
+fn merge_camera_registrations(
+    main_cam_name: Option<&str>,
+    secondary_cam_name: Option<String>,
+    embedded: &[CameraRegistration],
+) -> Result<Option<String>> {
+    let legacy = [
+        (StrandCamRole::Main, main_cam_name),
+        (StrandCamRole::Secondary, secondary_cam_name.as_deref()),
+    ];
+
+    for (index, camera) in embedded.iter().enumerate() {
+        if camera.name.is_empty() {
+            eyre::bail!("embedded {:?} camera has an empty name", camera.role);
+        }
+
+        for (legacy_role, legacy_name) in legacy {
+            let Some(legacy_name) = legacy_name else {
+                continue;
+            };
+            if camera.role == legacy_role {
+                eyre::bail!(
+                    "embedded {:?} camera {:?} conflicts with the legacy {:?} camera {:?}; \
+                     configure each role through either an extension or `strand_cam_*`, not both",
+                    camera.role,
+                    camera.name,
+                    legacy_role,
+                    legacy_name,
+                );
+            }
+            if camera.name == legacy_name {
+                eyre::bail!(
+                    "embedded {:?} camera name {:?} conflicts with legacy {:?} camera; \
+                     camera names must identify exactly one role",
+                    camera.role,
+                    camera.name,
+                    legacy_role,
+                );
+            }
+        }
+
+        for other in &embedded[..index] {
+            if camera.role == other.role {
+                eyre::bail!(
+                    "multiple embedded cameras registered for the {:?} role: {:?} and {:?}",
+                    camera.role,
+                    other.name,
+                    camera.name,
+                );
+            }
+            if camera.name == other.name {
+                eyre::bail!(
+                    "embedded camera name {:?} was registered for both {:?} and {:?}",
+                    camera.name,
+                    other.role,
+                    camera.role,
+                );
+            }
+        }
+    }
+
+    Ok(secondary_cam_name.or_else(|| {
+        embedded
+            .iter()
+            .find(|camera| camera.role == StrandCamRole::Secondary)
+            .map(|camera| camera.name.clone())
+    }))
+}
+
+async fn init_strand_cams(
+    device_config: &FloControllerConfig,
+    embedded: Vec<CameraRegistration>,
+) -> Result<InitializedStrandCams> {
     // Connect to strand-cam for main and secondary cameras.
     let jar: cookie_store::CookieStore =
         match Preferences::load(&flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY) {
@@ -1116,6 +1244,7 @@ async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<Initial
     .await
     .transpose()?;
 
+    let main_cam_name = main.as_ref().map(|(_, name)| name.clone());
     let main = main
         .and_then(|(session, name)| session.map(|session| NamedStrandCamSession { name, session }));
     let (secondary, mut secondary_cam_name) = match secondary {
@@ -1152,10 +1281,14 @@ async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<Initial
         }
     }
 
+    let secondary_cam_name =
+        merge_camera_registrations(main_cam_name.as_deref(), secondary_cam_name, &embedded)?;
+
     Ok(InitializedStrandCams {
         main,
         secondary,
         secondary_cam_name,
+        embedded,
     })
 }
 
@@ -1175,6 +1308,10 @@ impl BroadwaySend for mpsc::UnboundedSender<SaveToDiskMsg> {
 /// The default flo binary passes `AppOptions::default()`; downstream crates
 /// that need to add extensions construct their own `AppOptions`.
 pub struct AppOptions {
+    /// First-class in-process owner of camera acquisition. Unlike an
+    /// [`Extension`], a camera host registers camera identities and receives
+    /// camera-specific lifecycle resources.
+    pub camera_host: Option<Box<dyn CameraHost>>,
     /// Long-running subsystems that join the supervisor select loop.
     pub extensions: Vec<Box<dyn Extension>>,
     /// OSD overlays drawn each render tick after the base layer.
@@ -1189,6 +1326,7 @@ pub struct AppOptions {
 impl Default for AppOptions {
     fn default() -> Self {
         Self {
+            camera_host: None,
             extensions: Vec::new(),
             osd_overlays: Vec::new(),
             centroid_input_capacity: DEFAULT_CENTROID_INPUT_CAPACITY,
@@ -1210,6 +1348,36 @@ pub fn run(options: AppOptions) -> Result<()> {
 /// Composition binaries use this to reserve their own arguments while still
 /// forwarding FLO's normal CLI unchanged. `args` must include a program name.
 pub fn run_with_args<I, T>(options: AppOptions, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_args_inner(options, args, None)
+}
+
+/// Run FLO using explicit command-line arguments and an already parsed
+/// controller configuration.
+///
+/// This is intended for composition binaries that own configuration parsing
+/// (for example, a camera host with its own settings). If `args` includes
+/// `--config`, the supplied configuration takes precedence.
+pub fn run_with_args_and_config<I, T>(
+    options: AppOptions,
+    args: I,
+    config: FloControllerConfig,
+) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_args_inner(options, args, Some(config))
+}
+
+fn run_with_args_inner<I, T>(
+    options: AppOptions,
+    args: I,
+    supplied_config: Option<FloControllerConfig>,
+) -> Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
@@ -1248,41 +1416,53 @@ where
     // Create our device state.
     let mut my_state = flo_core::DeviceState::new(device_id);
 
-    let mut device_config = if let Some(device_config_fname) = &cli.config {
-        tracing::debug!("Loading config file: \"{device_config_fname}\"");
-        for name in options.extensions.iter().map(|e| e.name()) {
-            tracing::debug!("extension name: \"{name}\"");
+    let mut device_config = match supplied_config {
+        Some(config) => {
+            if let Some(device_config_fname) = &cli.config {
+                tracing::debug!(
+                    "using caller-supplied configuration parsed from {device_config_fname:?}"
+                );
+            }
+            extension::validate_config(config, &options.extensions)?
         }
+        None => {
+            if let Some(device_config_fname) = &cli.config {
+                tracing::debug!("Loading config file: \"{device_config_fname}\"");
+                for name in options.extensions.iter().map(|e| e.name()) {
+                    tracing::debug!("extension name: \"{name}\"");
+                }
 
-        log::info!("Reading initial device config from: {device_config_fname}");
-        let cfg_buf = std::fs::read_to_string(device_config_fname)
-            .with_context(|| format!("opening file {device_config_fname}"))?;
+                log::info!("Reading initial device config from: {device_config_fname}");
+                let cfg_buf = std::fs::read_to_string(device_config_fname)
+                    .with_context(|| format!("opening file {device_config_fname}"))?;
 
-        // Parse the YAML but raise on unknown fields, respecting extensions.
-        let raw_cfg = serde_yaml::from_str(&cfg_buf)
-            .with_context(|| format!("while parsing YAML in file {device_config_fname}"))?;
-        extension::validate_config(raw_cfg, &options.extensions)?
-    } else {
-        log::info!("Loading default device config.");
-        // (TODO: why doesn't the default value suffice?)
-        my_state.mode = DeviceMode::ManualOpenLoop;
-        // each pixel is 1/20th of a degree
-        let pixel_gain = Angle::from_degrees(1.0 / 20.0).0;
-        FloControllerConfig {
-            pwm_output_enabled: true,
-            ki_pan_angle: -10.0,
-            ki_tilt_angle: 10.0,
-            centroid_to_sensor_x_angle_func: flo_core::CentroidToAngleCalibration {
-                dx_gain: pixel_gain,
-                dy_gain: 0.0,
-                offset: 0.0,
-            },
-            centroid_to_sensor_y_angle_func: flo_core::CentroidToAngleCalibration {
-                dx_gain: 0.0,
-                dy_gain: pixel_gain,
-                offset: 0.0,
-            },
-            ..Default::default()
+                // Parse the YAML but raise on unknown fields, respecting extensions.
+                let raw_cfg = serde_yaml::from_str(&cfg_buf)
+                    .with_context(|| format!("while parsing YAML in file {device_config_fname}"))?;
+                extension::validate_config(raw_cfg, &options.extensions)?
+            } else {
+                log::info!("Loading default device config.");
+                // (TODO: why doesn't the default value suffice?)
+                my_state.mode = DeviceMode::ManualOpenLoop;
+                // each pixel is 1/20th of a degree
+                let pixel_gain = Angle::from_degrees(1.0 / 20.0).0;
+                FloControllerConfig {
+                    pwm_output_enabled: true,
+                    ki_pan_angle: -10.0,
+                    ki_tilt_angle: 10.0,
+                    centroid_to_sensor_x_angle_func: flo_core::CentroidToAngleCalibration {
+                        dx_gain: pixel_gain,
+                        dy_gain: 0.0,
+                        offset: 0.0,
+                    },
+                    centroid_to_sensor_y_angle_func: flo_core::CentroidToAngleCalibration {
+                        dx_gain: 0.0,
+                        dy_gain: pixel_gain,
+                        offset: 0.0,
+                    },
+                    ..Default::default()
+                }
+            }
         }
     };
 
@@ -1736,10 +1916,18 @@ async fn app_main(
     // Create a channel to send copies of our device state.
     let (from_device_http_tx, from_device_http_rx) = watch::channel(my_state.clone());
 
+    // Register an in-process camera host before opening legacy Strand Camera
+    // sessions, so the coordinator knows embedded camera roles from startup.
+    let embedded_camera_registrations = options
+        .camera_host
+        .as_ref()
+        .map(|host| host.registrations())
+        .unwrap_or_default();
+
     // Open each configured Strand Camera session once. The controller keeps
     // the original handles while the web server gets clones for its Braid-style
     // reverse proxy; all clones share the same authenticated cookie jar.
-    let strand_cams = init_strand_cams(&device_config).await?;
+    let strand_cams = init_strand_cams(&device_config, embedded_camera_registrations).await?;
     let strand_cam_proxy_sessions = strand_cams.proxy_sessions()?;
     let strand_cam_proxy_info = strand_cams.proxy_info();
 
@@ -1813,8 +2001,13 @@ async fn app_main(
     // Build the OSD overlay list. Defaults from AppOptions::osd_overlays
     // first, then each registered extension contributes via
     // make_osd_overlay() if it has a companion overlay.
-    let mut osd_overlays = options.osd_overlays;
-    let extensions: Vec<Box<dyn Extension>> = options.extensions;
+    let AppOptions {
+        camera_host,
+        extensions,
+        osd_overlays,
+        ..
+    } = options;
+    let mut osd_overlays = osd_overlays;
     for ext in &extensions {
         if let Some(overlay) = ext.make_osd_overlay(&broadway, handle) {
             osd_overlays.push(overlay);
@@ -1849,7 +2042,7 @@ async fn app_main(
             (None, Box::pin(pending()))
         };
 
-    let (extension_shutdown_tx, extension_shutdown_rx) = watch::channel(false);
+    let (subsystem_shutdown_tx, subsystem_shutdown_rx) = watch::channel(false);
     let mut extension_tasks: tokio::task::JoinSet<eyre::Result<()>> = tokio::task::JoinSet::new();
     for ext in extensions {
         let name = ext.name();
@@ -1861,13 +2054,29 @@ async fn app_main(
             config: &device_config,
             centroid_tx: centroid_tx.clone(),
             processing_feedback: processing_feedback_rx.clone(),
-            shutdown_rx: extension_shutdown_rx.clone(),
+            shutdown_rx: subsystem_shutdown_rx.clone(),
         };
         let jh = ext
             .spawn(ctx)
             .with_context(|| format!("spawning extension {name}"))?;
         extension_tasks.spawn(async move { jh.await? });
     }
+
+    // The camera host is intentionally separate from extensions: it owns
+    // camera acquisition, runs on this LocalSet, and is supervised directly by
+    // FLO's main loop.
+    let mut camera_host_task = match camera_host {
+        Some(host) => Some(
+            host.spawn(CameraHostContext {
+                centroid_tx: centroid_tx.clone(),
+                processing_feedback: processing_feedback_rx.clone(),
+                shutdown_rx: subsystem_shutdown_rx.clone(),
+                data_dir,
+            })
+            .with_context(|| "spawning camera host")?,
+        ),
+        None => None,
+    };
 
     let fast_interval =
         std::time::Duration::from_secs_f64(device_config.control_loop_timestep_secs);
@@ -1912,6 +2121,18 @@ async fn app_main(
             }
             Some(extension_result) = extension_tasks.join_next(), if !extension_tasks.is_empty() => {
                 extension_result??;
+                break;
+            }
+            camera_host_result = async {
+                camera_host_task
+                    .as_mut()
+                    .expect("camera host task was selected only when present")
+                    .await
+            }, if camera_host_task.is_some() => {
+                // This JoinHandle is complete; remove it before shutdown so
+                // the graceful-stop path never polls it again.
+                camera_host_task = None;
+                camera_host_result??;
                 break;
             }
             motor_task_result = &mut motor_task_join_handle => {
@@ -1983,8 +2204,20 @@ async fn app_main(
     // before the runtime cancels their remaining tasks. This is especially
     // important for in-process camera acquisition, which needs to stop its
     // frame task before its vendor module is dropped.
-    let _ = extension_shutdown_tx.send(true);
+    let _ = subsystem_shutdown_tx.send(true);
     let extension_shutdown_deadline = std::time::Duration::from_secs(2);
+    if let Some(camera_host_task) = camera_host_task.as_mut()
+        && tokio::time::timeout(extension_shutdown_deadline, &mut *camera_host_task)
+            .await
+            .is_err()
+    {
+        tracing::warn!(
+            ?extension_shutdown_deadline,
+            "camera host did not stop before shutdown deadline; aborting task"
+        );
+        camera_host_task.abort();
+        let _ = camera_host_task.await;
+    }
     let graceful_extensions = async {
         while let Some(extension_result) = extension_tasks.join_next().await {
             match extension_result {
@@ -2126,5 +2359,93 @@ mod tests {
             });
             task.await.unwrap().unwrap();
         });
+    }
+
+    fn embedded_camera(role: StrandCamRole, name: &str) -> CameraRegistration {
+        CameraRegistration {
+            role,
+            name: name.to_owned(),
+            control_tx: None,
+            expected_fps: None,
+        }
+    }
+
+    #[test]
+    fn embedded_main_only_needs_no_secondary_camera() {
+        let secondary = merge_camera_registrations(
+            None,
+            None,
+            &[embedded_camera(StrandCamRole::Main, "embedded-main")],
+        )
+        .unwrap();
+
+        assert_eq!(secondary, None);
+        assert!(!secondary_camera_is_stale(None, None));
+    }
+
+    #[test]
+    fn embedded_secondary_is_the_coordinator_secondary_identity() {
+        let secondary = merge_camera_registrations(
+            None,
+            None,
+            &[
+                embedded_camera(StrandCamRole::Main, "embedded-main"),
+                embedded_camera(StrandCamRole::Secondary, "embedded-secondary"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(secondary.as_deref(), Some("embedded-secondary"));
+        assert!(secondary_camera_is_stale(secondary.as_deref(), None));
+    }
+
+    #[test]
+    fn embedded_camera_registrations_reject_role_and_name_conflicts() {
+        let role_conflict = merge_camera_registrations(
+            Some("legacy-main"),
+            None,
+            &[embedded_camera(StrandCamRole::Main, "embedded-main")],
+        )
+        .unwrap_err();
+        assert!(role_conflict.to_string().contains("conflicts"));
+
+        let name_conflict = merge_camera_registrations(
+            Some("legacy-main"),
+            None,
+            &[embedded_camera(StrandCamRole::Secondary, "legacy-main")],
+        )
+        .unwrap_err();
+        assert!(name_conflict.to_string().contains("conflicts"));
+    }
+
+    #[test]
+    fn embedded_cameras_do_not_claim_unavailable_proxy_routes() {
+        let cameras = InitializedStrandCams {
+            main: None,
+            secondary: None,
+            secondary_cam_name: Some("embedded-secondary".to_owned()),
+            embedded: vec![
+                embedded_camera(StrandCamRole::Main, "embedded-main"),
+                embedded_camera(StrandCamRole::Secondary, "embedded-secondary"),
+            ],
+        };
+
+        assert!(cameras.proxy_sessions().unwrap().is_empty());
+        assert!(cameras.proxy_info().is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_process_camera_control_uses_its_direct_channel() {
+        let (tx, mut rx) = mpsc::channel(1);
+        send_in_process_cam_arg(
+            &tx,
+            strand_cam_remote_control::CamArg::SetIsRecordingMp4(true),
+        )
+        .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(strand_cam_remote_control::CamArg::SetIsRecordingMp4(true))
+        ));
     }
 }
