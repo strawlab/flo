@@ -29,6 +29,36 @@ pub const EVENTS_PATH: &str = "events";
 /// This matches Braid's camera proxy API.
 pub const CAM_PROXY_PATH: &str = "cam-proxy";
 
+/// The role a connected Strand Camera has in FLO's tracking configuration.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+pub enum StrandCamRole {
+    Main,
+    Secondary,
+}
+
+/// Runtime information needed to show a connected Strand Camera in the BUI.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+pub struct StrandCamProxyInfo {
+    pub role: StrandCamRole,
+    /// Authoritative name returned by the camera's `/cam-name` endpoint.
+    pub name: String,
+    /// Same-origin path prefix through FLO's authenticated reverse proxy.
+    pub proxy_prefix: String,
+}
+
+impl StrandCamProxyInfo {
+    pub fn new(role: StrandCamRole, name: String) -> Self {
+        let encoded_name =
+            percent_encoding::utf8_percent_encode(&name, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
+        Self {
+            role,
+            name,
+            proxy_prefix: format!("/{CAM_PROXY_PATH}/{encoded_name}/"),
+        }
+    }
+}
+
 /// The default unicast UDP send/receive port.
 pub const UNICAST_UDP_DEFAULT_PORT: u16 = 8080;
 pub const UNICAST_UDP_DEFAULT: &str = const_format::concatcp!("0.0.0.0:", UNICAST_UDP_DEFAULT_PORT);
@@ -664,6 +694,7 @@ impl CamStaleBitmask {
 pub enum BuiEventData {
     DeviceState(DeviceState),
     Config(FloControllerConfig),
+    StrandCameras(Vec<StrandCamProxyInfo>),
 }
 
 // /// Configuration to convert an angle into PWM units
@@ -1411,6 +1442,13 @@ fn deserialize_float_null_as_nan<'de, D: Deserializer<'de>>(des: D) -> Result<Fl
 
 // -----------------------------------------------------------------------------
 // tests
+
+#[test]
+fn strand_cam_proxy_info_uses_braid_compatible_name_encoding() {
+    let info = StrandCamProxyInfo::new(StrandCamRole::Main, "camera one/left".to_string());
+    assert_eq!(info.name, "camera one/left");
+    assert_eq!(info.proxy_prefix, "/cam-proxy/camera%20one%2Fleft/");
+}
 
 /// Test [deserialize_float_null_as_nan] above in both CBOR (which natively
 /// represents NaN and infinity) and JSON (which cannot).

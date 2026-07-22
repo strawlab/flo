@@ -974,6 +974,20 @@ impl InitializedStrandCams {
         }
         Ok(result)
     }
+
+    fn proxy_info(&self) -> Vec<flo_core::StrandCamProxyInfo> {
+        [
+            (&self.main, flo_core::StrandCamRole::Main),
+            (&self.secondary, flo_core::StrandCamRole::Secondary),
+        ]
+        .into_iter()
+        .filter_map(|(camera, role)| {
+            camera
+                .as_ref()
+                .map(|camera| flo_core::StrandCamProxyInfo::new(role, camera.name.clone()))
+        })
+        .collect()
+    }
 }
 
 async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<InitializedStrandCams> {
@@ -1574,6 +1588,7 @@ async fn app_main(
     // reverse proxy; all clones share the same authenticated cookie jar.
     let strand_cams = init_strand_cams(&device_config).await?;
     let strand_cam_proxy_sessions = strand_cams.proxy_sessions()?;
+    let strand_cam_proxy_info = strand_cams.proxy_info();
 
     // Channel used to tell the web server it is shutting down. It is flipped to
     // `true` once the main loop below exits (but before this task returns and
@@ -1602,6 +1617,7 @@ async fn app_main(
                 persistent_secret,
                 trusted_networks,
                 strand_cam_proxy_sessions,
+                strand_cam_proxy_info,
                 from_device_http_rx,
                 device_config,
                 event_tx,

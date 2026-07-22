@@ -156,6 +156,7 @@ nalgebra = { version = "0.34", default-features = false }
 num-derive = "0.4.2"
 num-traits = "0.2.19"
 opencv-ros-camera = { version = "0.16", features = ["serde-serialize"] }
+percent-encoding = "2.3"
 preferences-serde1 = "2.0.0"
 serde = { version = "1.0.79", default-features = false }
 serde_json = "1.0.116"

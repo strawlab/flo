@@ -86,8 +86,12 @@ async fn events_handler(
     use tokio_stream::wrappers::WatchStream;
     let from_device_rx = app_state.from_device_rx.clone();
     let cfg = app_state.cfg.clone();
+    let strand_cameras = app_state.strand_cam_proxy_info.clone();
 
-    let stream1 = stream::iter(vec![BuiEventData::Config(cfg)]);
+    let stream1 = stream::iter(vec![
+        BuiEventData::Config(cfg),
+        BuiEventData::StrandCameras(strand_cameras),
+    ]);
     let stream2 = WatchStream::from(from_device_rx).map(BuiEventData::DeviceState);
 
     let data_stream = stream1
@@ -229,6 +233,7 @@ struct AppState {
     /// when a device-connection QR code is requested.
     persistent_secret: cookie::Key,
     strand_cam_sessions: StrandCamSessions,
+    strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
 }
 
 fn display_qr_url(url: &str) {
@@ -449,6 +454,7 @@ pub async fn main_loop(
     persistent_secret: cookie::Key,
     trusted_networks: Vec<axum_token_auth::CidrBlock>,
     strand_cam_sessions: StrandCamSessions,
+    strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
     from_device_rx: watch::Receiver<DeviceState>,
     cfg: FloControllerConfig,
     user_commands_tx: tokio::sync::broadcast::Sender<FloEvent>,
@@ -465,6 +471,7 @@ pub async fn main_loop(
         token_required,
         persistent_secret: persistent_secret.clone(),
         strand_cam_sessions,
+        strand_cam_proxy_info,
     };
 
     // `AuthConfig` is `#[non_exhaustive]`, so build it via `new` and set fields.
@@ -556,6 +563,7 @@ mod tests {
             token_required: false,
             persistent_secret: cookie::Key::generate(),
             strand_cam_sessions,
+            strand_cam_proxy_info: Vec::new(),
         }
     }
 
