@@ -30,10 +30,10 @@ ci2-webcam.workspace = true
 flo.workspace = true
 flo-core.workspace = true
 strand-cam.workspace = true
-strand-cam-remote-control = { path = "../../../strand-braid/camera/strand-cam-remote-control" }
+strand-cam-remote-control.workspace = true
 
 [features]
 default = ["bundle_files"]
 
-bundle_files = ["strand-cam/bundle_files"]
-serve_files = ["strand-cam/serve_files"]
+bundle_files = ["strand-cam/bundle_files", "flo/bundle_files"]
+serve_files = ["strand-cam/serve_files", "flo/serve_files"]
