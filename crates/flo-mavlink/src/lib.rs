@@ -222,7 +222,22 @@ impl DroneCoordinator {
             },
         );
         self_.mavconn.tx.send((self_.my_header, data)).await?;
- 
+
+        // Request the ODOMETRY message to be streamed at 100 millisecond interval.
+        // This contains covariance of PX4 EKFs.
+        let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
+            mavlink::ardupilotmega::COMMAND_LONG_DATA {
+                command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                param1: mavlink::ardupilotmega::ODOMETRY_DATA::ID as f32, // Message ID to be streamed
+                param2: 100_000.0, // Interval in microseconds
+                target_system: 1,
+                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                confirmation: 0,
+                ..Default::default()
+            },
+        );
+        self_.mavconn.tx.send((self_.my_header, data)).await?;
+
         Ok(self_)
     }
 
@@ -397,6 +412,9 @@ impl DroneCoordinator {
             }
             MavMessage::ATTITUDE_QUATERNION(v) => {
                 save("ATTITUDE_QUATERNION", logger, &v)?;
+            }
+            MavMessage::ODOMETRY(v) => {
+                save("ODOMETRY", logger, &v)?;
             }
             MavMessage::GPS_GLOBAL_ORIGIN(v) => {
                 tracing::info!("received GPS_GLOBAL_ORIGIN: {v:?}");
