@@ -56,7 +56,7 @@ or SimpleBGC gimbal motors.
 +-------------+                 | camera + ImOps + FLO |            +--------+--------+
                                 | (one process)        |                     |
 +-------------+   camera API    |                      |                     v
-| camera      |<--------------->|                      |                 +--------+
+| camera(s)   |<--------------->|                      |                 +--------+
 +-------------+                 +----------------------+                 | motors |
                                                                          +--------+
 ```
@@ -73,28 +73,48 @@ or SimpleBGC gimbal motors.
 
 ## Running with Strand Camera
 
-Add a `flo-strand-cam` section to the normal FLO YAML configuration. It selects
-the camera backend and contains the ImOps configuration:
+Add a `flo-strand-cam` section to the normal FLO YAML configuration. `main` is
+required and runs a monocular FLO deployment. Add `secondary` when using the
+stereo calibration and depth estimation: it runs a second embedded Strand
+Camera and a second ImOps detector in the same application. Each configured
+camera needs a unique `camera_name`; the HTTP addresses must also be unique
+(and default to `127.0.0.1:3440` for `main` and `127.0.0.1:3441` for
+`secondary`).
 
 ```yaml
 flo-strand-cam:
-  backend: pylon
-  camera_name: Basler-40522040
-  http_address: 127.0.0.1:3440
-  imops:
-    enabled: true
-    threshold: 200
-    center_x: 960
-    center_y: 600
+  main:
+    backend: pylon
+    camera_name: Basler-40522040
+    expected_fps: 60.0
+    mp4_max_framerate: Fps60
+    imops:
+      enabled: true
+      threshold: 200
+      center_x: 960
+      center_y: 600
+  secondary: # omit for monocular tracking
+    backend: pylon
+    camera_name: Basler-40522041
+    imops:
+      enabled: true
+      threshold: 200
+      center_x: 960
+      center_y: 600
 ```
 
 Then run the composed executable:
 
     flo-strand-cam --config config-mini.yaml --pwm-serial /dev/ttyACM0
 
-Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Do not configure
-the legacy `strand_cam_main` or `strand_cam_secondary` HTTP client sections in
-the same file. See [the crate README](crates/flo-strand-cam/README.md) and
+Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Camera
+observations and recording controls (including MP4 codec, frame-rate, and
+pre-trigger commands) use bounded in-process channels; the integrated binary
+does not use FLO's legacy UDP centroid listener. Do not configure the legacy
+`strand_cam_main` or `strand_cam_secondary` HTTP client sections in the same
+file. The optional `mp4_codec` accepts Strand Camera's `CodecSelection`; the
+simulated example includes its VAAPI `Ffmpeg` form. See [the crate
+README](crates/flo-strand-cam/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
 ## Running without hardware (simulation / testing)
