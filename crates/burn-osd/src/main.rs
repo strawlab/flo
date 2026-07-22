@@ -81,11 +81,14 @@ fn main() -> eyre::Result<()> {
     let mut output = input_path.clone();
     output.set_extension("burned-osd.mp4");
 
-    let stanzas = frame_source::srt_reader::read_srt_file(srt_path.as_std_path())
+    let outcome = frame_source::srt_reader::read_srt_file(srt_path.as_std_path())
         .context(format!("Opening SRT file {srt_path}"))?;
+    if let Some(line) = outcome.truncated_at_line {
+        eyre::bail!("Invalid SRT data in {srt_path} at line {line}");
+    }
     let mut srt_timestamps = Vec::new();
     let mut srt_msgs = Vec::new();
-    for stanza in stanzas.into_iter() {
+    for stanza in outcome.stanzas {
         let srt_msg: SrtMsg = serde_json::from_str(stanza.lines())?;
         srt_timestamps.push(srt_msg.timestamp);
         srt_msgs.push(srt_msg);
