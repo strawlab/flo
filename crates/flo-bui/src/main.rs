@@ -498,12 +498,19 @@ impl App {
             return html! { <p>{"No cameras configured."}</p> };
         }
 
+        fn role_str(role: &StrandCamRole) -> &'static str {
+            match role {
+                StrandCamRole::Main => " (Main)",
+                StrandCamRole::Secondary => " (Secondary)",
+            }
+        }
+
         html! {
             <ul>
                 { for self.strand_cameras.iter().map(|camera| {
                     html! {
                         <li key={camera.name.clone()}>
-                            <a href={camera.proxy_prefix.clone()}>{&camera.name}</a>
+                            <a href={camera.proxy_prefix.clone()}>{&camera.name}</a> {role_str(&camera.role)}
                         </li>
                     }
                 }) }
