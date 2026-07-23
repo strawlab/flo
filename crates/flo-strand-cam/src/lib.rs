@@ -188,17 +188,27 @@ struct CameraControlChannels {
     main_rx: Mutex<Option<mpsc::Receiver<CamArg>>>,
     secondary_tx: mpsc::Sender<CamArg>,
     secondary_rx: Mutex<Option<mpsc::Receiver<CamArg>>>,
+    main_router_tx: Mutex<Option<oneshot::Sender<axum::Router>>>,
+    main_router_rx: Mutex<Option<oneshot::Receiver<axum::Router>>>,
+    secondary_router_tx: Mutex<Option<oneshot::Sender<axum::Router>>>,
+    secondary_router_rx: Mutex<Option<oneshot::Receiver<axum::Router>>>,
 }
 
 impl CameraControlChannels {
     fn new() -> Self {
         let (main_tx, main_rx) = mpsc::channel(CAMERA_CONTROL_QUEUE_CAPACITY);
         let (secondary_tx, secondary_rx) = mpsc::channel(CAMERA_CONTROL_QUEUE_CAPACITY);
+        let (main_router_tx, main_router_rx) = oneshot::channel();
+        let (secondary_router_tx, secondary_router_rx) = oneshot::channel();
         Self {
             main_tx,
             main_rx: Mutex::new(Some(main_rx)),
             secondary_tx,
             secondary_rx: Mutex::new(Some(secondary_rx)),
+            main_router_tx: Mutex::new(Some(main_router_tx)),
+            main_router_rx: Mutex::new(Some(main_router_rx)),
+            secondary_router_tx: Mutex::new(Some(secondary_router_tx)),
+            secondary_router_rx: Mutex::new(Some(secondary_router_rx)),
         }
     }
 
@@ -217,6 +227,38 @@ impl CameraControlChannels {
             .take()
             .expect("secondary camera control receiver was already taken")
     }
+
+    fn take_main_router_sender(&self) -> oneshot::Sender<axum::Router> {
+        self.main_router_tx
+            .lock()
+            .expect("main camera router sender mutex is not poisoned")
+            .take()
+            .expect("main camera router sender was already taken")
+    }
+
+    fn take_secondary_router_sender(&self) -> oneshot::Sender<axum::Router> {
+        self.secondary_router_tx
+            .lock()
+            .expect("secondary camera router sender mutex is not poisoned")
+            .take()
+            .expect("secondary camera router sender was already taken")
+    }
+
+    fn take_main_router_receiver(&self) -> oneshot::Receiver<axum::Router> {
+        self.main_router_rx
+            .lock()
+            .expect("main camera router receiver mutex is not poisoned")
+            .take()
+            .expect("main camera router receiver was already taken")
+    }
+
+    fn take_secondary_router_receiver(&self) -> oneshot::Receiver<axum::Router> {
+        self.secondary_router_rx
+            .lock()
+            .expect("secondary camera router receiver mutex is not poisoned")
+            .take()
+            .expect("secondary camera router receiver was already taken")
+    }
 }
 
 struct StrandCamHost {
@@ -229,7 +271,7 @@ impl StrandCamHost {
         let mut registrations = vec![flo::CameraRegistration {
             role: flo_core::StrandCamRole::Main,
             name: self.config.main.camera_name.clone(),
-            http_url: Some(format!("http://{}", self.config.main.http_address)),
+            router_rx: Some(self.controls.take_main_router_receiver()),
             control_tx: Some(self.controls.main_tx.clone()),
             expected_fps: self.config.main.expected_fps,
         }];
@@ -237,7 +279,7 @@ impl StrandCamHost {
             registrations.push(flo::CameraRegistration {
                 role: flo_core::StrandCamRole::Secondary,
                 name: secondary.camera_name.clone(),
-                http_url: Some(format!("http://{}", secondary.http_address)),
+                router_rx: Some(self.controls.take_secondary_router_receiver()),
                 control_tx: Some(self.controls.secondary_tx.clone()),
                 expected_fps: secondary.expected_fps,
             });
@@ -270,6 +312,7 @@ impl StrandCamHost {
                 detection_tx.clone(),
                 self.controls.main_tx.clone(),
                 self.controls.take_main_receiver(),
+                self.controls.take_main_router_sender(),
             );
             let secondary = self.config.secondary.map(|config| {
                 CameraRuntime::new(
@@ -277,6 +320,7 @@ impl StrandCamHost {
                     detection_tx,
                     self.controls.secondary_tx.clone(),
                     self.controls.take_secondary_receiver(),
+                    self.controls.take_secondary_router_sender(),
                 )
             });
             let mut camera_task = Box::pin(run_cameras(
@@ -366,6 +410,7 @@ fn detection_to_centroid(detection: ImOpsDetection) -> Option<flo_core::MomentCe
 struct CameraRuntime {
     config: CameraConfig,
     imops: ImOpsHostOptions,
+    embedded_http: strand_cam::EmbeddedHttpOptions,
     // Retain the sender for the lifetime of the camera host. Future FLO policy
     // can update this live control path without networking or a restart.
     _imops_configuration_tx: tokio::sync::watch::Sender<ImOpsHostConfiguration>,
@@ -377,6 +422,7 @@ impl CameraRuntime {
         detection_tx: mpsc::Sender<ImOpsDetection>,
         cam_args_tx: mpsc::Sender<CamArg>,
         cam_args_rx: mpsc::Receiver<CamArg>,
+        router_tx: oneshot::Sender<axum::Router>,
     ) -> Self {
         let initial_cam_args = [
             config
@@ -406,6 +452,7 @@ impl CameraRuntime {
                 detection_tx,
                 cam_args_rx: Some(cam_args_rx),
             },
+            embedded_http: strand_cam::EmbeddedHttpOptions { router_tx },
             _imops_configuration_tx: imops_configuration_tx,
         }
     }
@@ -637,7 +684,12 @@ async fn run_camera(
     data_dir: std::path::PathBuf,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
-    let CameraRuntime { config, imops, .. } = camera;
+    let CameraRuntime {
+        config,
+        imops,
+        embedded_http,
+        ..
+    } = camera;
     let args = strand_args(&config, data_dir);
     match config.backend {
         CameraBackend::Pylon => {
@@ -650,6 +702,7 @@ async fn run_camera(
                 APP_NAME,
                 shutdown_rx,
                 Some(imops),
+                Some(embedded_http),
             )
             .await?;
         }
@@ -663,6 +716,7 @@ async fn run_camera(
                 APP_NAME,
                 shutdown_rx,
                 Some(imops),
+                Some(embedded_http),
             )
             .await?;
         }
@@ -676,6 +730,7 @@ async fn run_camera(
                 APP_NAME,
                 shutdown_rx,
                 Some(imops),
+                Some(embedded_http),
             )
             .await?;
         }
@@ -689,6 +744,7 @@ async fn run_camera(
                 APP_NAME,
                 shutdown_rx,
                 Some(imops),
+                Some(embedded_http),
             )
             .await?;
         }
@@ -708,13 +764,19 @@ where
     C: 'static + ci2::Camera + Send,
     G: Send,
 {
-    let CameraRuntime { config, imops, .. } = camera;
+    let CameraRuntime {
+        config,
+        imops,
+        embedded_http,
+        ..
+    } = camera;
     strand_cam::run_strand_cam_app_async_with_host_options(
         ci2_async::into_threaded_async(module, guard),
         strand_args(&config, data_dir),
         APP_NAME,
         shutdown_rx,
         Some(imops),
+        Some(embedded_http),
     )
     .await?;
     Ok(())
@@ -1051,18 +1113,12 @@ mod tests {
         assert_eq!(registrations.len(), 2);
         assert_eq!(registrations[0].role, flo_core::StrandCamRole::Main);
         assert_eq!(registrations[0].name, "simcam0");
-        assert_eq!(
-            registrations[0].http_url.as_deref(),
-            Some("http://127.0.0.1:3440")
-        );
+        assert!(registrations[0].router_rx.is_some());
         assert_eq!(registrations[0].expected_fps, Some(60.0));
         assert!(registrations[0].control_tx.is_some());
         assert_eq!(registrations[1].role, flo_core::StrandCamRole::Secondary);
         assert_eq!(registrations[1].name, "simcam1");
-        assert_eq!(
-            registrations[1].http_url.as_deref(),
-            Some("http://127.0.0.1:3441")
-        );
+        assert!(registrations[1].router_rx.is_some());
     }
 
     #[test]
@@ -1074,6 +1130,7 @@ mod tests {
         runtime.block_on(async {
             let (detection_tx, _) = mpsc::channel(1);
             let (cam_args_tx, cam_args_rx) = mpsc::channel(CAMERA_CONTROL_QUEUE_CAPACITY);
+            let (router_tx, _router_rx) = oneshot::channel();
             let camera = CameraRuntime::new(
                 CameraConfig {
                     backend: CameraBackend::Sim,
@@ -1092,6 +1149,7 @@ mod tests {
                 detection_tx,
                 cam_args_tx,
                 cam_args_rx,
+                router_tx,
             );
             let mut cam_args_rx = camera.imops.cam_args_rx.unwrap();
             assert!(matches!(

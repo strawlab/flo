@@ -19,6 +19,7 @@ serde.workspace = true
 serde_yaml.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
+axum.workspace = true
 
 ci2.workspace = true
 ci2-async.workspace = true

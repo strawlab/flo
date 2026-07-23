@@ -17,6 +17,7 @@ tower-http = { version = "0.6.2", features = ["trace", "fs"] }
 preferences-serde1.workspace = true
 cookie = "0.18.0"
 base64.workspace = true
+percent-encoding.workspace = true
 futures-util = "0.3.30"
 qrcodegen = "1.8.0"
 tower-serve-static = { version = "0.1", optional = true }

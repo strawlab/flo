@@ -293,6 +293,7 @@ impl<'a> FloCoordinator<'a> {
             secondary,
             secondary_cam_name,
             embedded,
+            ..
         } = strand_cams;
         let main_embedded = embedded
             .iter()
@@ -689,20 +690,22 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    /// Send a `CamArg` to every tracking camera control endpoint, whether it
-    /// is a legacy Strand Cam HTTP session or an in-process extension channel.
+    /// Send a `CamArg` to every tracking camera control endpoint. An embedded
+    /// camera's in-process extension channel replaces its HTTP callback.
     async fn send_cam_arg_to_all(&mut self, arg: strand_cam_remote_control::CamArg) {
-        for sess in [&mut self.cam_session_main, &mut self.cam_session_secondary]
-            .into_iter()
-            .flatten()
-        {
-            post_cam_arg(sess, arg.clone()).await;
-        }
-        for tx in [&self.cam_control_main, &self.cam_control_secondary]
-            .into_iter()
-            .flatten()
-        {
-            send_in_process_cam_arg(tx, arg.clone()).await;
+        for (sess, direct_tx) in [
+            (&mut self.cam_session_main, &self.cam_control_main),
+            (&mut self.cam_session_secondary, &self.cam_control_secondary),
+        ] {
+            match camera_command_route(sess.is_some(), direct_tx.is_some()) {
+                Some(CameraCommandRoute::InProcess) => {
+                    send_in_process_cam_arg(direct_tx.as_ref().unwrap(), arg.clone()).await;
+                }
+                Some(CameraCommandRoute::Http) => {
+                    post_cam_arg(sess.as_mut().unwrap(), arg.clone()).await;
+                }
+                None => {}
+            }
         }
     }
 
@@ -741,11 +744,14 @@ impl<'a> FloCoordinator<'a> {
                 Some(fps) if fps > 0.0 => {
                     let frames = (secs * fps).ceil().max(0.0) as usize;
                     let arg = strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames);
-                    if let Some(sess) = sess.as_mut() {
-                        post_cam_arg(sess, arg.clone()).await;
-                    }
-                    if let Some(tx) = direct_tx {
-                        send_in_process_cam_arg(tx, arg).await;
+                    match camera_command_route(sess.is_some(), direct_tx.is_some()) {
+                        Some(CameraCommandRoute::InProcess) => {
+                            send_in_process_cam_arg(direct_tx.as_ref().unwrap(), arg).await;
+                        }
+                        Some(CameraCommandRoute::Http) => {
+                            post_cam_arg(sess.as_mut().unwrap(), arg).await;
+                        }
+                        None => {}
                     }
                 }
                 _ => {
@@ -960,6 +966,28 @@ impl<'a> FloCoordinator<'a> {
     }
 }
 
+/// The command path for one tracking camera. Embedded camera control takes
+/// precedence over the legacy HTTP callback, even while its HTTP session is
+/// still retained for the browser proxy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CameraCommandRoute {
+    InProcess,
+    Http,
+}
+
+fn camera_command_route(
+    has_http_session: bool,
+    has_in_process_control: bool,
+) -> Option<CameraCommandRoute> {
+    if has_in_process_control {
+        Some(CameraCommandRoute::InProcess)
+    } else if has_http_session {
+        Some(CameraCommandRoute::Http)
+    } else {
+        None
+    }
+}
+
 fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
     if let Some(stamp) = stamp {
         stamp.elapsed() > std::time::Duration::from_secs(1)
@@ -1103,6 +1131,7 @@ struct InitializedStrandCams {
     secondary: Option<NamedStrandCamSession>,
     secondary_cam_name: Option<String>,
     embedded: Vec<CameraRegistration>,
+    embedded_routers: flo_webserver::EmbeddedStrandCamRouters,
 }
 
 impl InitializedStrandCams {
@@ -1133,82 +1162,16 @@ impl InitializedStrandCams {
                 .as_ref()
                 .map(|camera| flo_core::StrandCamProxyInfo::new(role, camera.name.clone()))
         })
+        .chain(
+            self.embedded
+                .iter()
+                .map(|camera| flo_core::StrandCamProxyInfo::new(camera.role, camera.name.clone())),
+        )
         .collect()
     }
-}
 
-/// Wait for an embedded Strand Camera's HTTP server to become available.
-/// Embedded hosts start in the same process and need a short time to open the
-/// camera and bind their BUI listener before FLO can establish its proxy
-/// session.
-///
-/// `camera_host_task` is raced against each retry delay so that a host which
-/// exits early (e.g. the camera backend failed to open) is reported with its
-/// real error instead of a misleading connection-refused timeout once the
-/// retry budget is exhausted. Callers only reach this function for a
-/// registration produced by a live camera host, so there is always a task to
-/// race against.
-async fn initialize_embedded_strand_cam_session(
-    url: &str,
-    expected_name: &str,
-    jar: Arc<RwLock<cookie_store::CookieStore>>,
-    camera_host_task: &mut JoinHandle<Result<()>>,
-) -> Result<HttpSession> {
-    const MAX_ATTEMPTS: usize = 75;
-    const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
-
-    let cfg = StrandCamConfig::default();
-    for attempt in 1..=MAX_ATTEMPTS {
-        match initialize_strand_cam_session(url, &cfg, jar.clone()).await {
-            Ok((session, actual_name)) => {
-                if actual_name != expected_name {
-                    eyre::bail!(
-                        "embedded camera at {url} reported name {actual_name:?}, expected {expected_name:?}"
-                    );
-                }
-                return Ok(session);
-            }
-            Err(error) if attempt < MAX_ATTEMPTS => {
-                tracing::debug!(
-                    attempt,
-                    %error,
-                    "waiting for embedded Strand Camera HTTP server at {url}"
-                );
-                tokio::select! {
-                    _ = tokio::time::sleep(RETRY_DELAY) => {}
-                    joined = &mut *camera_host_task => {
-                        return Err(embedded_camera_host_exit_error(joined, expected_name));
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "waiting for embedded Strand Camera {expected_name:?} at {url} after {MAX_ATTEMPTS} attempts"
-                    )
-                });
-            }
-        }
-    }
-    unreachable!("the retry loop either returns a session or an error")
-}
-
-/// Turn a completed camera host `JoinHandle` into an explanatory error while
-/// waiting for its embedded HTTP server to come up.
-fn embedded_camera_host_exit_error(
-    joined: std::result::Result<Result<()>, tokio::task::JoinError>,
-    expected_name: &str,
-) -> eyre::Report {
-    match joined {
-        Ok(Ok(())) => eyre::eyre!(
-            "embedded camera host for {expected_name:?} exited before its HTTP server became reachable"
-        ),
-        Ok(Err(error)) => error.wrap_err(format!(
-            "embedded camera host for {expected_name:?} failed to start"
-        )),
-        Err(join_error) => eyre::Report::new(join_error).wrap_err(format!(
-            "embedded camera host task for {expected_name:?} panicked"
-        )),
+    fn embedded_routers(&self) -> flo_webserver::EmbeddedStrandCamRouters {
+        self.embedded_routers.clone()
     }
 }
 
@@ -1284,8 +1247,8 @@ fn merge_camera_registrations(
 
 async fn init_strand_cams(
     device_config: &FloControllerConfig,
-    embedded: Vec<CameraRegistration>,
-    mut camera_host_task: Option<&mut JoinHandle<Result<()>>>,
+    mut embedded: Vec<CameraRegistration>,
+    _camera_host_task: Option<&mut JoinHandle<Result<()>>>,
 ) -> Result<InitializedStrandCams> {
     // Connect to strand-cam for main and secondary cameras.
     let jar: cookie_store::CookieStore =
@@ -1321,9 +1284,9 @@ async fn init_strand_cams(
     .transpose()?;
 
     let main_cam_name = main.as_ref().map(|(_, name)| name.clone());
-    let mut main = main
+    let main = main
         .and_then(|(session, name)| session.map(|session| NamedStrandCamSession { name, session }));
-    let (mut secondary, mut secondary_cam_name) = match secondary {
+    let (secondary, mut secondary_cam_name) = match secondary {
         Some((session, name)) => (
             session.map(|session| NamedStrandCamSession {
                 name: name.clone(),
@@ -1360,37 +1323,25 @@ async fn init_strand_cams(
     let secondary_cam_name =
         merge_camera_registrations(main_cam_name.as_deref(), secondary_cam_name, &embedded)?;
 
-    for camera in &embedded {
-        let Some(url) = camera.http_url.as_deref() else {
+    let mut embedded_routers = flo_webserver::EmbeddedStrandCamRouters::new();
+    for camera in &mut embedded {
+        let Some(router_rx) = camera.router_rx.take() else {
             continue;
         };
-        // A registration only exists because a camera host produced it, so
-        // that host's task handle must be present here.
-        let host_task = camera_host_task
-            .as_deref_mut()
-            .expect("an embedded camera registration implies a live camera host task");
-        let session =
-            initialize_embedded_strand_cam_session(url, &camera.name, jar.clone(), host_task)
-                .await?;
-        let named_session = NamedStrandCamSession {
-            name: camera.name.clone(),
-            session,
-        };
-        match camera.role {
-            StrandCamRole::Main => {
-                debug_assert!(
-                    main.is_none(),
-                    "embedded/legacy role conflicts were validated"
-                );
-                main = Some(named_session);
-            }
-            StrandCamRole::Secondary => {
-                debug_assert!(
-                    secondary.is_none(),
-                    "embedded/legacy role conflicts were validated"
-                );
-                secondary = Some(named_session);
-            }
+        let router = router_rx.await.map_err(|_| {
+            eyre::eyre!(
+                "embedded Strand Camera {:?} stopped before providing its browser router",
+                camera.name
+            )
+        })?;
+        if embedded_routers
+            .insert(camera.name.clone(), router)
+            .is_some()
+        {
+            eyre::bail!(
+                "multiple embedded Strand Cameras reported the name {:?}",
+                camera.name
+            );
         }
     }
 
@@ -1399,6 +1350,7 @@ async fn init_strand_cams(
         secondary,
         secondary_cam_name,
         embedded,
+        embedded_routers,
     })
 }
 
@@ -2068,6 +2020,7 @@ async fn app_main(
     )
     .await?;
     let strand_cam_proxy_sessions = strand_cams.proxy_sessions()?;
+    let embedded_strand_cam_routers = strand_cams.embedded_routers();
     let strand_cam_proxy_info = strand_cams.proxy_info();
 
     // Channel used to tell the web server it is shutting down. It is flipped to
@@ -2097,6 +2050,7 @@ async fn app_main(
                 persistent_secret,
                 trusted_networks,
                 strand_cam_proxy_sessions,
+                embedded_strand_cam_routers,
                 strand_cam_proxy_info,
                 from_device_http_rx,
                 device_config,
@@ -2477,52 +2431,11 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn embedded_camera_host_exit_error_wraps_each_outcome() {
-        let ok_error = embedded_camera_host_exit_error(Ok(Ok(())), "main");
-        assert!(format!("{ok_error:#}").contains("exited before its HTTP server became reachable"));
-
-        let failure = eyre::eyre!("libpylon-cabi.so: cannot open shared object file");
-        let failed_error = embedded_camera_host_exit_error(Ok(Err(failure)), "main");
-        let rendered = format!("{failed_error:#}");
-        assert!(rendered.contains("failed to start"));
-        assert!(rendered.contains("libpylon-cabi.so"));
-
-        let panicked = tokio::spawn(async { panic!("boom") }).await;
-        let join_error = panicked.expect_err("spawned task panicked");
-        let panic_error = embedded_camera_host_exit_error(Err(join_error), "main");
-        assert!(format!("{panic_error:#}").contains("panicked"));
-    }
-
-    #[tokio::test]
-    async fn embedded_session_surfaces_host_task_failure_without_waiting_full_retry_budget() {
-        let mut host_task: JoinHandle<Result<()>> =
-            tokio::spawn(async { Err(eyre::eyre!("libpylon-cabi.so: cannot open shared object")) });
-        // Give the fake host task a chance to finish before we start polling it.
-        tokio::task::yield_now().await;
-
-        let jar = Arc::new(RwLock::new(cookie_store::CookieStore::new(None)));
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            initialize_embedded_strand_cam_session(
-                "http://127.0.0.1:1",
-                "main",
-                jar,
-                &mut host_task,
-            ),
-        )
-        .await
-        .expect("should surface the host task's failure long before the retry budget is spent");
-
-        let error = result.expect_err("embedded host task failed, so no session should open");
-        assert!(format!("{error:#}").contains("libpylon-cabi.so"));
-    }
-
     fn embedded_camera(role: StrandCamRole, name: &str) -> CameraRegistration {
         CameraRegistration {
             role,
             name: name.to_owned(),
-            http_url: None,
+            router_rx: None,
             control_tx: None,
             expected_fps: None,
         }
@@ -2577,7 +2490,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_cameras_do_not_claim_unavailable_proxy_routes() {
+    fn embedded_cameras_claim_direct_router_routes() {
         let cameras = InitializedStrandCams {
             main: None,
             secondary: None,
@@ -2586,10 +2499,11 @@ mod tests {
                 embedded_camera(StrandCamRole::Main, "embedded-main"),
                 embedded_camera(StrandCamRole::Secondary, "embedded-secondary"),
             ],
+            embedded_routers: flo_webserver::EmbeddedStrandCamRouters::new(),
         };
 
         assert!(cameras.proxy_sessions().unwrap().is_empty());
-        assert!(cameras.proxy_info().is_empty());
+        assert_eq!(cameras.proxy_info().len(), 2);
     }
 
     #[tokio::test]
@@ -2605,5 +2519,22 @@ mod tests {
             rx.recv().await,
             Some(strand_cam_remote_control::CamArg::SetIsRecordingMp4(true))
         ));
+    }
+
+    #[test]
+    fn embedded_camera_control_takes_precedence_over_http_session() {
+        assert_eq!(
+            camera_command_route(true, true),
+            Some(CameraCommandRoute::InProcess)
+        );
+        assert_eq!(
+            camera_command_route(true, false),
+            Some(CameraCommandRoute::Http)
+        );
+        assert_eq!(
+            camera_command_route(false, true),
+            Some(CameraCommandRoute::InProcess)
+        );
+        assert_eq!(camera_command_route(false, false), None);
     }
 }

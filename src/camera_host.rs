@@ -10,16 +10,15 @@ use crate::{CentroidInputSender, ProcessingFeedback};
 ///
 /// FLO uses this identity to assign main/secondary centroid roles. Unlike
 /// legacy Strand Camera configuration, control can remain entirely
-/// in-process. A host may additionally provide its local HTTP URL so FLO can
-/// expose the camera's BUI through its authenticated reverse proxy.
-#[derive(Clone, Debug)]
+/// in-process. A host may additionally provide its state-erased BUI router so
+/// FLO can mount it under its authenticated web server without a second TCP
+/// listener.
 pub struct CameraRegistration {
     pub role: StrandCamRole,
     pub name: String,
-    /// Local Strand Camera HTTP URL, when this embedded camera serves a BUI.
-    /// FLO opens an authenticated session to this URL and exposes it at its
-    /// same-origin `/cam-proxy/.../` route.
-    pub http_url: Option<String>,
+    /// Receives the camera's browser UI router once camera startup has built
+    /// it. FLO mounts it at its same-origin `/camera/<name>/` route.
+    pub router_rx: Option<tokio::sync::oneshot::Receiver<axum::Router>>,
     /// Optional in-process replacement for Strand Cam's HTTP `callback`
     /// endpoint. FLO sends camera commands such as MP4 recording and
     /// post-trigger buffer control through this channel.

@@ -77,9 +77,9 @@ Add a `flo-strand-cam` section to the normal FLO YAML configuration. `main` is
 required and runs a monocular FLO deployment. Add `secondary` when using the
 stereo calibration and depth estimation: it runs a second embedded Strand
 Camera and a second ImOps detector in the same application. Each configured
-camera needs a unique `camera_name`; the HTTP addresses must also be unique
-(and default to `127.0.0.1:3440` for `main` and `127.0.0.1:3441` for
-`secondary`).
+camera needs a unique `camera_name`. Its BUI is mounted below FLO's
+authenticated HTTP server at `/camera/<camera_name>/`; embedded cameras do not
+open separate HTTP listeners.
 
 ```yaml
 flo-strand-cam:

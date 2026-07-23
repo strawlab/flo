@@ -39,11 +39,11 @@ complete headless development configuration. It intentionally has no
 `strand_cam_main` or `strand_cam_secondary` blocks.
 
 For each camera, `backend` may be `sim`, `pylon`, `vimba`, or `webcam`. Camera
-names must differ. Their Strand Camera HTTP addresses default to
-`127.0.0.1:3440` and `127.0.0.1:3441` respectively and must also differ.
-`sim` is intended for development and automated end-to-end tests; its scenario
-remains configured by `STRAND_CAM_SIM_SPEC` as it is for standalone Strand
-Camera.
+names must differ. `sim` is intended for development and automated end-to-end
+tests; its scenario remains configured by `STRAND_CAM_SIM_SPEC` as it is for
+standalone Strand Camera. The embedded camera BUI is mounted at
+`/camera/<camera_name>/` on FLO's HTTP server; it does not bind its configured
+per-camera HTTP address.
 
 FLO camera commands use direct bounded channels in this binary. This includes
 recording start/stop and pre-trigger commands as well as the optional initial
