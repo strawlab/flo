@@ -67,7 +67,6 @@ fn bundle_files_main() -> Result<(), Box<dyn std::error::Error>> {
     // Tell cargo to re-run if frontend sources change
     println!("cargo:rerun-if-changed={}/src", frontend_dir);
     println!("cargo:rerun-if-changed={}/index.html", frontend_dir);
-    println!("cargo:rerun-if-changed={}/Trunk.toml", frontend_dir);
 
     // Make OUT_DIR available to your source
     println!("cargo:rustc-env=DIST_DIR={}/dist", out_dir);
