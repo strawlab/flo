@@ -1141,10 +1141,18 @@ impl InitializedStrandCams {
 /// Embedded hosts start in the same process and need a short time to open the
 /// camera and bind their BUI listener before FLO can establish its proxy
 /// session.
+///
+/// `camera_host_task` is raced against each retry delay so that a host which
+/// exits early (e.g. the camera backend failed to open) is reported with its
+/// real error instead of a misleading connection-refused timeout once the
+/// retry budget is exhausted. Callers only reach this function for a
+/// registration produced by a live camera host, so there is always a task to
+/// race against.
 async fn initialize_embedded_strand_cam_session(
     url: &str,
     expected_name: &str,
     jar: Arc<RwLock<cookie_store::CookieStore>>,
+    camera_host_task: &mut JoinHandle<Result<()>>,
 ) -> Result<HttpSession> {
     const MAX_ATTEMPTS: usize = 75;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1166,7 +1174,12 @@ async fn initialize_embedded_strand_cam_session(
                     %error,
                     "waiting for embedded Strand Camera HTTP server at {url}"
                 );
-                tokio::time::sleep(RETRY_DELAY).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(RETRY_DELAY) => {}
+                    joined = &mut *camera_host_task => {
+                        return Err(embedded_camera_host_exit_error(joined, expected_name));
+                    }
+                }
             }
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -1178,6 +1191,25 @@ async fn initialize_embedded_strand_cam_session(
         }
     }
     unreachable!("the retry loop either returns a session or an error")
+}
+
+/// Turn a completed camera host `JoinHandle` into an explanatory error while
+/// waiting for its embedded HTTP server to come up.
+fn embedded_camera_host_exit_error(
+    joined: std::result::Result<Result<()>, tokio::task::JoinError>,
+    expected_name: &str,
+) -> eyre::Report {
+    match joined {
+        Ok(Ok(())) => eyre::eyre!(
+            "embedded camera host for {expected_name:?} exited before its HTTP server became reachable"
+        ),
+        Ok(Err(error)) => error.wrap_err(format!(
+            "embedded camera host for {expected_name:?} failed to start"
+        )),
+        Err(join_error) => eyre::Report::new(join_error).wrap_err(format!(
+            "embedded camera host task for {expected_name:?} panicked"
+        )),
+    }
 }
 
 /// Validate in-process cameras against the legacy camera configuration and
@@ -1253,6 +1285,7 @@ fn merge_camera_registrations(
 async fn init_strand_cams(
     device_config: &FloControllerConfig,
     embedded: Vec<CameraRegistration>,
+    mut camera_host_task: Option<&mut JoinHandle<Result<()>>>,
 ) -> Result<InitializedStrandCams> {
     // Connect to strand-cam for main and secondary cameras.
     let jar: cookie_store::CookieStore =
@@ -1331,8 +1364,14 @@ async fn init_strand_cams(
         let Some(url) = camera.http_url.as_deref() else {
             continue;
         };
+        // A registration only exists because a camera host produced it, so
+        // that host's task handle must be present here.
+        let host_task = camera_host_task
+            .as_deref_mut()
+            .expect("an embedded camera registration implies a live camera host task");
         let session =
-            initialize_embedded_strand_cam_session(url, &camera.name, jar.clone()).await?;
+            initialize_embedded_strand_cam_session(url, &camera.name, jar.clone(), host_task)
+                .await?;
         let named_session = NamedStrandCamSession {
             name: camera.name.clone(),
             session,
@@ -2022,7 +2061,12 @@ async fn app_main(
     // Open each configured Strand Camera session once. The controller keeps
     // the original handles while the web server gets clones for its Braid-style
     // reverse proxy; all clones share the same authenticated cookie jar.
-    let strand_cams = init_strand_cams(&device_config, embedded_camera_registrations).await?;
+    let strand_cams = init_strand_cams(
+        &device_config,
+        embedded_camera_registrations,
+        camera_host_task.as_mut(),
+    )
+    .await?;
     let strand_cam_proxy_sessions = strand_cams.proxy_sessions()?;
     let strand_cam_proxy_info = strand_cams.proxy_info();
 
@@ -2431,6 +2475,47 @@ mod tests {
             });
             task.await.unwrap().unwrap();
         });
+    }
+
+    #[tokio::test]
+    async fn embedded_camera_host_exit_error_wraps_each_outcome() {
+        let ok_error = embedded_camera_host_exit_error(Ok(Ok(())), "main");
+        assert!(format!("{ok_error:#}").contains("exited before its HTTP server became reachable"));
+
+        let failure = eyre::eyre!("libpylon-cabi.so: cannot open shared object file");
+        let failed_error = embedded_camera_host_exit_error(Ok(Err(failure)), "main");
+        let rendered = format!("{failed_error:#}");
+        assert!(rendered.contains("failed to start"));
+        assert!(rendered.contains("libpylon-cabi.so"));
+
+        let panicked = tokio::spawn(async { panic!("boom") }).await;
+        let join_error = panicked.expect_err("spawned task panicked");
+        let panic_error = embedded_camera_host_exit_error(Err(join_error), "main");
+        assert!(format!("{panic_error:#}").contains("panicked"));
+    }
+
+    #[tokio::test]
+    async fn embedded_session_surfaces_host_task_failure_without_waiting_full_retry_budget() {
+        let mut host_task: JoinHandle<Result<()>> =
+            tokio::spawn(async { Err(eyre::eyre!("libpylon-cabi.so: cannot open shared object")) });
+        // Give the fake host task a chance to finish before we start polling it.
+        tokio::task::yield_now().await;
+
+        let jar = Arc::new(RwLock::new(cookie_store::CookieStore::new(None)));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            initialize_embedded_strand_cam_session(
+                "http://127.0.0.1:1",
+                "main",
+                jar,
+                &mut host_task,
+            ),
+        )
+        .await
+        .expect("should surface the host task's failure long before the retry budget is spent");
+
+        let error = result.expect_err("embedded host task failed, so no session should open");
+        assert!(format!("{error:#}").contains("libpylon-cabi.so"));
     }
 
     fn embedded_camera(role: StrandCamRole, name: &str) -> CameraRegistration {
