@@ -118,12 +118,46 @@ struct FfmpegCodecSelection {
 
 impl From<CodecSelectionConfig> for CodecSelection {
     fn from(value: CodecSelectionConfig) -> Self {
-        match value {
+        let codec = match value {
             CodecSelectionConfig::Named(NamedCodecSelection::H264Nvenc) => Self::H264Nvenc,
             CodecSelectionConfig::Named(NamedCodecSelection::H264OpenH264) => Self::H264OpenH264,
             CodecSelectionConfig::Ffmpeg(config) => Self::Ffmpeg(config.ffmpeg),
-        }
+        };
+        canonicalize_legacy_vaapi_codec(codec)
     }
+}
+
+/// Migrate older spellings of FLO's VAAPI preset.
+///
+/// `ffmpeg-writer` now supplies the full-range color metadata itself, and
+/// VAAPI's hardware surface path must not force an output pixel format. Keep
+/// this narrow so custom FFmpeg configurations remain untouched.
+fn canonicalize_legacy_vaapi_codec(codec: CodecSelection) -> CodecSelection {
+    let CodecSelection::Ffmpeg(args) = codec else {
+        return codec;
+    };
+
+    let is_legacy_vaapi = args.device_args.as_deref()
+        == Some(&[("-vaapi_device".to_owned(), "/dev/dri/renderD128".to_owned())])
+        && args.pre_codec_args.as_deref()
+            == Some(&[("-vf".to_owned(), "format=nv12,hwupload".to_owned())])
+        && args.codec.as_deref() == Some("h264_vaapi")
+        && args.post_codec_args.is_none()
+        && matches!(args.pixfmt.as_deref(), None | Some("yuv420p"))
+        && args.max_bframes.is_none();
+
+    if !is_legacy_vaapi {
+        return CodecSelection::Ffmpeg(args);
+    }
+
+    CodecSelection::Ffmpeg(strand_cam_remote_control::FfmpegCodecArgs {
+        device_args: args.device_args,
+        pre_codec_args: args.pre_codec_args,
+        codec: args.codec,
+        post_codec_args: Some(vec![("-color_range".to_owned(), "pc".to_owned())]),
+        pixfmt: None,
+        max_bframes: None,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1016,11 +1050,32 @@ mod tests {
             ffmpeg.pre_codec_args,
             Some(vec![("-vf".to_owned(), "format=nv12,hwupload".to_owned(),)])
         );
-        assert_eq!(ffmpeg.post_codec_args, None);
+        assert_eq!(
+            ffmpeg.post_codec_args,
+            Some(vec![("-color_range".to_owned(), "pc".to_owned())])
+        );
         assert!(
             !flo_config
                 .extensions
                 .contains_key(serde_yaml::Value::String(APP_NAME.to_owned()))
+        );
+    }
+
+    #[test]
+    fn legacy_vaapi_codec_config_is_migrated_to_the_current_preset() {
+        let raw: RawCameraHostConfig = serde_yaml::from_str(
+            "main:\n  backend: sim\n  camera_name: main\n  mp4_codec:\n    Ffmpeg:\n      device_args:\n        - [\"-vaapi_device\", \"/dev/dri/renderD128\"]\n      pre_codec_args:\n        - [\"-vf\", \"format=nv12,hwupload\"]\n      codec: h264_vaapi\n      post_codec_args: null\n      pixfmt: yuv420p\n  imops:\n    center_x: 1\n    center_y: 1\n",
+        )
+        .unwrap();
+
+        let CodecSelection::Ffmpeg(codec) = raw.main.resolve(CameraRole::Main).mp4_codec.unwrap()
+        else {
+            panic!("expected an FFmpeg codec");
+        };
+        assert_eq!(codec.pixfmt, None);
+        assert_eq!(
+            codec.post_codec_args,
+            Some(vec![("-color_range".to_owned(), "pc".to_owned())])
         );
     }
 

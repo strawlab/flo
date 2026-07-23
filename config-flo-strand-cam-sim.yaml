@@ -44,7 +44,8 @@ flo-strand-cam:
         pre_codec_args:
           - ["-vf", "format=nv12,hwupload"]
         codec: h264_vaapi
-        post_codec_args: null
+        post_codec_args:
+          - ["-color_range", "pc"]
         pixfmt: null
     imops:
       enabled: true
@@ -64,7 +65,8 @@ flo-strand-cam:
         pre_codec_args:
           - ["-vf", "format=nv12,hwupload"]
         codec: h264_vaapi
-        post_codec_args: null
+        post_codec_args:
+          - ["-color_range", "pc"]
         pixfmt: null
     imops:
       enabled: true
