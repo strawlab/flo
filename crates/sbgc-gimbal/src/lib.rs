@@ -29,6 +29,7 @@ struct InitializationResult {
     messages_rx: SplitStream<Framed<SerialStream, V2Codec>>,
     offset_yaw: f64,
     offset_pitch: f64,
+    stream_requested_at: Instant,
 }
 
 async fn initialize_gimbals(
@@ -102,11 +103,13 @@ async fn initialize_gimbals(
                     messages_rx,
                     offset_yaw,
                     offset_pitch,
+                    // Replaced immediately after the stream request below.
+                    stream_requested_at: Instant::now(),
                 };
                 break;
             }
-            _ => {
-                tracing::info!("got some other message while waiting for encoder offsets");
+            msg => {
+                tracing::debug!(?msg, "received message while waiting for encoder offsets");
             }
         }
     }
@@ -120,6 +123,7 @@ async fn initialize_gimbals(
             ..Default::default()
         };
 
+        let stream_requested_at = Instant::now();
         results
             .messages_tx
             .send(OutgoingCommand::RawMessage(simplebgc::RawMessage {
@@ -128,6 +132,7 @@ async fn initialize_gimbals(
             }))
             .await
             .unwrap();
+        results.stream_requested_at = stream_requested_at;
         tracing::debug!("requested SimpleBGC realtime encoder stream");
     }
     Ok(results)
@@ -217,6 +222,7 @@ async fn run_gimbal_loop_internal(
         mut messages_rx,
         offset_yaw,
         offset_pitch,
+        stream_requested_at,
     } = ir;
     let pan_rev: FloatType = if cfg.reverse_pan { -1.0 } else { 1.0 };
     let tilt_rev: FloatType = if cfg.reverse_tilt { -1.0 } else { 1.0 };
@@ -235,6 +241,7 @@ async fn run_gimbal_loop_internal(
     let rx_loop = async {
         let mut telemetry_count = 0_u64;
         let mut telemetry_since_stream_start = 0_u64;
+        let mut first_custom_telemetry = true;
         let mut last_telemetry_report = Instant::now();
         let mut last_imu_angles = RollPitchYaw::<FloatType> {
             roll: 0.0,
@@ -252,6 +259,13 @@ async fn run_gimbal_loop_internal(
                 IncomingCommand::RawMessage(msg) => {
                     match msg.typ {
                         simplebgc::constants::CMD_REALTIME_DATA_CUSTOM => {
+                            if first_custom_telemetry {
+                                tracing::debug!(
+                                    elapsed = ?stream_requested_at.elapsed(),
+                                    "received first SimpleBGC custom realtime packet"
+                                );
+                                first_custom_telemetry = false;
+                            }
                             telemetry_count += 1;
                             telemetry_since_stream_start += 1;
                             if telemetry_since_stream_start == STREAM_WARMUP_PACKETS {
@@ -380,13 +394,28 @@ async fn run_gimbal_loop_internal(
                             motor_position_tx.send(ret).await.unwrap();
                         }
                         _ => {
-                            tracing::info!("unknown message #{}", msg.typ);
+                            tracing::debug!(
+                                command_id = msg.typ,
+                                payload_len = msg.payload.len(),
+                                elapsed = ?stream_requested_at.elapsed(),
+                                "received non-custom SimpleBGC raw message after stream request"
+                            );
                         }
                     }
                 }
-                IncomingCommand::CommandConfirm(_) => {}
+                IncomingCommand::CommandConfirm(confirm) => {
+                    tracing::debug!(
+                        ?confirm,
+                        elapsed = ?stream_requested_at.elapsed(),
+                        "received SimpleBGC command confirmation after stream request"
+                    );
+                }
                 msg => {
-                    tracing::info!("got some other message from the gimbal: {msg:?}");
+                    tracing::debug!(
+                        ?msg,
+                        elapsed = ?stream_requested_at.elapsed(),
+                        "received non-custom SimpleBGC message after stream request"
+                    );
                 }
             }
         }
