@@ -19,9 +19,10 @@ use flo_core::{
 pub(crate) mod custom_messages;
 
 const BAUD_RATE: u32 = 115_200;
-/// A short stream-health window used by callers that must avoid adding heavy
-/// startup work while the controller begins realtime telemetry.
-const READY_TELEMETRY_PACKETS: u64 = 100;
+/// A short stream warm-up used before sending the first control command or
+/// starting heavyweight in-process camera acquisition.
+const STREAM_WARMUP_PACKETS: u64 = 100;
+const STREAM_WARMUP_SETTLE_DURATION: Duration = Duration::from_millis(250);
 
 struct InitializationResult {
     messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
@@ -168,6 +169,7 @@ pub async fn run_gimbal_loop(
         let (messages_tx, messages_rx) = framed.split();
         let gimbal_config_fut = initialize_gimbals(messages_tx, messages_rx);
         let ir = tokio::time::timeout(Duration::from_millis(5000), gimbal_config_fut).await??;
+        let (stream_warmed_up_tx, stream_warmed_up_rx) = tokio::sync::watch::channel(false);
 
         // Run the main gimbal loops forever. This future only completes when
         // the gimbal is done, which only happens on an error. If the error is
@@ -180,6 +182,8 @@ pub async fn run_gimbal_loop(
             floz_logger.clone(),
             cfg.clone(),
             ready_tx.clone(),
+            stream_warmed_up_tx,
+            stream_warmed_up_rx,
         )
         .await
         {
@@ -204,6 +208,8 @@ async fn run_gimbal_loop_internal(
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     cfg: GimbalConfig,
     ready_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    stream_warmed_up_tx: tokio::sync::watch::Sender<bool>,
+    mut stream_warmed_up_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), InternalGimbalError> {
     let InitializationResult {
         mut messages_tx,
@@ -247,7 +253,8 @@ async fn run_gimbal_loop_internal(
                         simplebgc::constants::CMD_REALTIME_DATA_CUSTOM => {
                             telemetry_count += 1;
                             telemetry_since_stream_start += 1;
-                            if telemetry_since_stream_start == READY_TELEMETRY_PACKETS {
+                            if telemetry_since_stream_start == STREAM_WARMUP_PACKETS {
+                                stream_warmed_up_tx.send_replace(true);
                                 if let Some(ready_tx) = ready_tx
                                     .lock()
                                     .expect("gimbal readiness mutex is not poisoned")
@@ -255,7 +262,7 @@ async fn run_gimbal_loop_internal(
                                 {
                                     tracing::info!(
                                         telemetry_since_stream_start,
-                                        "SimpleBGC realtime stream is stable"
+                                        "SimpleBGC realtime stream warm-up complete"
                                     );
                                     let _ = ready_tx.send(());
                                 }
@@ -397,6 +404,19 @@ async fn run_gimbal_loop_internal(
         let mut last_mode = (MotorDriveMode::Position, true);
         let mut control_count = 0_u64;
         let mut last_control_report = Instant::now();
+
+        if !*stream_warmed_up_rx.borrow() {
+            tracing::debug!(
+                stream_warmup_packets = STREAM_WARMUP_PACKETS,
+                "waiting to send SimpleBGC controls until realtime stream warm-up completes"
+            );
+            stream_warmed_up_rx.changed().await?;
+        }
+        tracing::debug!(
+            ?STREAM_WARMUP_SETTLE_DURATION,
+            "waiting briefly before sending first SimpleBGC control"
+        );
+        tokio::time::sleep(STREAM_WARMUP_SETTLE_DURATION).await;
 
         loop {
             let current_motors = {

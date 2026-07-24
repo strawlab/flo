@@ -1845,7 +1845,7 @@ async fn app_main(
     }
 
     // Embedded camera acquisition can be a substantial startup workload. Let
-    // a SimpleBGC controller establish a short, valid telemetry stream first
+    // a SimpleBGC controller complete a short telemetry warm-up first
     // so flo-strand-cam has the same quiet gimbal startup that legacy FLO has.
     let (mut gimbal_ready_tx, mut gimbal_ready_rx) =
         if options.camera_host.is_some() && device_config.gimbal_config.is_some() {
@@ -2021,19 +2021,17 @@ async fn app_main(
                 const GIMBAL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
                 match tokio::time::timeout(GIMBAL_READY_TIMEOUT, gimbal_ready_rx).await {
                     Ok(Ok(())) => {
-                        tracing::info!(
-                            "starting embedded camera host after stable SimpleBGC telemetry"
-                        );
+                        tracing::info!("starting embedded camera host after SimpleBGC warm-up");
                     }
                     Ok(Err(_)) => {
                         tracing::warn!(
-                            "SimpleBGC task ended before reporting stable telemetry; starting embedded camera host"
+                            "SimpleBGC task ended before completing warm-up; starting embedded camera host"
                         );
                     }
                     Err(_) => {
                         tracing::warn!(
                             ?GIMBAL_READY_TIMEOUT,
-                            "SimpleBGC telemetry did not stabilize before deadline; starting embedded camera host"
+                            "SimpleBGC telemetry did not complete warm-up before deadline; starting embedded camera host"
                         );
                     }
                 }
