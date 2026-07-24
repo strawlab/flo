@@ -234,9 +234,25 @@ Configure `camshow` from FLO config:
 ```yaml
 osd_config:
   camshow_addr: 127.0.0.1:2224
+  # Calibration remains owned by flo: it determines where tracking overlays
+  # land in the OSD character grid that flo sends to camshow.
+  cal:
+    camera_calibration: cam-airborne2-fpv-cal.json
+    osd_area_w: 1775.0
+    osd_area_h: 941.0
+    osd_char_w: 30
+    osd_char_h: 16
+    pose:
+      z: 0.050
+      pitch_deg: -23.7
   # Optional: override webcam MP4 encoder settings sent to camshow.
   # camshow_mp4_cfg: ...
 ```
+
+`camera_calibration` is a path read by `flo` (relative paths are resolved from
+the directory where `flo` is launched). It supports the existing ROS/OpenCV
+YAML and EUCM JSON calibration formats. `camshow` has no separate calibration
+setting; it renders the OSD canvas it receives from `flo`.
 
 Or override from CLI when running `flo`:
 
