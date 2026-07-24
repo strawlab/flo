@@ -4,7 +4,10 @@ use futures::{
     stream::{SplitSink, SplitStream},
 };
 use simplebgc::{IncomingCommand, OutgoingCommand, ParamsQuery, Payload, RollPitchYaw, V2Codec};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tokio_util::codec::Framed;
 
@@ -16,6 +19,9 @@ use flo_core::{
 pub(crate) mod custom_messages;
 
 const BAUD_RATE: u32 = 115_200;
+/// A short stream-health window used by callers that must avoid adding heavy
+/// startup work while the controller begins realtime telemetry.
+const READY_TELEMETRY_PACKETS: u64 = 100;
 
 struct InitializationResult {
     messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
@@ -145,7 +151,11 @@ pub async fn run_gimbal_loop(
     motor_position_tx: tokio::sync::mpsc::Sender<MotorPositionResult>,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     cfg: GimbalConfig,
+    ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<()> {
+    // Keep the sender across reconnect attempts. A caller only needs one
+    // notification, after which the slot is empty.
+    let ready_tx = Arc::new(Mutex::new(ready_tx));
     // Loop forever in case of timeout on gimbals.
     loop {
         // Initialize serial port.
@@ -169,6 +179,7 @@ pub async fn run_gimbal_loop(
             motor_position_tx.clone(),
             floz_logger.clone(),
             cfg.clone(),
+            ready_tx.clone(),
         )
         .await
         {
@@ -192,6 +203,7 @@ async fn run_gimbal_loop_internal(
     motor_position_tx: tokio::sync::mpsc::Sender<MotorPositionResult>,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     cfg: GimbalConfig,
+    ready_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 ) -> Result<(), InternalGimbalError> {
     let InitializationResult {
         mut messages_tx,
@@ -215,6 +227,7 @@ async fn run_gimbal_loop_internal(
     //loop for encoder readout
     let rx_loop = async {
         let mut telemetry_count = 0_u64;
+        let mut telemetry_since_stream_start = 0_u64;
         let mut last_telemetry_report = Instant::now();
         let mut last_imu_angles = RollPitchYaw::<FloatType> {
             roll: 0.0,
@@ -233,6 +246,20 @@ async fn run_gimbal_loop_internal(
                     match msg.typ {
                         simplebgc::constants::CMD_REALTIME_DATA_CUSTOM => {
                             telemetry_count += 1;
+                            telemetry_since_stream_start += 1;
+                            if telemetry_since_stream_start == READY_TELEMETRY_PACKETS {
+                                if let Some(ready_tx) = ready_tx
+                                    .lock()
+                                    .expect("gimbal readiness mutex is not poisoned")
+                                    .take()
+                                {
+                                    tracing::info!(
+                                        telemetry_since_stream_start,
+                                        "SimpleBGC realtime stream is stable"
+                                    );
+                                    let _ = ready_tx.send(());
+                                }
+                            }
                             let telemetry_elapsed = last_telemetry_report.elapsed();
                             if telemetry_elapsed >= Duration::from_secs(1) {
                                 tracing::debug!(

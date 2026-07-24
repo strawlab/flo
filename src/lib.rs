@@ -1844,6 +1844,17 @@ async fn app_main(
         tracing::error!("PWM output enabled, but no PWM serial device specified");
     }
 
+    // Embedded camera acquisition can be a substantial startup workload. Let
+    // a SimpleBGC controller establish a short, valid telemetry stream first
+    // so flo-strand-cam has the same quiet gimbal startup that legacy FLO has.
+    let (mut gimbal_ready_tx, mut gimbal_ready_rx) =
+        if options.camera_host.is_some() && device_config.gimbal_config.is_some() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
     // Launch task to run serial IO for rpi pico pantilt PWM motors
     let mut motor_task_join_handle = if let Some(pwm_serial) = cli.pwm_serial {
         my_state.motor_type = MotorType::PwmServo;
@@ -1925,7 +1936,14 @@ async fn app_main(
         let flo_saver_tx = flo_saver_tx.clone();
         let motors_rx = motors_rx.clone();
         handle.spawn(async move {
-            sbgc_gimbal::run_gimbal_loop(motors_rx, motor_position_tx, flo_saver_tx, cfg).await
+            sbgc_gimbal::run_gimbal_loop(
+                motors_rx,
+                motor_position_tx,
+                flo_saver_tx,
+                cfg,
+                gimbal_ready_tx.take(),
+            )
+            .await
         })
     } else {
         tracing::warn!("No motor control method specified.");
@@ -1998,15 +2016,38 @@ async fn app_main(
     // host such as flo-strand-cam owns the Strand Camera servers themselves;
     // the proxy setup retries until each server has bound its listener.
     let mut camera_host_task = match camera_host {
-        Some(host) => Some(
-            host.spawn(CameraHostContext {
-                centroid_tx: centroid_tx.clone(),
-                processing_feedback: processing_feedback_rx.clone(),
-                shutdown_rx: subsystem_shutdown_rx.clone(),
-                data_dir,
-            })
-            .with_context(|| "spawning camera host")?,
-        ),
+        Some(host) => {
+            if let Some(gimbal_ready_rx) = gimbal_ready_rx.take() {
+                const GIMBAL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+                match tokio::time::timeout(GIMBAL_READY_TIMEOUT, gimbal_ready_rx).await {
+                    Ok(Ok(())) => {
+                        tracing::info!(
+                            "starting embedded camera host after stable SimpleBGC telemetry"
+                        );
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!(
+                            "SimpleBGC task ended before reporting stable telemetry; starting embedded camera host"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            ?GIMBAL_READY_TIMEOUT,
+                            "SimpleBGC telemetry did not stabilize before deadline; starting embedded camera host"
+                        );
+                    }
+                }
+            }
+            Some(
+                host.spawn(CameraHostContext {
+                    centroid_tx: centroid_tx.clone(),
+                    processing_feedback: processing_feedback_rx.clone(),
+                    shutdown_rx: subsystem_shutdown_rx.clone(),
+                    data_dir,
+                })
+                .with_context(|| "spawning camera host")?,
+            )
+        }
         None => None,
     };
 
