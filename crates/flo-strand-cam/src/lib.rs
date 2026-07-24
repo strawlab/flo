@@ -74,6 +74,8 @@ struct RawCameraConfig {
     #[serde(default)]
     mp4_codec: Option<CodecSelectionConfig>,
     imops: ImOpsConfig,
+    #[serde(default)]
+    force_camera_sync_mode: Option<bool>,
 }
 
 impl RawCameraConfig {
@@ -88,6 +90,7 @@ impl RawCameraConfig {
             mp4_max_framerate: self.mp4_max_framerate,
             mp4_codec: self.mp4_codec.map(Into::into),
             imops: self.imops,
+            force_camera_sync_mode: self.force_camera_sync_mode,
         }
     }
 }
@@ -169,6 +172,7 @@ struct CameraConfig {
     mp4_max_framerate: Option<RecordingFrameRate>,
     mp4_codec: Option<CodecSelection>,
     imops: ImOpsConfig,
+    force_camera_sync_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -821,6 +825,7 @@ fn strand_args(config: &CameraConfig, data_dir: std::path::PathBuf) -> StrandCam
     args.standalone_or_braid = StandaloneOrBraid::Standalone(StandaloneArgs {
         camera_name: Some(config.camera_name.clone()),
         http_server_addr: Some(config.http_address.clone()),
+        force_camera_sync_mode: config.force_camera_sync_mode.unwrap_or(false),
         ..Default::default()
     });
     args.data_dir = Some(data_dir);
@@ -1200,6 +1205,7 @@ mod tests {
                         center_x: 1,
                         center_y: 1,
                     },
+                    force_camera_sync_mode: None,
                 },
                 detection_tx,
                 cam_args_tx,
