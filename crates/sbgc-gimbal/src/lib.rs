@@ -4,7 +4,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
 };
 use simplebgc::{IncomingCommand, OutgoingCommand, ParamsQuery, Payload, RollPitchYaw, V2Codec};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tokio_util::codec::Framed;
 
@@ -28,6 +28,8 @@ async fn initialize_gimbals(
     mut messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
     mut messages_rx: SplitStream<Framed<SerialStream, V2Codec>>,
 ) -> Result<InitializationResult> {
+    let initialization_started = Instant::now();
+    tracing::debug!("starting SimpleBGC initialization");
     {
         //send control config (to disable confirmation responses)
         let ax_cfg = simplebgc::AxisControlConfigParams {
@@ -65,6 +67,7 @@ async fn initialize_gimbals(
             profile_id: 0,
         }))
         .await?;
+    tracing::debug!("requested SimpleBGC encoder offsets");
 
     let mut results;
     loop {
@@ -80,6 +83,10 @@ async fn initialize_gimbals(
                     cmd.encoder_offset.roll,
                 );
                 tracing::info!("gimbal encoder offsets (raw) y-p-r: {y}, {p}, {r}");
+                tracing::debug!(
+                    elapsed = ?initialization_started.elapsed(),
+                    "received SimpleBGC encoder offsets"
+                );
                 let offset_yaw = (cmd.encoder_offset.yaw as f64) / ((1 << 14) as f64);
                 let offset_pitch = (cmd.encoder_offset.pitch as f64) / ((1 << 14) as f64);
 
@@ -114,6 +121,7 @@ async fn initialize_gimbals(
             }))
             .await
             .unwrap();
+        tracing::debug!("requested SimpleBGC realtime encoder stream");
     }
     Ok(results)
 }
@@ -206,6 +214,8 @@ async fn run_gimbal_loop_internal(
 
     //loop for encoder readout
     let rx_loop = async {
+        let mut telemetry_count = 0_u64;
+        let mut last_telemetry_report = Instant::now();
         let mut last_imu_angles = RollPitchYaw::<FloatType> {
             roll: 0.0,
             pitch: 0.0,
@@ -222,6 +232,18 @@ async fn run_gimbal_loop_internal(
                 IncomingCommand::RawMessage(msg) => {
                     match msg.typ {
                         simplebgc::constants::CMD_REALTIME_DATA_CUSTOM => {
+                            telemetry_count += 1;
+                            let telemetry_elapsed = last_telemetry_report.elapsed();
+                            if telemetry_elapsed >= Duration::from_secs(1) {
+                                tracing::debug!(
+                                    telemetry_count,
+                                    telemetry_hz =
+                                        telemetry_count as f64 / telemetry_elapsed.as_secs_f64(),
+                                    "SimpleBGC realtime telemetry receive rate"
+                                );
+                                telemetry_count = 0;
+                                last_telemetry_report = Instant::now();
+                            }
                             let msg_data: custom_messages::RealTimeDataCustomFlo =
                                 Payload::from_bytes(msg.payload).unwrap();
 
@@ -346,6 +368,8 @@ async fn run_gimbal_loop_internal(
         };
 
         let mut last_mode = (MotorDriveMode::Position, true);
+        let mut control_count = 0_u64;
+        let mut last_control_report = Instant::now();
 
         loop {
             let current_motors = {
@@ -445,6 +469,24 @@ async fn run_gimbal_loop_internal(
                         }))
                         .await?;
                 }
+            }
+
+            control_count += 1;
+            let control_elapsed = last_control_report.elapsed();
+            if control_elapsed >= Duration::from_secs(1) {
+                tracing::debug!(
+                    control_count,
+                    control_hz = control_count as f64 / control_elapsed.as_secs_f64(),
+                    drive_mode = ?current_motors.drivemode,
+                    relative_frame = current_motors.rel_frame,
+                    pan_target_radians = current_motors.pan.0,
+                    tilt_target_radians = current_motors.tilt.0,
+                    pan_speed_radians_per_second = current_motors.vpan,
+                    tilt_speed_radians_per_second = current_motors.vtilt,
+                    "SimpleBGC control command transmit rate and latest target"
+                );
+                control_count = 0;
+                last_control_report = Instant::now();
             }
 
             //limit the rate of sending the commands.
