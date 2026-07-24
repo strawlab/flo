@@ -19,8 +19,7 @@ use flo_core::{
 pub(crate) mod custom_messages;
 
 const BAUD_RATE: u32 = 115_200;
-/// A short stream warm-up used before sending the first control command or
-/// starting heavyweight in-process camera acquisition.
+/// A short stream warm-up used before sending the first control command.
 const STREAM_WARMUP_PACKETS: u64 = 100;
 const STREAM_WARMUP_SETTLE_DURATION: Duration = Duration::from_millis(250);
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
@@ -163,11 +162,7 @@ pub async fn run_gimbal_loop(
     motor_position_tx: tokio::sync::mpsc::Sender<MotorPositionResult>,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     cfg: GimbalConfig,
-    ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Result<()> {
-    // Keep the sender across reconnect attempts. A caller only needs one
-    // notification, after which the slot is empty.
-    let ready_tx = Arc::new(Mutex::new(ready_tx));
     // Loop forever in case of timeout on gimbals.
     loop {
         // Initialize serial port.
@@ -193,7 +188,6 @@ pub async fn run_gimbal_loop(
             motor_position_tx.clone(),
             floz_logger.clone(),
             cfg.clone(),
-            ready_tx.clone(),
             stream_warmed_up_tx,
             stream_warmed_up_rx,
         )
@@ -219,7 +213,6 @@ async fn run_gimbal_loop_internal(
     motor_position_tx: tokio::sync::mpsc::Sender<MotorPositionResult>,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     cfg: GimbalConfig,
-    ready_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     stream_warmed_up_tx: tokio::sync::watch::Sender<bool>,
     mut stream_warmed_up_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), InternalGimbalError> {
@@ -317,17 +310,10 @@ async fn run_gimbal_loop_internal(
                             telemetry_since_stream_start += 1;
                             if telemetry_since_stream_start == STREAM_WARMUP_PACKETS {
                                 stream_warmed_up_tx.send_replace(true);
-                                if let Some(ready_tx) = ready_tx
-                                    .lock()
-                                    .expect("gimbal readiness mutex is not poisoned")
-                                    .take()
-                                {
-                                    tracing::info!(
-                                        telemetry_since_stream_start,
-                                        "SimpleBGC realtime stream warm-up complete"
-                                    );
-                                    let _ = ready_tx.send(());
-                                }
+                                tracing::info!(
+                                    telemetry_since_stream_start,
+                                    "SimpleBGC realtime stream warm-up complete"
+                                );
                             }
                             let telemetry_elapsed = last_telemetry_report.elapsed();
                             if telemetry_elapsed >= Duration::from_secs(1) {
