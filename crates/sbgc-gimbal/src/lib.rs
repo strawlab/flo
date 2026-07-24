@@ -160,6 +160,7 @@ pub async fn run_gimbal_loop(
     // Loop forever in case of timeout on gimbals.
     loop {
         // Initialize serial port.
+        tracing::debug!("Initializing port \"{}\", {BAUD_RATE} baud", cfg.port_path);
         let serial_device = tokio_serial::new(&cfg.port_path, BAUD_RATE)
             .open_native_async()
             .with_context(|| format!("Failed to open Gimbal serial device {}", cfg.port_path))?;
