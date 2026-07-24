@@ -23,6 +23,12 @@ const BAUD_RATE: u32 = 115_200;
 /// starting heavyweight in-process camera acquisition.
 const STREAM_WARMUP_PACKETS: u64 = 100;
 const STREAM_WARMUP_SETTLE_DURATION: Duration = Duration::from_millis(250);
+const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const LIVENESS_STALL_THRESHOLD: Duration = Duration::from_millis(500);
+
+fn liveness_debug_enabled() -> bool {
+    std::env::var_os("FLO_GIMBAL_LIVENESS_DEBUG").is_some()
+}
 
 struct InitializationResult {
     messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
@@ -237,6 +243,44 @@ async fn run_gimbal_loop_internal(
         ))
         .map_err(wrap)?;
 
+    // The optional monitor distinguishes serial-reader inactivity from a
+    // runtime-wide scheduling stall. It is intentionally opt-in because it
+    // adds a periodic task solely for diagnostics.
+    let reader_last_progress = Arc::new(Mutex::new(Instant::now()));
+    let liveness_monitor = liveness_debug_enabled().then(|| {
+        let reader_last_progress = reader_last_progress.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(LIVENESS_CHECK_INTERVAL);
+            let mut last_tick = Instant::now();
+            let mut reader_stall_reported = false;
+            loop {
+                ticker.tick().await;
+                let scheduler_gap = last_tick.elapsed();
+                last_tick = Instant::now();
+                if scheduler_gap > LIVENESS_STALL_THRESHOLD {
+                    tracing::warn!(
+                        ?scheduler_gap,
+                        "SimpleBGC liveness monitor was delayed; Tokio runtime may be stalled"
+                    );
+                }
+
+                let reader_idle = reader_last_progress
+                    .lock()
+                    .expect("gimbal liveness mutex is not poisoned")
+                    .elapsed();
+                if reader_idle > LIVENESS_STALL_THRESHOLD && !reader_stall_reported {
+                    tracing::warn!(
+                        ?reader_idle,
+                        "SimpleBGC reader has not decoded a message while liveness monitor is running"
+                    );
+                    reader_stall_reported = true;
+                } else if reader_idle <= LIVENESS_STALL_THRESHOLD {
+                    reader_stall_reported = false;
+                }
+            }
+        })
+    });
+
     //loop for encoder readout
     let rx_loop = async {
         let mut telemetry_count = 0_u64;
@@ -254,6 +298,9 @@ async fn run_gimbal_loop_internal(
                 .map_err(|_| InternalGimbalError::RxTimeout)?
                 .unwrap()
                 .map_err(wrap)?;
+            *reader_last_progress
+                .lock()
+                .expect("gimbal liveness mutex is not poisoned") = Instant::now();
             let local = chrono::Local::now();
             match msg {
                 IncomingCommand::RawMessage(msg) => {
@@ -580,14 +627,21 @@ async fn run_gimbal_loop_internal(
     tokio::pin!(control_loop);
 
     // Futures should run forever, but if one ends it is an error and we should raise it.
-    tokio::select! {
+    let loop_result = tokio::select! {
         rx_result = &mut rx_loop => {
-            rx_result?;
+            rx_result
         }
         control_result = &mut control_loop => {
-            control_result.map_err(|report| InternalGimbalError::Wrapped{report})?;
+            control_result.map_err(|report| InternalGimbalError::Wrapped{report})
         }
+    };
+
+    if let Some(liveness_monitor) = liveness_monitor {
+        liveness_monitor.abort();
+        let _ = liveness_monitor.await;
     }
+
+    loop_result?;
 
     Ok(())
 }
