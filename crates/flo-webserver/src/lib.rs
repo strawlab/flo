@@ -259,6 +259,7 @@ struct AppState {
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
 }
 
+#[expect(dead_code)]
 fn display_qr_url(url: &str) {
     use qrcodegen::{QrCode, QrCodeEcc};
     use std::io::stdout;
