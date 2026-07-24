@@ -447,8 +447,8 @@ pub async fn start_listener(
         tracing::info!("FLO listener at {listener_local_addr}, predicted URL: {url}");
 
         if !is_loopback_uri(&url) {
-            println!("QR code for {url}");
-            display_qr_url(&format!("{url}"));
+            // println!("QR code for {url}");
+            // display_qr_url(&format!("{url}"));
         }
     }
 
