@@ -29,6 +29,9 @@ strand-bui-backend-session-types.workspace = true
 flo-core.workspace = true
 futures.workspace = true
 
+[build-dependencies]
+build-util.workspace = true
+
 [dev-dependencies]
 cookie_store = "0.21.0"
 

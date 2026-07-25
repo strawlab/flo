@@ -193,6 +193,7 @@ tokio-mavlink = { path = "crates/tokio-mavlink" }
 
 ads-webasm = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+build-util = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 ci2 = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 ci2-async = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 ci2-pylon = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
