@@ -47,7 +47,7 @@ fn test_writer_task_creates_floz_on_toggle_off() -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let config = FloControllerConfig::default();
     let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
-    let handle = std::thread::spawn(move || writer_task_main(rx, &config, buffered_secs_tx));
+    let handle = std::thread::spawn(move || writer_task_main(rx, &config, None, buffered_secs_tx));
 
     let creation_time = chrono::FixedOffset::east_opt(0)
         .expect("valid fixed offset")
@@ -85,6 +85,54 @@ fn test_writer_task_creates_floz_on_toggle_off() -> Result<()> {
 }
 
 #[test]
+fn test_raw_config_source_is_saved_verbatim() -> Result<()> {
+    use chrono::TimeZone;
+    use std::io::Read as _;
+
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let raw_config_source = "geometry: MovingCamera\nflo-strand-cam:\n  camera_name: cam1\n";
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, Some(raw_config_source), buffered_secs_tx)
+    });
+
+    let creation_time = chrono::FixedOffset::east_opt(0)
+        .expect("valid fixed offset")
+        .with_ymd_and_hms(2026, 5, 28, 12, 0, 0)
+        .single()
+        .expect("valid datetime");
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        creation_time.into(),
+        output_dir.clone(),
+        false,
+    ))))?;
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+
+    handle.join().expect("writer thread panicked")?;
+
+    let floz_path = output_dir.with_extension("floz");
+    let fd = std::fs::File::open(&floz_path)?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(fd))?;
+    let mut saved = String::new();
+    archive
+        .by_name(FLO_CONFIG_SOURCE_FNAME)?
+        .read_to_string(&mut saved)?;
+
+    assert_eq!(saved, raw_config_source);
+
+    Ok(())
+}
+
+#[test]
 fn test_precapture_buffer_is_written_to_recording() -> Result<()> {
     // Data sent *before* recording starts, while a pre-capture window is set,
     // must end up in the recording (the "time travel" capture).
@@ -95,7 +143,7 @@ fn test_precapture_buffer_is_written_to_recording() -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let config = FloControllerConfig::default();
     let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
-    let handle = std::thread::spawn(move || writer_task_main(rx, &config, buffered_secs_tx));
+    let handle = std::thread::spawn(move || writer_task_main(rx, &config, None, buffered_secs_tx));
 
     // Enable a generous pre-capture window, then send a centroid while NOT
     // recording. It should be buffered in RAM.
@@ -156,7 +204,7 @@ fn test_normal_recording_excludes_precapture_buffer() -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let config = FloControllerConfig::default();
     let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
-    let handle = std::thread::spawn(move || writer_task_main(rx, &config, buffered_secs_tx));
+    let handle = std::thread::spawn(move || writer_task_main(rx, &config, None, buffered_secs_tx));
 
     tx.send(SaveToDiskMsg::SetPreCaptureSeconds(60.0))?;
     let buffered_centroid = MomentCentroid {
@@ -257,6 +305,7 @@ impl Drop for WriteCloser {
 pub(crate) fn writer_task_main(
     mut flo_write_rx: tokio::sync::mpsc::UnboundedReceiver<SaveToDiskMsg>,
     config: &FloControllerConfig,
+    raw_config_source: Option<&str>,
     buffered_secs_tx: tokio::sync::watch::Sender<f64>,
 ) -> Result<()> {
     use SaveToDiskMsg::*;
@@ -298,6 +347,7 @@ pub(crate) fn writer_task_main(
                             output_dirname,
                             encoder_offsets.as_ref(),
                             config,
+                            raw_config_source,
                         )?;
                         // For a pre-capture ("post-trigger") recording, flush
                         // the buffered window into the new recording first so
@@ -437,6 +487,7 @@ fn secs_between(
 }
 
 const README_MD_FNAME: &str = "README.md";
+const FLO_CONFIG_SOURCE_FNAME: &str = "flo-config-source.yaml";
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 struct FloMetadata {
@@ -504,6 +555,10 @@ The archive typically contains:
   timezone).
 - `flo-config.yaml` — the FLO controller configuration in effect for this
   recording (geometry, Kalman filter and PID gains, calibration functions).
+- `flo-config-source.yaml` — the verbatim configuration file supplied by the
+  operator (via `--config`), if any. This may include sections not reflected
+  in `flo-config.yaml`, such as a composition binary's own settings (e.g.
+  `flo-strand-cam:`).
 - `tracking_state.csv` — per-update tracking estimates and motor commands
   (estimated and observed pan/tilt/distance, motor commands, predictions).
 - `centroid.csv` — subject image coordinates received from the camera.
@@ -526,6 +581,7 @@ impl WritingState {
         output_dirname: camino::Utf8PathBuf,
         encoder_offsets: Option<&GimbalEncoderOffsets>,
         config: &FloControllerConfig,
+        raw_config_source: Option<&str>,
     ) -> Result<Self> {
         let creation_time = creation_time_local.with_timezone(creation_time_local.offset());
         let git_revision = env!("GIT_HASH").to_string();
@@ -568,6 +624,17 @@ impl WritingState {
 
             let mut fd = std::fs::File::create(flo_config_path)?;
             fd.write_all(config_buf.as_bytes())?;
+        }
+
+        if let Some(raw_config_source) = raw_config_source {
+            // Preserve the operator-supplied configuration file verbatim,
+            // including any sections (e.g. `flo-strand-cam:`) that are not
+            // part of `FloControllerConfig` and are therefore absent from
+            // `flo-config.yaml` above.
+            let flo_config_source_path = output_dirname.join(FLO_CONFIG_SOURCE_FNAME);
+
+            let mut fd = std::fs::File::create(flo_config_source_path)?;
+            fd.write_all(raw_config_source.as_bytes())?;
         }
 
         let centroid_wtr = {

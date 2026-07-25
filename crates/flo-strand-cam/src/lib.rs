@@ -850,11 +850,14 @@ fn config_path_from_args(args: &[OsString]) -> Result<PathBuf> {
     ))
 }
 
-fn load_composed_config(path: &Path) -> Result<(CameraHostConfig, flo_core::FloControllerConfig)> {
+fn load_composed_config(
+    path: &Path,
+) -> Result<(CameraHostConfig, flo_core::FloControllerConfig, String)> {
     let yaml = std::fs::read_to_string(path)
         .with_context(|| format!("opening configuration file {}", path.display()))?;
-    parse_composed_config(&yaml)
-        .with_context(|| format!("parsing YAML in configuration file {}", path.display()))
+    let (camera_host, flo_config) = parse_composed_config(&yaml)
+        .with_context(|| format!("parsing YAML in configuration file {}", path.display()))?;
+    Ok((camera_host, flo_config, yaml))
 }
 
 fn parse_composed_config(yaml: &str) -> Result<(CameraHostConfig, flo_core::FloControllerConfig)> {
@@ -894,8 +897,13 @@ where
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     let config_path = config_path_from_args(&args)?;
-    let (config, flo_config) = load_composed_config(&config_path)?;
-    flo::run_with_args_and_config(compose_options(options, config)?, args, flo_config)
+    let (config, flo_config, raw_config_source) = load_composed_config(&config_path)?;
+    flo::run_with_args_and_config(
+        compose_options(options, config)?,
+        args,
+        flo_config,
+        Some(raw_config_source),
+    )
 }
 
 fn compose_options(
