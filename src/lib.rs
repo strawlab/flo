@@ -1414,7 +1414,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    run_with_args_inner(options, args, None)
+    run_with_args_inner(options, args, None, None)
 }
 
 /// Run FLO using explicit command-line arguments and an already parsed
@@ -1423,22 +1423,30 @@ where
 /// This is intended for composition binaries that own configuration parsing
 /// (for example, a camera host with its own settings). If `args` includes
 /// `--config`, the supplied configuration takes precedence.
+///
+/// `raw_config_source`, if given, is the verbatim text of the configuration
+/// file the caller parsed `config` from (including any sections, such as
+/// `flo-strand-cam:`, that are not part of `FloControllerConfig` itself). It
+/// is recorded alongside the effective configuration in saved `.floz` files
+/// so no part of the original configuration is lost.
 pub fn run_with_args_and_config<I, T>(
     options: AppOptions,
     args: I,
     config: FloControllerConfig,
+    raw_config_source: Option<String>,
 ) -> Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    run_with_args_inner(options, args, Some(config))
+    run_with_args_inner(options, args, Some(config), raw_config_source)
 }
 
 fn run_with_args_inner<I, T>(
     options: AppOptions,
     args: I,
     supplied_config: Option<FloControllerConfig>,
+    mut raw_config_source: Option<String>,
 ) -> Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -1497,6 +1505,7 @@ where
                 log::info!("Reading initial device config from: {device_config_fname}");
                 let cfg_buf = std::fs::read_to_string(device_config_fname)
                     .with_context(|| format!("opening file {device_config_fname}"))?;
+                raw_config_source = Some(cfg_buf.clone());
 
                 // Parse the YAML but raise on unknown fields, respecting extensions.
                 let raw_cfg = serde_yaml::from_str(&cfg_buf)
@@ -1629,6 +1638,7 @@ where
         cli,
         my_state,
         device_config,
+        raw_config_source,
         shutdown_rx,
         &data_dir,
         mavlink_port,
@@ -1646,10 +1656,12 @@ where
 }
 
 /// Create the tokio Runtime and call the main app loop.
+#[expect(clippy::too_many_arguments)]
 fn run_tokio_main(
     cli: Cli,
     my_state: DeviceState,
     device_config: FloControllerConfig,
+    raw_config_source: Option<String>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     data_dir: &camino::Utf8Path,
     mavlink_port: Option<flo_mavlink::MavlinkPort>,
@@ -1672,6 +1684,7 @@ fn run_tokio_main(
             cli,
             my_state,
             device_config,
+            raw_config_source,
             shutdown_rx,
             data_dir,
             mavlink_port,
@@ -1687,6 +1700,7 @@ async fn app_main(
     cli: Cli,
     mut my_state: DeviceState,
     mut device_config: FloControllerConfig,
+    raw_config_source: Option<String>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     data_dir: &camino::Utf8Path,
     mavlink_port: Option<flo_mavlink::MavlinkPort>,
@@ -1836,8 +1850,14 @@ async fn app_main(
     let mut saver_handle = {
         // Spawn task for saving data to disk
         let device_config = device_config.clone();
+        let raw_config_source = raw_config_source.clone();
         handle.spawn_blocking(move || {
-            writing_state::writer_task_main(flo_saver_rx, &device_config, precapture_buffered_tx)
+            writing_state::writer_task_main(
+                flo_saver_rx,
+                &device_config,
+                raw_config_source.as_deref(),
+                precapture_buffered_tx,
+            )
         })
     };
 
