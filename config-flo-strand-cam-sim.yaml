@@ -1,0 +1,73 @@
+# Headless development configuration for flo-strand-cam with ci2-sim.
+# Set STRAND_CAM_SIM_SPEC to select the ci2-sim scenario.
+geometry: MovingCamera
+pwm_output_enabled: false
+kalman_filter_parameters:
+  motion_noise: 1000.0
+  observation_noise: 0.0001
+control_loop_timestep_secs: 0.001
+kp_pan_angle: 0.0
+kp_tilt_angle: 0.0
+ki_pan_angle: 0.0
+ki_tilt_angle: 0.0
+centroid_to_sensor_x_angle_func:
+  dx_gain: 0.00035
+  dy_gain: 0.0
+  offset: 0.0
+centroid_to_sensor_y_angle_func:
+  dx_gain: 0.0
+  dy_gain: -0.00035
+  offset: 0.0
+pan_motor_config:
+  endpoint_low: -1.5708
+  endpoint_high: 1.5708
+  neutral_position: 0.0
+tilt_motor_config:
+  endpoint_low: -0.7854
+  endpoint_high: 0.5
+  neutral_position: 0.0
+tracking_thresholds:
+  msecs_to_suspend: 1000
+  msecs_to_acquire_lock: 30000
+motor_timeconstant_secs: 0.001
+flo-strand-cam:
+  main:
+    backend: sim
+    camera_name: simcam0
+    http_address: 127.0.0.1:3440
+    expected_fps: 60.0
+    mp4_max_framerate: Fps60
+    mp4_codec:
+      Ffmpeg:
+        device_args:
+          - ["-vaapi_device", "/dev/dri/renderD128"]
+        pre_codec_args:
+          - ["-vf", "format=nv12,hwupload"]
+        codec: h264_vaapi
+        post_codec_args: null
+        pixfmt: null
+    imops:
+      enabled: true
+      threshold: 100
+      center_x: 320
+      center_y: 256
+  secondary:
+    backend: sim
+    camera_name: simcam1
+    http_address: 127.0.0.1:3441
+    expected_fps: 60.0
+    mp4_max_framerate: Fps60
+    mp4_codec:
+      Ffmpeg:
+        device_args:
+          - ["-vaapi_device", "/dev/dri/renderD128"]
+        pre_codec_args:
+          - ["-vf", "format=nv12,hwupload"]
+        codec: h264_vaapi
+        post_codec_args: null
+        pixfmt: null
+    imops:
+      enabled: true
+      threshold: 100
+      center_x: 320
+      center_y: 256

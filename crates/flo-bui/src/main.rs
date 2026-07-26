@@ -404,6 +404,10 @@ impl Component for App {
                     { self.info_div() }
                 </div>
                 <div class="border-1px">
+                    <h2>{"Cameras"}</h2>
+                    { self.camera_links() }
+                </div>
+                <div class="border-1px">
                     <h2>{"Home Position"}</h2>
                     <div class="my-padding">
                         <label>{"PAN (degrees)"}
@@ -489,6 +493,31 @@ impl Component for App {
 }
 
 impl App {
+    fn camera_links(&self) -> Html {
+        if self.strand_cameras.is_empty() {
+            return html! { <p>{"No cameras configured."}</p> };
+        }
+
+        fn role_str(role: &StrandCamRole) -> &'static str {
+            match role {
+                StrandCamRole::Main => " (Main)",
+                StrandCamRole::Secondary => " (Secondary)",
+            }
+        }
+
+        html! {
+            <ul>
+                { for self.strand_cameras.iter().map(|camera| {
+                    html! {
+                        <li key={camera.name.clone()}>
+                            <a href={camera.proxy_prefix.clone()}>{&camera.name}</a> {role_str(&camera.role)}
+                        </li>
+                    }
+                }) }
+            </ul>
+        }
+    }
+
     /// Pre-capture ("post-trigger") controls. Setting the window above zero
     /// makes the writer continuously buffer recent data in RAM. The separate
     /// "Post-trigger record" button starts a recording that begins with that

@@ -15,10 +15,14 @@ Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor V
 
 ## What is in this repository
 
-This repository contains the source code for the primary FLO executable, called
-`flo`. `flo` is written in the Rust language. `flo` receives image coordinates
-from Strand Cam `imops` and controls motors. This is the main, high-level FLO
-program.
+This repository contains two FLO application binaries. The standalone `flo`
+binary supports the legacy split-process deployment: it runs tracking and motor
+control, while Strand Camera must be launched separately to acquire and process
+images and send observations to `flo` over the network. The integrated
+`flo-strand-cam` binary is the preferred deployment for this repository. It
+brings the same FLO application together with Strand Camera acquisition and the
+experimental ImOps detector in one process, with image observations traveling
+through bounded Rust channels rather than a network socket.
 
 While FLO was originally designed as a generic camera tracking system for all
 FLO variants, it has over time accumulated substantial specialized code for
@@ -36,38 +40,25 @@ remain fully supported.
 - https://github.com/strawlab/red-button-trigger-timestamp hardware to record
   times of external trigger events.
 
-## Overview of multiple pieces when using PWM servo motors
+## Overview when using PWM servo motors
 
-This diagram shows the various software pieces, and the means with which they
-communicate with each other, when using the
+This diagram shows the main pieces when using the
 [Mini-FLO](https://github.com/strawlab/flo-hardware?tab=readme-ov-file#mini-flo)
- variant. In Mini-FLO, the `rpipico-pantilt` software running on a Raspberry Pi
+variant. In Mini-FLO, the `rpipico-pantilt` software running on a Raspberry Pi
 Pico board controls PWM servo motors. Other variants trade `rpipico-pantilt` and
 the PWM servo motors for other types of motors, such as Trinamic stepper motors
-or SimpleBGC gimbal motors. Strand Camera is available
-[here](https://strawlab.org/strand-cam/).
+or SimpleBGC gimbal motors.
 
 ```
-+-------------+
-|             |         HTTP
-|   FLO UI    +<----------------------+
-|    (browser)|                       |
-+-------------+                       |
-                                      v
-+-----------------------+      +-------------+     +-----------------+
-|                       | UDP  |             | USB |                 |
-| Strand Camera `imops` +----->|    flo      +<--->| rpipico-pantilt |
-|                   (PC)|      |         (PC)|     |        (RP Pico)|
-+-----------------------+      +-------------+     +-------+---------+
-            ^                                              |
-            |                                              |
-            |                                              |
-            |                                              v
-       +----+---+                                      +--------+
-       |        |                                      | PWM    |
-       | camera |<-------------------------------------+ servo  |
-       |        |                                      | motors |
-       +--------+                                      +--------+
++-------------+      HTTP      +----------------------+     USB     +-----------------+
+| FLO UI      |<-------------->| flo-strand-cam       |<---------->| rpipico-pantilt |
+| (browser)   |                 |                      |            | (RP Pico)       |
++-------------+                 | camera + ImOps + FLO |            +--------+--------+
+                                | (one process)        |                     |
++-------------+   camera API    |                      |                     v
+| camera(s)   |<--------------->|                      |                 +--------+
++-------------+                 +----------------------+                 | motors |
+                                                                         +--------+
 ```
 
 (Ascii art made with http://asciiflow.com/ )
@@ -80,85 +71,66 @@ or SimpleBGC gimbal motors. Strand Camera is available
 - `firmware/rpipico-pantilt` Firmware for RPi Pico to control PWM servo motors.
 - `src` Rust source code for `flo`
 
-## How to connect to Strand Camera
+## Running with Strand Camera
 
-1. Run strand-cam.
+Add a `flo-strand-cam` section to the normal FLO YAML configuration. `main` is
+required and runs a monocular FLO deployment. Add `secondary` when using the
+stereo calibration and depth estimation: it runs a second embedded Strand
+Camera and a second ImOps detector in the same application. Each configured
+camera needs a unique `camera_name`. Its BUI is mounted below FLO's
+authenticated HTTP server at `/camera/<camera_name>/`; embedded cameras do not
+open separate HTTP listeners.
 
-Specify the networking port using command-line argument: `--http-server-addr
-127.0.0.1:5555` (5555 is the port number).  Specify the camera to use with
-`--camera-name Basler-40522040` (40522040 is the serial number of the camera).
-Thus, your command line would be:
-
-    strand-cam-pylon --http-server-addr 127.0.0.1:5555 --camera-name Basler-40522040
-
-To obtain distance estimates using stereo cameras, it is necessary to run two
-instances of strand-cam, one for the main camera and one for the secondary
-camera. These will have different ports. For example, 5555 for the main camera,
-and 5556 for the secondary camera.
-
-2. Obtain the link for strand-cam.
-
-Strand-cam will dump a lot of info into the terminal. Look for a line like `*
-predicted URL http://127.0.0.1:5555/`.
-
-When running with two cameras, each will have a different link. Keep the
-strand-cam instances running for the next step.
-
-3. Put the link into the FLO config file, and run FLO once.
-
-Look for url fields in the FLO config file:
-```
-  strand_cam_main:
-    url: http://127.0.0.1:5555
-    on_attach_json_commands:
-    - '{"ToCamera":{"SetImOpsCenterX":960}}'
-    - '{"ToCamera":{"SetImOpsCenterY":600}}'
-    - '{"ToCamera":{"SetImOpsThreshold":200}}'
-    - '{"ToCamera":{"ToggleImOpsDetection":true}}'
-    - '{"ToCamera":{"SetMp4MaxFramerate": "Fps60"}}'
-  strand_cam_secondary: # If you have a secondary camera for stereopsis, also use this section
-    url: http://127.0.0.1:5556
-    on_attach_json_commands:
-    - '{"ToCamera":{"SetImOpsCenterX":960}}'
-    - '{"ToCamera":{"SetImOpsCenterY":600}}'
-    - '{"ToCamera":{"SetImOpsThreshold":200}}'
-    - '{"ToCamera":{"ToggleImOpsDetection":true}}'
+```yaml
+flo-strand-cam:
+  main:
+    backend: pylon
+    camera_name: Basler-40522040
+    expected_fps: 60.0
+    mp4_max_framerate: Fps60
+    imops:
+      enabled: true
+      threshold: 200
+      center_x: 960
+      center_y: 600
+  secondary: # omit for monocular tracking
+    backend: pylon
+    camera_name: Basler-40522041
+    imops:
+      enabled: true
+      threshold: 200
+      center_x: 960
+      center_y: 600
 ```
 
-Then run FLO with something like this:
+Then run the composed executable:
 
-    flo --config config-mini.yaml --pwm-serial /dev/ttyACM0
+    flo-strand-cam --config config-mini.yaml --pwm-serial /dev/ttyACM0
 
-Note that in the FLO config file you can configure imops and other aspects of
-strand-cam automatically in the `on_attach_json_commands` section.
-
-For every configured camera with a live HTTP session, FLO also exposes the
-same Braid-compatible reverse-proxy endpoint:
-
-```text
-http://<flo-address>/cam-proxy/<percent-encoded-camera-name>/<camera-path>
-```
-
-The camera name is the authoritative name reported by Strand Camera's
-`/cam-name` endpoint. For example, the proxied camera root for
-`Basler-40522040` is `/cam-proxy/Basler%2D40522040/`. Requests use FLO's own
-browser authentication; FLO supplies its saved Strand Camera session cookie to
-the upstream request.
+Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Camera
+observations and recording controls (including MP4 codec, frame-rate, and
+pre-trigger commands) use bounded in-process channels; the integrated binary
+does not use FLO's legacy UDP centroid listener. Do not configure the legacy
+`strand_cam_main` or `strand_cam_secondary` HTTP client sections in the same
+file. The optional `mp4_codec` accepts Strand Camera's `CodecSelection`; the
+simulated example includes its VAAPI `Ffmpeg` form. See [the crate
+README](crates/flo-strand-cam/README.md) and
+[`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
 ## Running without hardware (simulation / testing)
 
 You can run the full `flo` controller — tracking, Kalman filter, distance
 estimation, recording, and web UI — with no camera or motor hardware attached.
-The `floz-replay` tool feeds centroid data to `flo` over the same UDP channel
-that Strand Camera's `imops` normally uses, so the controller behaves as if a
-camera were present. This is useful for checking that new code runs, runs
-usefully, and that the UI works, before testing on real hardware.
+The `floz-replay` tool feeds centroid data to `flo` over FLO's legacy UDP
+channel, so the controller behaves as if a camera were present. This is useful
+for checking that new code runs, runs usefully, and that the UI works, before
+testing on real hardware.
 
-This always involves **two processes**, and you must **start `flo` first** so it
-is listening on its UDP port. If you start `floz-replay` with nothing listening,
-the send fails immediately with `Sending UDP packet: Connection refused` (the
-operating system reports the unreachable port). That is the cause of a
-connection-refused error from a bare `floz-replay synth ...` command.
+The legacy `floz-replay` CLI uses UDP and therefore involves **two processes**:
+start `flo` first so it is listening on its UDP port. If you start
+`floz-replay` with nothing listening, the send fails immediately with `Sending
+UDP packet: Connection refused` (the operating system reports the unreachable
+port).
 
 1. Start `flo` with a hardware-free config — one with no `strand_cam_*` blocks
    (so nothing connects to Strand Camera) and no motor flags (so motor commands
@@ -205,6 +177,24 @@ connection-refused error from a bare `floz-replay synth ...` command.
    `--primary-cam` / `--secondary-cam` to relabel the recording's camera names
    to the ones the controller expects (e.g. `synth-secondary` to match
    `config-sim-stereo.yaml`).
+
+### In-process replay or synthesis (no UDP listener)
+
+`floz-replay-inprocess` composes the same source with FLO through
+`CentroidInputSender`; it deliberately disables the UDP listener. Source
+arguments come first and normal FLO arguments follow `--`. For now, `synth`
+still takes its calibration config explicitly, so pass the same config on both
+sides:
+
+```
+cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
+  synth --config config-sim-stereo.yaml --duration 30 -- \
+  --config config-sim-stereo.yaml
+```
+
+For a recording, replace the source portion with `replay recording.floz`.
+The original `floz-replay` commands remain available as compatibility UDP
+adapters while integrations migrate to the in-process input.
 
 ## `camshow` binary
 
