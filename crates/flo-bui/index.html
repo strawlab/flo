@@ -41,15 +41,6 @@
         }
     </script>
 
-    <!-- Note the usage of `type=module` here as this is an ES6 module -->
-    <script type="module">
-        // https://rustwasm.github.io/docs/wasm-bindgen/examples/without-a-bundler.html
-        import init from './flo_bui.js';
-        async function run() {
-            await init();
-        }
-        run();
-    </script>
     <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z" data-bin="flo-bui" />
 </body>
 

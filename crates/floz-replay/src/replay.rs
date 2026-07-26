@@ -3,7 +3,6 @@
 
 //! `replay` subcommand: re-emit the centroids recorded in a `.floz` file.
 
-use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -69,7 +68,12 @@ fn to_moment_centroid(row: &StampedMomentCentroid, new_cam_name: &str) -> Moment
     }
 }
 
-pub fn run(opt: ReplayArgs) -> Result<()> {
+/// Replay recorded centroids into `send`. The cadence and camera-name mapping
+/// are independent of how observations reach FLO.
+pub fn run_with_sink(
+    opt: &ReplayArgs,
+    mut send: impl FnMut(MomentCentroid) -> Result<()>,
+) -> Result<()> {
     if opt.speed <= 0.0 {
         bail!("--speed must be positive, got {}", opt.speed);
     }
@@ -126,19 +130,16 @@ pub fn run(opt: ReplayArgs) -> Result<()> {
         bail!("No centroids fall within the requested --start/--duration window");
     }
 
-    let socket = crate::synth::connect_udp(&opt.target)?;
-
     let span = scheduled.last().unwrap().0;
     tracing::info!(
-        "Replaying {} centroids ({:.1}s of recording at {}x speed) to {}",
+        "Replaying {} centroids ({:.1}s of recording at {}x speed)",
         scheduled.len(),
         span.as_secs_f64(),
         opt.speed,
-        opt.target,
     );
 
     loop {
-        replay_once(&socket, &scheduled, opt.speed)?;
+        replay_once(&scheduled, opt.speed, &mut send)?;
         if !opt.r#loop {
             break;
         }
@@ -149,12 +150,20 @@ pub fn run(opt: ReplayArgs) -> Result<()> {
     Ok(())
 }
 
+/// Run the legacy UDP transport adapter.
+pub fn run(opt: ReplayArgs) -> Result<()> {
+    let socket = crate::synth::connect_udp(&opt.target)?;
+    run_with_sink(&opt, |centroid| {
+        crate::synth::send_centroid(&socket, &centroid)
+    })
+}
+
 /// Emit every scheduled centroid once, sleeping between sends to reproduce the
 /// recorded cadence divided by `speed`.
 fn replay_once(
-    socket: &UdpSocket,
     scheduled: &[(Duration, MomentCentroid)],
     speed: f64,
+    send: &mut impl FnMut(MomentCentroid) -> Result<()>,
 ) -> Result<()> {
     let wall_start = Instant::now();
     let mut sent = 0usize;
@@ -164,7 +173,7 @@ fn replay_once(
         if target > now {
             std::thread::sleep(target - now);
         }
-        crate::synth::send_centroid(socket, centroid)?;
+        send(centroid.clone())?;
         sent += 1;
     }
     tracing::info!("Sent {sent} centroids.");

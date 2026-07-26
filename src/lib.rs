@@ -44,11 +44,12 @@ use flo_core::{
     Angle, Broadway, CamStaleBitmask, CommandSource, DeviceId, DeviceMode, DeviceState, FloCommand,
     FloControllerConfig, FloEvent, FloatType, FocusMotorType, GimbalConfig, LocalFloState,
     ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType, MotorValueCache, OsdState,
-    PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg, StrandCamConfig, UNICAST_UDP_DEFAULT,
-    UdpMsg, drone_structs::DroneEvent,
+    PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg, StrandCamConfig, StrandCamRole,
+    UNICAST_UDP_DEFAULT, UdpMsg, drone_structs::DroneEvent,
 };
 use tracking::{centroid_to_sensor_angles, compute_motor_output, kalman_step};
 
+mod camera_host;
 mod camshow_client;
 mod codec;
 mod extension;
@@ -63,8 +64,84 @@ mod udp_handling;
 mod writing_state;
 mod zip_dir;
 
+pub use camera_host::{CameraHost, CameraHostContext, CameraRegistration};
 pub use extension::{Extension, ExtensionContext, OsdOverlay};
 pub use osd::DroneStatus;
+
+/// Default number of camera observations retained while the coordinator is
+/// busy. The bounded queue provides backpressure rather than allowing a slow
+/// controller to grow memory without limit.
+pub const DEFAULT_CENTROID_INPUT_CAPACITY: usize = 64;
+
+/// Timestamped FLO state that image-processing integrations can use when
+/// interpreting a frame. This is intentionally a compact application-facing
+/// snapshot rather than a view of the coordinator internals.
+#[derive(Clone, Debug)]
+pub struct ProcessingFeedback {
+    /// Time at which FLO last assembled this snapshot.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Most recently reported motor positions, if any motor backend has
+    /// provided them.
+    pub motor_readout: Option<MotorPositionResult>,
+    /// Most recent command sent to the motor-control watch channel.
+    pub motor_command: MotorValueCache,
+    /// Current tracking mode associated with the command.
+    pub tracking_mode: DeviceMode,
+}
+
+/// Sender for the transport-independent camera-observation input of a FLO
+/// application.
+///
+/// This is handed to extensions in [`ExtensionContext`]. A full queue means
+/// the coordinator cannot keep up; camera integrations should choose and log
+/// their own drop/backpressure policy via [`Self::try_send`].
+#[derive(Clone, Debug)]
+pub struct CentroidInputSender {
+    tx: mpsc::Sender<MomentCentroid>,
+}
+
+impl CentroidInputSender {
+    /// Queue an observation, waiting for coordinator capacity if necessary.
+    pub async fn send(
+        &self,
+        centroid: MomentCentroid,
+    ) -> std::result::Result<(), mpsc::error::SendError<MomentCentroid>> {
+        self.tx.send(centroid).await
+    }
+
+    /// Queue an observation from a blocking producer thread.
+    ///
+    /// This is intended for compatibility sources which reproduce recorded
+    /// wall-clock cadence. New async camera integrations should use
+    /// [`Self::send`] instead.
+    pub fn blocking_send(
+        &self,
+        centroid: MomentCentroid,
+    ) -> std::result::Result<(), mpsc::error::SendError<MomentCentroid>> {
+        self.tx.blocking_send(centroid)
+    }
+
+    /// Attempt to queue an observation without waiting for coordinator
+    /// capacity.
+    pub fn try_send(
+        &self,
+        centroid: MomentCentroid,
+    ) -> std::result::Result<(), mpsc::error::TrySendError<MomentCentroid>> {
+        self.tx.try_send(centroid)
+    }
+
+    /// Returns whether the coordinator receiver has been dropped.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+}
+
+fn centroid_input_channel(
+    capacity: usize,
+) -> (CentroidInputSender, mpsc::Receiver<MomentCentroid>) {
+    let (tx, rx) = mpsc::channel(capacity);
+    (CentroidInputSender { tx }, rx)
+}
 
 const HIGHMAG_VISIBLE_MP4_PATH_TEMPLATE: &str = "highmag%Y%m%d_%H%M%S.%f.mp4";
 const WEBCAM_MP4_PATH_TEMPLATE: &str = "webcam%Y%m%d_%H%M%S.%f.mp4";
@@ -177,11 +254,16 @@ struct FloCoordinator<'a> {
     my_state: flo_core::DeviceState,
     _local_flo_state: flo_core::LocalFloState,
     motors_tx: watch::Sender<MotorValueCache>,
+    processing_feedback_tx: watch::Sender<ProcessingFeedback>,
     audio_stream: Option<&'a rodio::OutputStreamHandle>,
     from_device_http_tx: watch::Sender<DeviceState>,
     broadway: flo_core::Broadway,
     cam_session_main: Option<HttpSession>,
     cam_session_secondary: Option<HttpSession>,
+    cam_control_main: Option<mpsc::Sender<strand_cam_remote_control::CamArg>>,
+    cam_control_secondary: Option<mpsc::Sender<strand_cam_remote_control::CamArg>>,
+    cam_control_main_expected_fps: Option<f64>,
+    cam_control_secondary_expected_fps: Option<f64>,
     camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
     highmag_visible_recorder: Option<h264_recorder::H264Recorder>,
     /// Seconds of data currently held in the writer's pre-capture buffer.
@@ -197,6 +279,7 @@ impl<'a> FloCoordinator<'a> {
         my_state: flo_core::DeviceState,
         _local_flo_state: LocalFloState,
         motors_tx: watch::Sender<MotorValueCache>,
+        processing_feedback_tx: watch::Sender<ProcessingFeedback>,
         audio_stream: Option<&'a rodio::OutputStreamHandle>,
         from_device_http_tx: watch::Sender<DeviceState>,
         broadway: Broadway,
@@ -209,7 +292,15 @@ impl<'a> FloCoordinator<'a> {
             main,
             secondary,
             secondary_cam_name,
+            embedded,
+            ..
         } = strand_cams;
+        let main_embedded = embedded
+            .iter()
+            .find(|camera| camera.role == StrandCamRole::Main);
+        let secondary_embedded = embedded
+            .iter()
+            .find(|camera| camera.role == StrandCamRole::Secondary);
         Self {
             data_dir,
             device_config,
@@ -227,11 +318,17 @@ impl<'a> FloCoordinator<'a> {
             my_state,
             _local_flo_state,
             motors_tx,
+            processing_feedback_tx,
             audio_stream,
             from_device_http_tx,
             broadway,
             cam_session_main: main.map(|cam| cam.session),
             cam_session_secondary: secondary.map(|cam| cam.session),
+            cam_control_main: main_embedded.and_then(|camera| camera.control_tx.clone()),
+            cam_control_secondary: secondary_embedded.and_then(|camera| camera.control_tx.clone()),
+            cam_control_main_expected_fps: main_embedded.and_then(|camera| camera.expected_fps),
+            cam_control_secondary_expected_fps: secondary_embedded
+                .and_then(|camera| camera.expected_fps),
             camshow_recording_tx,
             highmag_visible_recorder: None,
             precapture_buffered_rx,
@@ -245,6 +342,7 @@ impl<'a> FloCoordinator<'a> {
             motor_position.tilt_enc
         );
         self.last_motor_data = Some(motor_position.clone());
+        self.publish_processing_feedback();
         //rec.pan_pos = motor_position.pan_pos;
         //rec.tilt_pos = motor_position.tilt_pos;
         {
@@ -263,45 +361,31 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    fn on_image_centroid(
-        &mut self,
-        udp_msg: std::result::Result<(UdpMsg, std::net::SocketAddr), udp_codec::Error>,
-    ) -> Result<()> {
-        log::trace!("got UDP message {:?}", udp_msg);
-        // This is the path through which centroid data from Strand Camera
-        // arrives.
-        let centroid = match udp_msg {
-            Ok((UdpMsg::Centroid(centroid), _addr)) => {
-                if centroid.schema_version != 2 {
-                    tracing::error!(
-                        "expected centroid schema version 2, found {}",
-                        centroid.schema_version
-                    );
-                    return Ok(());
-                }
+    /// Ingest a camera observation independently of the transport that
+    /// delivered it. UDP is retained as a legacy adapter in
+    /// [`Self::on_udp_message`].
+    fn on_image_centroid(&mut self, centroid: MomentCentroid) -> Result<()> {
+        if centroid.schema_version != 2 {
+            tracing::error!(
+                "expected centroid schema version 2, found {}",
+                centroid.schema_version
+            );
+            return Ok(());
+        }
 
-                if centroid.mu00 != 0.0 {
-                    // Save data if something was detected.
-                    let msg = SaveToDiskMsg::CentroidData((chrono::Local::now(), centroid.clone()));
-                    self.flo_saver_tx.send(msg)?;
-                }
+        if centroid.mu00 != 0.0 {
+            // Save data if something was detected.
+            let msg = SaveToDiskMsg::CentroidData((chrono::Local::now(), centroid.clone()));
+            self.flo_saver_tx.send(msg)?;
+        }
 
-                // Check if we have a second camera but no secondary camera in configuration.
-                self.all_cam_names_ever_seen
-                    .insert(centroid.cam_name.clone());
+        // Check if we have a second camera but no secondary camera in configuration.
+        self.all_cam_names_ever_seen
+            .insert(centroid.cam_name.clone());
 
-                if self.all_cam_names_ever_seen.len() > 1 && self.secondary_cam_name.is_none() {
-                    eyre::bail!(
-                        "More than one camera sending data, but no secondary camera assigned"
-                    );
-                }
-                centroid
-            }
-            Err(e) => {
-                tracing::error!("Error deserializing UDP message: {e}");
-                return Ok(());
-            }
-        };
+        if self.all_cam_names_ever_seen.len() > 1 && self.secondary_cam_name.is_none() {
+            eyre::bail!("More than one camera sending data, but no secondary camera assigned");
+        }
 
         let cam_name = centroid.cam_name.as_str();
         let mut is_secondary = false;
@@ -340,6 +424,22 @@ impl<'a> FloCoordinator<'a> {
         }
 
         Ok(())
+    }
+
+    /// Adapt a decoded legacy UDP datagram into transport-independent
+    /// coordinator input. This keeps standalone FLO and `floz-replay`
+    /// working while integrated camera code uses [`CentroidInputSender`].
+    fn on_udp_message(
+        &mut self,
+        udp_msg: std::result::Result<(UdpMsg, std::net::SocketAddr), udp_codec::Error>,
+    ) -> Result<()> {
+        match udp_msg {
+            Ok((UdpMsg::Centroid(centroid), _addr)) => self.on_image_centroid(centroid),
+            Err(e) => {
+                tracing::error!("Error deserializing UDP message: {e}");
+                Ok(())
+            }
+        }
     }
 
     fn on_fast_tick(&mut self, dt_secs: f64) -> Result<()> {
@@ -450,19 +550,27 @@ impl<'a> FloCoordinator<'a> {
             // handler.
             self.switch_to_mode(next_mode.0, next_mode.1)?;
         }
+        self.publish_processing_feedback();
         Ok(())
+    }
+
+    fn publish_processing_feedback(&self) {
+        self.processing_feedback_tx
+            .send_replace(ProcessingFeedback {
+                updated_at: chrono::Utc::now(),
+                motor_readout: self.last_motor_data.clone(),
+                motor_command: self.tracking_state.compute_motor_cache(),
+                tracking_mode: self.tracking_state.mode,
+            });
     }
 
     fn on_slow_tick(&mut self) -> Result<()> {
         // Every second, echo state to all listeners.
 
-        let is_stale_secondary = if self.cam_session_secondary.is_some() {
-            // If we have a secondary camera, is it stale?
-            is_stale(self.stamp_cam_secondary.as_ref())
-        } else {
-            // We have no secondary camera, so it is not stale.
-            false
-        };
+        let is_stale_secondary = secondary_camera_is_stale(
+            self.secondary_cam_name.as_deref(),
+            self.stamp_cam_secondary.as_ref(),
+        );
         self.my_state.cam_stale = CamStaleBitmask::new(
             is_stale(self.stamp_cam_primary.as_ref()),
             is_stale_secondary,
@@ -582,13 +690,22 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    /// Send a `CamArg` to every connected tracking-camera control session.
+    /// Send a `CamArg` to every tracking camera control endpoint. An embedded
+    /// camera's in-process extension channel replaces its HTTP callback.
     async fn send_cam_arg_to_all(&mut self, arg: strand_cam_remote_control::CamArg) {
-        for sess in [&mut self.cam_session_main, &mut self.cam_session_secondary]
-            .into_iter()
-            .flatten()
-        {
-            post_cam_arg(sess, arg.clone()).await;
+        for (sess, direct_tx) in [
+            (&mut self.cam_session_main, &self.cam_control_main),
+            (&mut self.cam_session_secondary, &self.cam_control_secondary),
+        ] {
+            match camera_command_route(sess.is_some(), direct_tx.is_some()) {
+                Some(CameraCommandRoute::InProcess) => {
+                    send_in_process_cam_arg(direct_tx.as_ref().unwrap(), arg.clone()).await;
+                }
+                Some(CameraCommandRoute::Http) => {
+                    post_cam_arg(sess.as_mut().unwrap(), arg.clone()).await;
+                }
+                None => {}
+            }
         }
     }
 
@@ -599,30 +716,43 @@ impl<'a> FloCoordinator<'a> {
     async fn set_cam_precapture_buffer(&mut self, secs: f64) {
         // Read frame rates up front so the camera config (immutable borrow) and
         // the sessions (mutable borrow) are not borrowed simultaneously.
-        let main_fps = self
-            .device_config
-            .strand_cam_main
-            .as_ref()
-            .and_then(|c| c.expected_fps);
-        let secondary_fps = self
-            .device_config
-            .strand_cam_secondary
-            .as_ref()
-            .and_then(|c| c.expected_fps);
+        let main_fps = self.cam_control_main_expected_fps.or_else(|| {
+            self.device_config
+                .strand_cam_main
+                .as_ref()
+                .and_then(|c| c.expected_fps)
+        });
+        let secondary_fps = self.cam_control_secondary_expected_fps.or_else(|| {
+            self.device_config
+                .strand_cam_secondary
+                .as_ref()
+                .and_then(|c| c.expected_fps)
+        });
 
-        for (sess, fps) in [
-            (&mut self.cam_session_main, main_fps),
-            (&mut self.cam_session_secondary, secondary_fps),
+        for (sess, direct_tx, fps) in [
+            (&mut self.cam_session_main, &self.cam_control_main, main_fps),
+            (
+                &mut self.cam_session_secondary,
+                &self.cam_control_secondary,
+                secondary_fps,
+            ),
         ] {
-            let Some(sess) = sess.as_mut() else { continue };
+            if sess.is_none() && direct_tx.is_none() {
+                continue;
+            }
             match fps {
                 Some(fps) if fps > 0.0 => {
                     let frames = (secs * fps).ceil().max(0.0) as usize;
-                    post_cam_arg(
-                        sess,
-                        strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames),
-                    )
-                    .await;
+                    let arg = strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames);
+                    match camera_command_route(sess.is_some(), direct_tx.is_some()) {
+                        Some(CameraCommandRoute::InProcess) => {
+                            send_in_process_cam_arg(direct_tx.as_ref().unwrap(), arg).await;
+                        }
+                        Some(CameraCommandRoute::Http) => {
+                            post_cam_arg(sess.as_mut().unwrap(), arg).await;
+                        }
+                        None => {}
+                    }
                 }
                 _ => {
                     tracing::warn!(
@@ -836,12 +966,44 @@ impl<'a> FloCoordinator<'a> {
     }
 }
 
+/// The command path for one tracking camera. Embedded camera control takes
+/// precedence over the legacy HTTP callback, even while its HTTP session is
+/// still retained for the browser proxy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CameraCommandRoute {
+    InProcess,
+    Http,
+}
+
+fn camera_command_route(
+    has_http_session: bool,
+    has_in_process_control: bool,
+) -> Option<CameraCommandRoute> {
+    if has_in_process_control {
+        Some(CameraCommandRoute::InProcess)
+    } else if has_http_session {
+        Some(CameraCommandRoute::Http)
+    } else {
+        None
+    }
+}
+
 fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
     if let Some(stamp) = stamp {
         stamp.elapsed() > std::time::Duration::from_secs(1)
     } else {
         true
     }
+}
+
+/// A secondary camera is expected whenever startup configuration assigned one,
+/// irrespective of whether it uses the legacy Strand Cam HTTP control path or
+/// an in-process extension.
+fn secondary_camera_is_stale(
+    secondary_cam_name: Option<&str>,
+    stamp: Option<&std::time::Instant>,
+) -> bool {
+    secondary_cam_name.is_some() && is_stale(stamp)
 }
 
 /// POST a single `CamArg` to a Strand Cam control session. Errors are logged
@@ -855,6 +1017,18 @@ async fn post_cam_arg(sess: &mut HttpSession, arg: strand_cam_remote_control::Ca
         Err(e) => {
             tracing::warn!("Ignoring error sending command to Strand Cam: {e}");
         }
+    }
+}
+
+/// Send a camera command over an in-process extension channel. A closed
+/// receiver means the extension stopped unexpectedly; log it just as a legacy
+/// HTTP control failure is logged and let the controller continue shutting down.
+async fn send_in_process_cam_arg(
+    tx: &mpsc::Sender<strand_cam_remote_control::CamArg>,
+    arg: strand_cam_remote_control::CamArg,
+) {
+    if let Err(error) = tx.send(arg).await {
+        tracing::warn!(%error, "Ignoring error sending command to in-process camera");
     }
 }
 
@@ -956,6 +1130,8 @@ struct InitializedStrandCams {
     main: Option<NamedStrandCamSession>,
     secondary: Option<NamedStrandCamSession>,
     secondary_cam_name: Option<String>,
+    embedded: Vec<CameraRegistration>,
+    embedded_routers: flo_webserver::EmbeddedStrandCamRouters,
 }
 
 impl InitializedStrandCams {
@@ -986,11 +1162,94 @@ impl InitializedStrandCams {
                 .as_ref()
                 .map(|camera| flo_core::StrandCamProxyInfo::new(role, camera.name.clone()))
         })
+        .chain(
+            self.embedded
+                .iter()
+                .map(|camera| flo_core::StrandCamProxyInfo::new(camera.role, camera.name.clone())),
+        )
         .collect()
+    }
+
+    fn embedded_routers(&self) -> flo_webserver::EmbeddedStrandCamRouters {
+        self.embedded_routers.clone()
     }
 }
 
-async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<InitializedStrandCams> {
+/// Validate in-process cameras against the legacy camera configuration and
+/// return the identity used by the coordinator for the secondary camera.
+fn merge_camera_registrations(
+    main_cam_name: Option<&str>,
+    secondary_cam_name: Option<String>,
+    embedded: &[CameraRegistration],
+) -> Result<Option<String>> {
+    let legacy = [
+        (StrandCamRole::Main, main_cam_name),
+        (StrandCamRole::Secondary, secondary_cam_name.as_deref()),
+    ];
+
+    for (index, camera) in embedded.iter().enumerate() {
+        if camera.name.is_empty() {
+            eyre::bail!("embedded {:?} camera has an empty name", camera.role);
+        }
+
+        for (legacy_role, legacy_name) in legacy {
+            let Some(legacy_name) = legacy_name else {
+                continue;
+            };
+            if camera.role == legacy_role {
+                eyre::bail!(
+                    "embedded {:?} camera {:?} conflicts with the legacy {:?} camera {:?}; \
+                     configure each role through either an extension or `strand_cam_*`, not both",
+                    camera.role,
+                    camera.name,
+                    legacy_role,
+                    legacy_name,
+                );
+            }
+            if camera.name == legacy_name {
+                eyre::bail!(
+                    "embedded {:?} camera name {:?} conflicts with legacy {:?} camera; \
+                     camera names must identify exactly one role",
+                    camera.role,
+                    camera.name,
+                    legacy_role,
+                );
+            }
+        }
+
+        for other in &embedded[..index] {
+            if camera.role == other.role {
+                eyre::bail!(
+                    "multiple embedded cameras registered for the {:?} role: {:?} and {:?}",
+                    camera.role,
+                    other.name,
+                    camera.name,
+                );
+            }
+            if camera.name == other.name {
+                eyre::bail!(
+                    "embedded camera name {:?} was registered for both {:?} and {:?}",
+                    camera.name,
+                    other.role,
+                    camera.role,
+                );
+            }
+        }
+    }
+
+    Ok(secondary_cam_name.or_else(|| {
+        embedded
+            .iter()
+            .find(|camera| camera.role == StrandCamRole::Secondary)
+            .map(|camera| camera.name.clone())
+    }))
+}
+
+async fn init_strand_cams(
+    device_config: &FloControllerConfig,
+    mut embedded: Vec<CameraRegistration>,
+    _camera_host_task: Option<&mut JoinHandle<Result<()>>>,
+) -> Result<InitializedStrandCams> {
     // Connect to strand-cam for main and secondary cameras.
     let jar: cookie_store::CookieStore =
         match Preferences::load(&flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY) {
@@ -1019,11 +1278,12 @@ async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<Initial
         device_config
             .strand_cam_secondary
             .as_ref()
-            .map(|cfg| resolve_strand_cam("secondary", cfg, jar)),
+            .map(|cfg| resolve_strand_cam("secondary", cfg, jar.clone())),
     )
     .await
     .transpose()?;
 
+    let main_cam_name = main.as_ref().map(|(_, name)| name.clone());
     let main = main
         .and_then(|(session, name)| session.map(|session| NamedStrandCamSession { name, session }));
     let (secondary, mut secondary_cam_name) = match secondary {
@@ -1060,10 +1320,37 @@ async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<Initial
         }
     }
 
+    let secondary_cam_name =
+        merge_camera_registrations(main_cam_name.as_deref(), secondary_cam_name, &embedded)?;
+
+    let mut embedded_routers = flo_webserver::EmbeddedStrandCamRouters::new();
+    for camera in &mut embedded {
+        let Some(router_rx) = camera.router_rx.take() else {
+            continue;
+        };
+        let router = router_rx.await.map_err(|_| {
+            eyre::eyre!(
+                "embedded Strand Camera {:?} stopped before providing its browser router",
+                camera.name
+            )
+        })?;
+        if embedded_routers
+            .insert(camera.name.clone(), router)
+            .is_some()
+        {
+            eyre::bail!(
+                "multiple embedded Strand Cameras reported the name {:?}",
+                camera.name
+            );
+        }
+    }
+
     Ok(InitializedStrandCams {
         main,
         secondary,
         secondary_cam_name,
+        embedded,
+        embedded_routers,
     })
 }
 
@@ -1082,12 +1369,32 @@ impl BroadwaySend for mpsc::UnboundedSender<SaveToDiskMsg> {
 /// Options used to compose extra subsystems into the flo binary at link time.
 /// The default flo binary passes `AppOptions::default()`; downstream crates
 /// that need to add extensions construct their own `AppOptions`.
-#[derive(Default)]
 pub struct AppOptions {
+    /// First-class in-process owner of camera acquisition. Unlike an
+    /// [`Extension`], a camera host registers camera identities and receives
+    /// camera-specific lifecycle resources.
+    pub camera_host: Option<Box<dyn CameraHost>>,
     /// Long-running subsystems that join the supervisor select loop.
     pub extensions: Vec<Box<dyn Extension>>,
     /// OSD overlays drawn each render tick after the base layer.
     pub osd_overlays: Vec<Box<dyn OsdOverlay + Send + Sync>>,
+    /// Capacity of the bounded in-process centroid input queue.
+    pub centroid_input_capacity: usize,
+    /// Whether to bind the legacy UDP centroid listener. Integrated camera
+    /// applications should disable this and use [`CentroidInputSender`].
+    pub enable_udp_listener: bool,
+}
+
+impl Default for AppOptions {
+    fn default() -> Self {
+        Self {
+            camera_host: None,
+            extensions: Vec::new(),
+            osd_overlays: Vec::new(),
+            centroid_input_capacity: DEFAULT_CENTROID_INPUT_CAPACITY,
+            enable_udp_listener: true,
+        }
+    }
 }
 
 /// Run the flo application.
@@ -1095,6 +1402,48 @@ pub struct AppOptions {
 /// Parses CLI args, loads configuration, sets up logging, and runs the
 /// tokio main loop. Returns when the program exits.
 pub fn run(options: AppOptions) -> Result<()> {
+    run_with_args(options, std::env::args_os())
+}
+
+/// Run FLO using explicit command-line arguments.
+///
+/// Composition binaries use this to reserve their own arguments while still
+/// forwarding FLO's normal CLI unchanged. `args` must include a program name.
+pub fn run_with_args<I, T>(options: AppOptions, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_args_inner(options, args, None)
+}
+
+/// Run FLO using explicit command-line arguments and an already parsed
+/// controller configuration.
+///
+/// This is intended for composition binaries that own configuration parsing
+/// (for example, a camera host with its own settings). If `args` includes
+/// `--config`, the supplied configuration takes precedence.
+pub fn run_with_args_and_config<I, T>(
+    options: AppOptions,
+    args: I,
+    config: FloControllerConfig,
+) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_args_inner(options, args, Some(config))
+}
+
+fn run_with_args_inner<I, T>(
+    options: AppOptions,
+    args: I,
+    supplied_config: Option<FloControllerConfig>,
+) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
     if std::env::var_os("RUST_LOG").is_none() {
         let envstr = format!("{}=info,info", env!("CARGO_PKG_NAME")).replace('-', "_");
         // SAFETY: We ensure that this only happens in single-threaded code
@@ -1103,7 +1452,7 @@ pub fn run(options: AppOptions) -> Result<()> {
         unsafe { std::env::set_var("RUST_LOG", envstr) };
     }
 
-    let cli = Cli::parse();
+    let cli = parse_cli(args);
     let (log_dir, data_dir) = if let Some(dd) = cli.data_dir.as_ref() {
         (dd.clone(), dd.clone())
     } else {
@@ -1129,41 +1478,53 @@ pub fn run(options: AppOptions) -> Result<()> {
     // Create our device state.
     let mut my_state = flo_core::DeviceState::new(device_id);
 
-    let mut device_config = if let Some(device_config_fname) = &cli.config {
-        tracing::debug!("Loading config file: \"{device_config_fname}\"");
-        for name in options.extensions.iter().map(|e| e.name()) {
-            tracing::debug!("extension name: \"{name}\"");
+    let mut device_config = match supplied_config {
+        Some(config) => {
+            if let Some(device_config_fname) = &cli.config {
+                tracing::debug!(
+                    "using caller-supplied configuration parsed from {device_config_fname:?}"
+                );
+            }
+            extension::validate_config(config, &options.extensions)?
         }
+        None => {
+            if let Some(device_config_fname) = &cli.config {
+                tracing::debug!("Loading config file: \"{device_config_fname}\"");
+                for name in options.extensions.iter().map(|e| e.name()) {
+                    tracing::debug!("extension name: \"{name}\"");
+                }
 
-        log::info!("Reading initial device config from: {device_config_fname}");
-        let cfg_buf = std::fs::read_to_string(device_config_fname)
-            .with_context(|| format!("opening file {device_config_fname}"))?;
+                log::info!("Reading initial device config from: {device_config_fname}");
+                let cfg_buf = std::fs::read_to_string(device_config_fname)
+                    .with_context(|| format!("opening file {device_config_fname}"))?;
 
-        // Parse the YAML but raise on unknown fields, respecting extensions.
-        let raw_cfg = serde_yaml::from_str(&cfg_buf)
-            .with_context(|| format!("while parsing YAML in file {device_config_fname}"))?;
-        extension::validate_config(raw_cfg, &options.extensions)?
-    } else {
-        log::info!("Loading default device config.");
-        // (TODO: why doesn't the default value suffice?)
-        my_state.mode = DeviceMode::ManualOpenLoop;
-        // each pixel is 1/20th of a degree
-        let pixel_gain = Angle::from_degrees(1.0 / 20.0).0;
-        FloControllerConfig {
-            pwm_output_enabled: true,
-            ki_pan_angle: -10.0,
-            ki_tilt_angle: 10.0,
-            centroid_to_sensor_x_angle_func: flo_core::CentroidToAngleCalibration {
-                dx_gain: pixel_gain,
-                dy_gain: 0.0,
-                offset: 0.0,
-            },
-            centroid_to_sensor_y_angle_func: flo_core::CentroidToAngleCalibration {
-                dx_gain: 0.0,
-                dy_gain: pixel_gain,
-                offset: 0.0,
-            },
-            ..Default::default()
+                // Parse the YAML but raise on unknown fields, respecting extensions.
+                let raw_cfg = serde_yaml::from_str(&cfg_buf)
+                    .with_context(|| format!("while parsing YAML in file {device_config_fname}"))?;
+                extension::validate_config(raw_cfg, &options.extensions)?
+            } else {
+                log::info!("Loading default device config.");
+                // (TODO: why doesn't the default value suffice?)
+                my_state.mode = DeviceMode::ManualOpenLoop;
+                // each pixel is 1/20th of a degree
+                let pixel_gain = Angle::from_degrees(1.0 / 20.0).0;
+                FloControllerConfig {
+                    pwm_output_enabled: true,
+                    ki_pan_angle: -10.0,
+                    ki_tilt_angle: 10.0,
+                    centroid_to_sensor_x_angle_func: flo_core::CentroidToAngleCalibration {
+                        dx_gain: pixel_gain,
+                        dy_gain: 0.0,
+                        offset: 0.0,
+                    },
+                    centroid_to_sensor_y_angle_func: flo_core::CentroidToAngleCalibration {
+                        dx_gain: 0.0,
+                        dy_gain: pixel_gain,
+                        offset: 0.0,
+                    },
+                    ..Default::default()
+                }
+            }
         }
     };
 
@@ -1283,6 +1644,14 @@ pub fn run(options: AppOptions) -> Result<()> {
     Ok(())
 }
 
+fn parse_cli<I, T>(args: I) -> Cli
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    Cli::parse_from(args)
+}
+
 /// Create the tokio Runtime and call the main app loop.
 fn run_tokio_main(
     cli: Cli,
@@ -1298,16 +1667,24 @@ fn run_tokio_main(
         .build()?;
 
     let handle = tokio_rt.handle();
-    tokio_rt.block_on(app_main(
-        handle,
-        cli,
-        my_state,
-        device_config,
-        shutdown_rx,
-        data_dir,
-        mavlink_port,
-        options,
-    ))
+    // Some camera backends are thread-affine and therefore expose `!Send`
+    // futures. A LocalSet lets in-process integrations keep those tasks on
+    // this caller-owned FLO runtime, while ordinary extensions continue to
+    // use the multi-thread runtime normally.
+    let local = tokio::task::LocalSet::new();
+    local.block_on(
+        &tokio_rt,
+        app_main(
+            handle,
+            cli,
+            my_state,
+            device_config,
+            shutdown_rx,
+            data_dir,
+            mavlink_port,
+            options,
+        ),
+    )
 }
 
 /// The highest-level main loop for the flo app.
@@ -1414,6 +1791,13 @@ async fn app_main(
         drivemode: flo_core::MotorDriveMode::Position,
         rel_frame: true,
         focus: trinamic_microsteps,
+    });
+    let initial_motor_command = motors_rx.borrow().clone();
+    let (processing_feedback_tx, processing_feedback_rx) = watch::channel(ProcessingFeedback {
+        updated_at: chrono::Utc::now(),
+        motor_readout: None,
+        motor_command: initial_motor_command,
+        tracking_mode: DeviceMode::default(),
     });
 
     // Create channel for motor position feedback.
@@ -1584,17 +1968,66 @@ async fn app_main(
         };
     my_state.focusing = focusing;
 
-    // Setup FLO networking
-    let mut udp_framed_recv = udp_handling::setup_udp(&cli.udp_addr).await?;
+    // UDP remains available for standalone and replay use. Integrated camera
+    // applications use the in-process centroid channel and can leave no UDP
+    // port bound at all.
+    let mut udp_framed_recv = if options.enable_udp_listener {
+        Some(udp_handling::setup_udp(&cli.udp_addr).await?)
+    } else {
+        None
+    };
+
+    if options.centroid_input_capacity == 0 {
+        eyre::bail!("centroid_input_capacity must be greater than zero");
+    }
+    let (centroid_tx, mut centroid_rx) = centroid_input_channel(options.centroid_input_capacity);
 
     // Create a channel to send copies of our device state.
     let (from_device_http_tx, from_device_http_rx) = watch::channel(my_state.clone());
 
+    // Register an in-process camera host before opening legacy Strand Camera
+    // sessions, so the coordinator knows embedded camera roles from startup.
+    let embedded_camera_registrations = options
+        .camera_host
+        .as_ref()
+        .map(|host| host.registrations())
+        .unwrap_or_default();
+
+    let AppOptions {
+        camera_host,
+        extensions,
+        osd_overlays,
+        ..
+    } = options;
+    let (subsystem_shutdown_tx, subsystem_shutdown_rx) = watch::channel(false);
+
+    // Start the host before opening its local HTTP sessions below. A composed
+    // host such as flo-strand-cam owns the Strand Camera servers themselves;
+    // the proxy setup retries until each server has bound its listener.
+    let mut camera_host_task = match camera_host {
+        Some(host) => Some(
+            host.spawn(CameraHostContext {
+                centroid_tx: centroid_tx.clone(),
+                processing_feedback: processing_feedback_rx.clone(),
+                shutdown_rx: subsystem_shutdown_rx.clone(),
+                data_dir,
+            })
+            .with_context(|| "spawning camera host")?,
+        ),
+        None => None,
+    };
+
     // Open each configured Strand Camera session once. The controller keeps
     // the original handles while the web server gets clones for its Braid-style
     // reverse proxy; all clones share the same authenticated cookie jar.
-    let strand_cams = init_strand_cams(&device_config).await?;
+    let strand_cams = init_strand_cams(
+        &device_config,
+        embedded_camera_registrations,
+        camera_host_task.as_mut(),
+    )
+    .await?;
     let strand_cam_proxy_sessions = strand_cams.proxy_sessions()?;
+    let embedded_strand_cam_routers = strand_cams.embedded_routers();
     let strand_cam_proxy_info = strand_cams.proxy_info();
 
     // Channel used to tell the web server it is shutting down. It is flipped to
@@ -1624,6 +2057,7 @@ async fn app_main(
                 persistent_secret,
                 trusted_networks,
                 strand_cam_proxy_sessions,
+                embedded_strand_cam_routers,
                 strand_cam_proxy_info,
                 from_device_http_rx,
                 device_config,
@@ -1667,8 +2101,7 @@ async fn app_main(
     // Build the OSD overlay list. Defaults from AppOptions::osd_overlays
     // first, then each registered extension contributes via
     // make_osd_overlay() if it has a companion overlay.
-    let mut osd_overlays = options.osd_overlays;
-    let extensions: Vec<Box<dyn Extension>> = options.extensions;
+    let mut osd_overlays = osd_overlays;
     for ext in &extensions {
         if let Some(overlay) = ext.make_osd_overlay(&broadway, handle) {
             osd_overlays.push(overlay);
@@ -1712,6 +2145,9 @@ async fn app_main(
             saver_tx: flo_saver_tx.clone(),
             data_dir,
             config: &device_config,
+            centroid_tx: centroid_tx.clone(),
+            processing_feedback: processing_feedback_rx.clone(),
+            shutdown_rx: subsystem_shutdown_rx.clone(),
         };
         let jh = ext
             .spawn(ctx)
@@ -1733,6 +2169,7 @@ async fn app_main(
         my_state,
         local_flo_state,
         motors_tx,
+        processing_feedback_tx,
         audio_stream_handle.as_ref(),
         from_device_http_tx,
         broadway,
@@ -1742,7 +2179,9 @@ async fn app_main(
         strand_cams,
     );
 
-    // Main loop.
+    // Main loop. Keep its result so extensions receive their shutdown signal
+    // even if a subsystem returns an error rather than taking a normal break.
+    let coordinator_result = async {
     loop {
         // Wait for any of a number of things to happen
         tokio::select! {
@@ -1759,6 +2198,18 @@ async fn app_main(
             }
             Some(extension_result) = extension_tasks.join_next(), if !extension_tasks.is_empty() => {
                 extension_result??;
+                break;
+            }
+            camera_host_result = async {
+                camera_host_task
+                    .as_mut()
+                    .expect("camera host task was selected only when present")
+                    .await
+            }, if camera_host_task.is_some() => {
+                // This JoinHandle is complete; remove it before shutdown so
+                // the graceful-stop path never polls it again.
+                camera_host_task = None;
+                camera_host_result??;
                 break;
             }
             motor_task_result = &mut motor_task_join_handle => {
@@ -1783,9 +2234,20 @@ async fn app_main(
                 camshow_result??;
                 break;
             }
-            udp_msg = udp_framed_recv.next() => {
+            udp_msg = async {
+                match udp_framed_recv.as_mut() {
+                    Some(udp_framed_recv) => udp_framed_recv.next().await,
+                    None => pending().await,
+                }
+            } => {
                 let udp_msg = udp_msg.ok_or_else(|| eyre::eyre!("UDP channel closed"))?;
-                coordinator.on_image_centroid(udp_msg)?;
+                coordinator.on_udp_message(udp_msg)?;
+                // TODO: we have fresh data. We should call
+                // `self.on_fast_tick(dt_secs)?;` here?
+            }
+            centroid = centroid_rx.recv() => {
+                let centroid = centroid.ok_or_else(|| eyre::eyre!("centroid input channel closed"))?;
+                coordinator.on_image_centroid(centroid)?;
                 // TODO: we have fresh data. We should call
                 // `self.on_fast_tick(dt_secs)?;` here?
             }
@@ -1810,7 +2272,49 @@ async fn app_main(
             }
         };
     }
+    Ok::<(), eyre::Error>(())
+    }
+    .await;
     tracing::debug!("FloCoordinator ending.");
+
+    // Give extensions a bounded opportunity to release external resources
+    // before the runtime cancels their remaining tasks. This is especially
+    // important for in-process camera acquisition, which needs to stop its
+    // frame task before its vendor module is dropped.
+    let _ = subsystem_shutdown_tx.send(true);
+    let extension_shutdown_deadline = std::time::Duration::from_secs(2);
+    if let Some(camera_host_task) = camera_host_task.as_mut()
+        && tokio::time::timeout(extension_shutdown_deadline, &mut *camera_host_task)
+            .await
+            .is_err()
+    {
+        tracing::warn!(
+            ?extension_shutdown_deadline,
+            "camera host did not stop before shutdown deadline; aborting task"
+        );
+        camera_host_task.abort();
+        let _ = camera_host_task.await;
+    }
+    let graceful_extensions = async {
+        while let Some(extension_result) = extension_tasks.join_next().await {
+            match extension_result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "extension failed during shutdown"),
+                Err(error) => tracing::warn!(%error, "extension task failed during shutdown"),
+            }
+        }
+    };
+    if tokio::time::timeout(extension_shutdown_deadline, graceful_extensions)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            ?extension_shutdown_deadline,
+            "extensions did not stop before shutdown deadline; aborting remaining tasks"
+        );
+        extension_tasks.abort_all();
+        while extension_tasks.join_next().await.is_some() {}
+    }
 
     // Tell every connected browser we are shutting down, so all clients (not
     // only one) show the "FLO has quit" screen and stop reconnecting. This is
@@ -1820,7 +2324,7 @@ async fn app_main(
     let _ = quit_tx.send(true);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    Ok(())
+    coordinator_result
 }
 
 fn play_sound(
@@ -1854,4 +2358,190 @@ fn play_sound_inner(
         audio_stream.play_raw(source.convert_samples())?;
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cli_accepts_forwarded_composition_arguments() {
+        let cli = parse_cli(["flo", "--config", "sim.yaml", "--udp-addr", "127.0.0.1:0"]);
+        assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
+        assert_eq!(cli.udp_addr, "127.0.0.1:0");
+    }
+
+    #[test]
+    fn centroid_input_is_bounded() {
+        let (tx, mut rx) = centroid_input_channel(1);
+        let first = MomentCentroid::default();
+        let second = MomentCentroid {
+            framenumber: first.framenumber + 1,
+            ..first.clone()
+        };
+
+        tx.try_send(first.clone()).unwrap();
+        assert!(matches!(
+            tx.try_send(second),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert_eq!(rx.try_recv().unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn centroid_input_send_waits_for_capacity() {
+        let (tx, mut rx) = centroid_input_channel(1);
+        let first = MomentCentroid::default();
+        let second = MomentCentroid {
+            framenumber: first.framenumber + 1,
+            ..first.clone()
+        };
+        tx.try_send(first.clone()).unwrap();
+
+        let send_tx = tx.clone();
+        let send_task = tokio::spawn(async move { send_tx.send(second).await });
+        tokio::task::yield_now().await;
+        assert!(!send_task.is_finished());
+
+        assert_eq!(rx.recv().await, Some(first));
+        send_task.await.unwrap().unwrap();
+        assert_eq!(
+            rx.recv().await.map(|centroid| centroid.framenumber),
+            Some(43)
+        );
+    }
+
+    #[test]
+    fn default_options_enable_legacy_udp_and_bound_centroid_queue() {
+        let options = AppOptions::default();
+        assert_eq!(
+            options.centroid_input_capacity,
+            DEFAULT_CENTROID_INPUT_CAPACITY
+        );
+        assert!(options.enable_udp_listener);
+    }
+
+    #[test]
+    fn localset_runs_thread_affine_extension_tasks_on_flo_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let thread_affine = std::rc::Rc::new(());
+            let task = tokio::task::spawn_local(async move {
+                let _thread_affine = thread_affine;
+                Ok::<_, eyre::Error>(())
+            });
+            task.await.unwrap().unwrap();
+        });
+    }
+
+    fn embedded_camera(role: StrandCamRole, name: &str) -> CameraRegistration {
+        CameraRegistration {
+            role,
+            name: name.to_owned(),
+            router_rx: None,
+            control_tx: None,
+            expected_fps: None,
+        }
+    }
+
+    #[test]
+    fn embedded_main_only_needs_no_secondary_camera() {
+        let secondary = merge_camera_registrations(
+            None,
+            None,
+            &[embedded_camera(StrandCamRole::Main, "embedded-main")],
+        )
+        .unwrap();
+
+        assert_eq!(secondary, None);
+        assert!(!secondary_camera_is_stale(None, None));
+    }
+
+    #[test]
+    fn embedded_secondary_is_the_coordinator_secondary_identity() {
+        let secondary = merge_camera_registrations(
+            None,
+            None,
+            &[
+                embedded_camera(StrandCamRole::Main, "embedded-main"),
+                embedded_camera(StrandCamRole::Secondary, "embedded-secondary"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(secondary.as_deref(), Some("embedded-secondary"));
+        assert!(secondary_camera_is_stale(secondary.as_deref(), None));
+    }
+
+    #[test]
+    fn embedded_camera_registrations_reject_role_and_name_conflicts() {
+        let role_conflict = merge_camera_registrations(
+            Some("legacy-main"),
+            None,
+            &[embedded_camera(StrandCamRole::Main, "embedded-main")],
+        )
+        .unwrap_err();
+        assert!(role_conflict.to_string().contains("conflicts"));
+
+        let name_conflict = merge_camera_registrations(
+            Some("legacy-main"),
+            None,
+            &[embedded_camera(StrandCamRole::Secondary, "legacy-main")],
+        )
+        .unwrap_err();
+        assert!(name_conflict.to_string().contains("conflicts"));
+    }
+
+    #[test]
+    fn embedded_cameras_claim_direct_router_routes() {
+        let cameras = InitializedStrandCams {
+            main: None,
+            secondary: None,
+            secondary_cam_name: Some("embedded-secondary".to_owned()),
+            embedded: vec![
+                embedded_camera(StrandCamRole::Main, "embedded-main"),
+                embedded_camera(StrandCamRole::Secondary, "embedded-secondary"),
+            ],
+            embedded_routers: flo_webserver::EmbeddedStrandCamRouters::new(),
+        };
+
+        assert!(cameras.proxy_sessions().unwrap().is_empty());
+        assert_eq!(cameras.proxy_info().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn in_process_camera_control_uses_its_direct_channel() {
+        let (tx, mut rx) = mpsc::channel(1);
+        send_in_process_cam_arg(
+            &tx,
+            strand_cam_remote_control::CamArg::SetIsRecordingMp4(true),
+        )
+        .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(strand_cam_remote_control::CamArg::SetIsRecordingMp4(true))
+        ));
+    }
+
+    #[test]
+    fn embedded_camera_control_takes_precedence_over_http_session() {
+        assert_eq!(
+            camera_command_route(true, true),
+            Some(CameraCommandRoute::InProcess)
+        );
+        assert_eq!(
+            camera_command_route(true, false),
+            Some(CameraCommandRoute::Http)
+        );
+        assert_eq!(
+            camera_command_route(false, true),
+            Some(CameraCommandRoute::InProcess)
+        );
+        assert_eq!(camera_command_route(false, false), None);
+    }
 }

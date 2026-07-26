@@ -29,8 +29,31 @@ const COOKIE_SECRET_KEY: &str = "cookie-secret-base64";
 
 /// Authenticated Strand Camera sessions, keyed by the camera name reported by
 /// each server. The names are exposed as the first path component below
-/// `/cam-proxy`, matching Braid's camera proxy API.
+/// `/camera`.
 pub type StrandCamSessions = BTreeMap<String, strand_bui_backend_session::HttpSession>;
+
+/// State-erased Strand Camera routers supplied by in-process camera hosts.
+/// FLO mounts each below its authenticated `/camera/<name>` path.
+pub type EmbeddedStrandCamRouters = BTreeMap<String, axum::Router>;
+
+fn embedded_camera_path(camera_name: &str) -> String {
+    let encoded_name =
+        percent_encoding::utf8_percent_encode(camera_name, percent_encoding::NON_ALPHANUMERIC);
+    format!("/{}/{encoded_name}", flo_core::CAM_PROXY_PATH)
+}
+
+fn nest_embedded_camera_routers<S>(
+    mut router: axum::Router<S>,
+    embedded_strand_cam_routers: EmbeddedStrandCamRouters,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    for (camera_name, camera_router) in embedded_strand_cam_routers {
+        router = router.nest_service(&embedded_camera_path(&camera_name), camera_router);
+    }
+    router
+}
 
 #[cfg(not(any(feature = "bundle_files", feature = "serve_files")))]
 compile_error!("Need cargo feature \"bundle_files\" or \"serve_files\"");
@@ -454,6 +477,7 @@ pub async fn main_loop(
     persistent_secret: cookie::Key,
     trusted_networks: Vec<axum_token_auth::CidrBlock>,
     strand_cam_sessions: StrandCamSessions,
+    embedded_strand_cam_routers: EmbeddedStrandCamRouters,
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
     from_device_rx: watch::Receiver<DeviceState>,
     cfg: FloControllerConfig,
@@ -462,6 +486,7 @@ pub async fn main_loop(
 ) -> Result<(), anyhow::Error> {
     let bound_addr = tcp_listener.local_addr()?;
     let token_required = token_config.is_some();
+    let has_strand_cam_sessions = !strand_cam_sessions.is_empty();
     let app_state = AppState {
         from_device_rx,
         user_commands_tx,
@@ -502,22 +527,27 @@ pub async fn main_loop(
             .join("pkg"),
     );
 
-    // Create axum router.
-    let router = axum::Router::new()
+    // The legacy split-process path retains its HTTP proxy. Embedded cameras
+    // are mounted directly below the same authenticated FLO application.
+    let mut router = axum::Router::new()
         .route(&format!("/{}", flo_core::EVENTS_PATH), get(events_handler))
         .route("/callback", post(callback_handler))
-        .route("/device-connect-urls", get(device_connect_urls_handler))
-        .route(
-            &format!("/{}/{{encoded_cam_name}}/", flo_core::CAM_PROXY_PATH),
-            axum::routing::method_routing::any(cam_proxy_handler_root),
-        )
-        .route(
-            &format!(
-                "/{}/{{encoded_cam_name}}/{{*path}}",
-                flo_core::CAM_PROXY_PATH
-            ),
-            axum::routing::method_routing::any(cam_proxy_handler),
-        )
+        .route("/device-connect-urls", get(device_connect_urls_handler));
+    if has_strand_cam_sessions {
+        router = router
+            .route(
+                &format!("/{}/{{encoded_cam_name}}/", flo_core::CAM_PROXY_PATH),
+                axum::routing::method_routing::any(cam_proxy_handler_root),
+            )
+            .route(
+                &format!(
+                    "/{}/{{encoded_cam_name}}/{{*path}}",
+                    flo_core::CAM_PROXY_PATH
+                ),
+                axum::routing::method_routing::any(cam_proxy_handler),
+            );
+    }
+    let router = nest_embedded_camera_routers(router, embedded_strand_cam_routers)
         .fallback_service(serve_dir)
         .layer(
             tower::ServiceBuilder::new()
@@ -546,7 +576,10 @@ mod tests {
     use axum::{Router, body::Body, response::IntoResponse, routing::any};
     use http::{Method, Request, StatusCode, header::ACCEPT};
 
-    use super::{AppState, StrandCamSessions, build_connect_urls, cam_proxy_handler_inner};
+    use super::{
+        AppState, EmbeddedStrandCamRouters, StrandCamSessions, build_connect_urls,
+        cam_proxy_handler_inner, nest_embedded_camera_routers,
+    };
 
     fn test_app_state(strand_cam_sessions: StrandCamSessions) -> AppState {
         let state =
@@ -682,5 +715,27 @@ mod tests {
             .into_response();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         });
+    }
+
+    #[tokio::test]
+    async fn embedded_camera_router_keeps_its_camera_path_prefix() {
+        let inner = Router::new().route("/cam-name", any(|| async { "embedded" }));
+        let mut routers = EmbeddedStrandCamRouters::new();
+        routers.insert("camera one".to_owned(), inner);
+        let response = tower::ServiceExt::oneshot(
+            nest_embedded_camera_routers(Router::new(), routers),
+            Request::builder()
+                .uri("/camera/camera%20one/cam-name")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"embedded");
     }
 }

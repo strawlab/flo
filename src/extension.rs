@@ -13,7 +13,7 @@ use osd_utils::OsdCache;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
-use crate::osd::DroneStatus;
+use crate::{CentroidInputSender, ProcessingFeedback, osd::DroneStatus};
 
 /// Context handed to [`Extension::spawn`] so the extension has access to
 /// the shared runtime, the broadway, and the place to write recordings.
@@ -23,6 +23,16 @@ pub struct ExtensionContext<'a> {
     pub saver_tx: UnboundedSender<SaveToDiskMsg>,
     pub data_dir: &'a camino::Utf8Path,
     pub config: &'a FloControllerConfig,
+    /// Bounded, in-process ingress for camera observations. Extensions should
+    /// send centroids here instead of serializing them onto FLO's legacy UDP
+    /// listener.
+    pub centroid_tx: CentroidInputSender,
+    /// Latest FLO state relevant to camera processing. The value is updated
+    /// after motor readouts and control-loop output changes.
+    pub processing_feedback: tokio::sync::watch::Receiver<ProcessingFeedback>,
+    /// Becomes `true` when FLO's coordinator is stopping. Extensions should
+    /// finish their own graceful shutdown promptly after observing this value.
+    pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 /// A long-running subsystem composed into the flo binary at link time.
