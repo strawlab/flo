@@ -41,8 +41,9 @@ use tokio_serial::SerialPortBuilderExt;
 use tracing::{self as log};
 
 use flo_core::{
-    Angle, Broadway, CamStaleBitmask, CommandSource, DeviceId, DeviceMode, DeviceState, FloCommand,
-    FloControllerConfig, FloEvent, FloatType, FocusMotorType, GimbalConfig, LocalFloState,
+    Angle, Broadway, CamStaleBitmask, CommandSource, DeviceId, DeviceMode, DeviceState,
+    DisplaySource, FloCommand, FloControllerConfig, FloEvent, FloatType, FocusMotorType,
+    GimbalConfig, LocalFloState,
     ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType, MotorValueCache, OsdState,
     PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg, StrandCamConfig, StrandCamRole,
     UNICAST_UDP_DEFAULT, UdpMsg, drone_structs::DroneEvent,
@@ -265,6 +266,9 @@ struct FloCoordinator<'a> {
     cam_control_main_expected_fps: Option<f64>,
     cam_control_secondary_expected_fps: Option<f64>,
     camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
+    /// The operator's live-view selection. Read by the camshow link and by the
+    /// camera host's frame relay; this is the only writer.
+    display_source_tx: watch::Sender<DisplaySource>,
     highmag_visible_recorder: Option<h264_recorder::H264Recorder>,
     /// Seconds of data currently held in the writer's pre-capture buffer.
     precapture_buffered_rx: watch::Receiver<f64>,
@@ -284,6 +288,7 @@ impl<'a> FloCoordinator<'a> {
         from_device_http_tx: watch::Sender<DeviceState>,
         broadway: Broadway,
         camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
+        display_source_tx: watch::Sender<DisplaySource>,
         data_dir: &'a camino::Utf8Path,
         precapture_buffered_rx: watch::Receiver<f64>,
         strand_cams: InitializedStrandCams,
@@ -330,6 +335,7 @@ impl<'a> FloCoordinator<'a> {
             cam_control_secondary_expected_fps: secondary_embedded
                 .and_then(|camera| camera.expected_fps),
             camshow_recording_tx,
+            display_source_tx,
             highmag_visible_recorder: None,
             precapture_buffered_rx,
         }
@@ -849,6 +855,18 @@ impl<'a> FloCoordinator<'a> {
                 } else {
                     log::error!("can't adjust distance correction - focus config missing");
                 };
+            }
+            FloCommand::SetDisplaySource(source) => {
+                // Publishing to the watch is the whole action: the camshow link
+                // tells camshow what to display, and the camera host's relay
+                // starts or stops sending that camera's frames. The recording is
+                // untouched by design — it is always the clean webcam.
+                tracing::info!("{src:?} selected display source {source:?}");
+                if self.display_source_tx.send(source).is_err() {
+                    tracing::warn!(
+                        "nothing is listening for the display source; is camshow configured?"
+                    );
+                }
             }
             FloCommand::SetRecordingState(enable) => {
                 if enable {
@@ -2018,6 +2036,12 @@ async fn app_main(
     } = options;
     let (subsystem_shutdown_tx, subsystem_shutdown_rx) = watch::channel(false);
 
+    // What the operator's live view shows. Two independent consumers need the
+    // same decision: the camshow link, which tells camshow what to display, and
+    // the camera host, which only relays frames for the selected camera. Created
+    // here so it exists before the host is spawned below.
+    let (display_source_tx, display_source_rx) = watch::channel(DisplaySource::default());
+
     // Start the host before opening its local HTTP sessions below. A composed
     // host such as flo-strand-cam owns the Strand Camera servers themselves;
     // the proxy setup retries until each server has bound its listener.
@@ -2027,6 +2051,7 @@ async fn app_main(
                 centroid_tx: centroid_tx.clone(),
                 processing_feedback: processing_feedback_rx.clone(),
                 shutdown_rx: subsystem_shutdown_rx.clone(),
+                display_source: display_source_rx.clone(),
                 data_dir,
             })
             .with_context(|| "spawning camera host")?,
@@ -2098,8 +2123,8 @@ async fn app_main(
     };
 
     // Set up the camshow link if configured. If `camshow_addr` is set, the
-    // OSD canvas is mirrored over TCP and webcam recording start/stop is
-    // forwarded; otherwise we feed neither.
+    // OSD canvas is mirrored over TCP, webcam recording start/stop is
+    // forwarded, and the display source is pushed; otherwise we feed neither.
     let camshow_addr = device_config
         .osd_config
         .as_ref()
@@ -2107,7 +2132,12 @@ async fn app_main(
     let (canvas_tx, camshow_recording_tx, mut camshow_task) = if let Some(addr) = camshow_addr {
         let (canvas_tx, canvas_rx) = watch::channel(osd_utils::OsdCache::new(30, 16));
         let (rec_tx, rec_rx) = mpsc::unbounded_channel();
-        let jh = handle.spawn(camshow_client::run(addr, canvas_rx, rec_rx));
+        let jh = handle.spawn(camshow_client::run(
+            addr,
+            canvas_rx,
+            rec_rx,
+            display_source_rx,
+        ));
         let task: Pin<Box<dyn Future<Output = _>>> = Box::pin(jh);
         (Some(canvas_tx), Some(rec_tx), task)
     } else {
@@ -2191,6 +2221,7 @@ async fn app_main(
         from_device_http_tx,
         broadway,
         camshow_recording_tx,
+        display_source_tx,
         data_dir,
         precapture_buffered_rx,
         strand_cams,

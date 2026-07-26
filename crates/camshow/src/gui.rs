@@ -1,24 +1,144 @@
-//! egui app that draws the latest webcam frame.
+//! The `--gui` output: an egui window that draws the latest OSD-stamped frame.
 
-use std::sync::{Arc, mpsc};
+use std::{
+    ops::ControlFlow,
+    sync::{Arc, mpsc as std_mpsc},
+};
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
+use eyre::Result;
 use machine_vision_formats::{ImageData, pixel_format::RGB8};
 use tokio::sync::watch;
+use tracing::debug;
 
-use crate::state::DisplayFrame;
+use crate::{
+    sink::FrameSink,
+    state::{DisplayFrame, Frame, Timestamp},
+};
 
-pub(crate) struct CamshowApp {
+/// The capture-thread half of the GUI wiring, from [`channels`].
+pub(crate) struct GuiSinkConfig {
+    display_tx: watch::Sender<Option<DisplayFrame>>,
+    egui_ctx_rx: std_mpsc::Receiver<egui::Context>,
+}
+
+/// The main-thread half of the GUI wiring, from [`channels`].
+pub(crate) struct GuiHandles {
+    display_rx: watch::Receiver<Option<DisplayFrame>>,
+    egui_ctx_tx: std_mpsc::Sender<egui::Context>,
+}
+
+/// Creates the channels connecting the capture thread to eframe on the main
+/// thread: frames go one way, the egui context (available only once eframe has
+/// built the app) comes back the other.
+pub(crate) fn channels() -> (GuiSinkConfig, GuiHandles) {
+    let (display_tx, display_rx) = watch::channel::<Option<DisplayFrame>>(None);
+    let (egui_ctx_tx, egui_ctx_rx) = std_mpsc::channel();
+    (
+        GuiSinkConfig {
+            display_tx,
+            egui_ctx_rx,
+        },
+        GuiHandles {
+            display_rx,
+            egui_ctx_tx,
+        },
+    )
+}
+
+/// Runs eframe on the calling thread, which must be the main thread. Returns
+/// when the window closes (or when the capture thread closes it on shutdown).
+pub(crate) fn run(handles: GuiHandles, windowed: bool) -> Result<()> {
+    let eframe_opts = eframe::NativeOptions {
+        window_builder: Some(Box::new(move |mut vb| {
+            vb.fullscreen = Some(!windowed);
+            vb.decorations = Some(true);
+            // On Linux, monitor power cycles can emit tiny restored sizes.
+            // Keep windowed mode usable by enforcing sensible bounds.
+            vb.min_inner_size = Some(egui::vec2(640.0, 360.0));
+            if windowed {
+                vb.inner_size = Some(egui::vec2(1280.0, 720.0));
+            }
+            vb
+        })),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        env!("CARGO_PKG_NAME"),
+        eframe_opts,
+        Box::new(move |_cc| {
+            Ok(Box::new(CamshowApp::new(
+                handles.display_rx,
+                handles.egui_ctx_tx,
+            )))
+        }),
+    )
+    .map_err(|e| eyre::eyre!("eframe failed: {e}"))
+}
+
+/// Publishes frames to the egui app and nudges it to repaint.
+pub(crate) struct GuiSink {
+    display_tx: watch::Sender<Option<DisplayFrame>>,
+    egui_ctx: egui::Context,
+}
+
+impl GuiSink {
+    /// Blocks until eframe hands over its context, which it does on its first
+    /// `update`. Fails if eframe never got that far (e.g. no display), which
+    /// drops the sender side.
+    pub(crate) fn build(cfg: GuiSinkConfig) -> Result<Self> {
+        let egui_ctx = cfg
+            .egui_ctx_rx
+            .recv()
+            .map_err(|e| eyre::eyre!("never received egui context: {e}"))?;
+        Ok(Self {
+            display_tx: cfg.display_tx,
+            egui_ctx,
+        })
+    }
+
+    /// Closes the egui viewport, so eframe's main loop returns. Called once
+    /// shutdown has been requested from elsewhere (a signal, or the TCP
+    /// server ending).
+    pub(crate) fn close_viewport_hook(&self) -> Box<dyn FnOnce() + Send> {
+        let egui_ctx = self.egui_ctx.clone();
+        Box::new(move || {
+            egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        })
+    }
+}
+
+impl FrameSink for GuiSink {
+    fn on_frame(
+        &mut self,
+        frame: Frame,
+        _timestamp: Timestamp,
+        recording: bool,
+    ) -> ControlFlow<()> {
+        let display = DisplayFrame { frame, recording };
+        if self.display_tx.send(Some(display)).is_err() {
+            debug!("GUI dropped; capture loop exiting");
+            return ControlFlow::Break(());
+        }
+        self.egui_ctx.request_repaint();
+        ControlFlow::Continue(())
+    }
+
+    fn finish(&mut self) {}
+}
+
+struct CamshowApp {
     frame_rx: watch::Receiver<Option<DisplayFrame>>,
-    egui_ctx_tx: Option<mpsc::Sender<egui::Context>>,
+    egui_ctx_tx: Option<std_mpsc::Sender<egui::Context>>,
     texture: Option<TextureHandle>,
     last_recording: bool,
 }
 
 impl CamshowApp {
-    pub(crate) fn new(
+    fn new(
         frame_rx: watch::Receiver<Option<DisplayFrame>>,
-        egui_ctx_tx: mpsc::Sender<egui::Context>,
+        egui_ctx_tx: std_mpsc::Sender<egui::Context>,
     ) -> Self {
         Self {
             frame_rx,

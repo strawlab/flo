@@ -36,6 +36,37 @@ pub enum StrandCamRole {
     Secondary,
 }
 
+/// What the operator's live view — the `camshow` display and its RTP stream —
+/// is currently showing.
+///
+/// This selects the *display* only. The webcam recording written to disk is
+/// always the clean FPV webcam image, whatever this is set to.
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplaySource {
+    /// The FPV webcam camshow captures itself, with the OSD overlaid.
+    #[default]
+    Webcam,
+    /// Frames relayed from the main tracking (IR) camera, no OSD: the OSD
+    /// canvas is calibrated for the FPV camera's geometry, so overlaying it on
+    /// a tracking-camera frame would put the marks in the wrong place.
+    StrandCamMain,
+    /// Frames relayed from the secondary tracking camera, no OSD.
+    StrandCamSecondary,
+}
+
+impl DisplaySource {
+    /// The Strand Camera whose frames this source needs, or `None` for the
+    /// webcam, which camshow captures itself.
+    pub fn strand_cam_role(self) -> Option<StrandCamRole> {
+        match self {
+            Self::Webcam => None,
+            Self::StrandCamMain => Some(StrandCamRole::Main),
+            Self::StrandCamSecondary => Some(StrandCamRole::Secondary),
+        }
+    }
+}
+
 /// Runtime information needed to show a connected Strand Camera in the BUI.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
 pub struct StrandCamProxyInfo {

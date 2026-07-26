@@ -153,6 +153,16 @@ pub struct RcConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_home: Option<ChannelCondition>,
 
+    /// State in which the operator's live view shows the main tracking camera
+    /// rather than the FPV webcam. Unlike the conditions above this is a
+    /// *level*, not a trigger: leaving it switches the view back.
+    ///
+    /// The secondary camera is deliberately not reachable from RC. It is used
+    /// rarely enough that a config or BUI path is the better place for it, and
+    /// one boolean keeps this to a single switch in the air.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_ir: Option<ChannelCondition>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pan_knob: Option<AngleKnobConfig>,
 
@@ -222,6 +232,7 @@ pub struct RcProgramState {
     pub track_start_cd: ChangeDetector<bool>,
     pub track_stop_cd: ChangeDetector<bool>,
     pub set_home_cd: ChangeDetector<bool>,
+    pub display_ir_cd: ChangeDetector<bool>,
     pub pan_ng: NoiseGate,
     pub tilt_ng: NoiseGate,
 }
@@ -232,6 +243,12 @@ impl Default for RcProgramState {
             track_start_cd: Default::default(),
             track_stop_cd: Default::default(),
             set_home_cd: Default::default(),
+            // Seeded with `false`, unlike the trigger conditions above, because
+            // this one mirrors a state FLO already has: the display source
+            // starts as the webcam. Seeding it means the first RC frame after a
+            // FLO restart re-asserts an IR view the operator is still asking
+            // for, instead of waiting for them to toggle the switch.
+            display_ir_cd: ChangeDetector::new_with_initial_state(&false),
             pan_ng: NoiseGate::new(NoiseGateParameters {
                 noise_gate: 0.02,
                 hold_time: 2.0,

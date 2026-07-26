@@ -35,7 +35,7 @@ cam-geom.workspace = true
 
 strand-cam-remote-control.workspace = true
 
-extended-unified-camera-model = { version = "0.2.0", features = [
+extended-unified-camera-model = { version = "0.3.0", features = [
     "serde-serialize",
 ] }
 

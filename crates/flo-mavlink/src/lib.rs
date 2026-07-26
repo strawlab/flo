@@ -1,7 +1,7 @@
 use eyre::{Ok, Result, WrapErr};
 use flo_core::{
-    Angle, Broadway, CommandSource, DeviceMode, DroneChannelData, FloCommand, FloEvent, FloatType,
-    LocalFloState, ModeChangeReason, MyTimestamp, SaveToDiskMsg, StampedJson,
+    Angle, Broadway, CommandSource, DeviceMode, DisplaySource, DroneChannelData, FloCommand,
+    FloEvent, FloatType, LocalFloState, ModeChangeReason, MyTimestamp, SaveToDiskMsg, StampedJson,
     drone_structs::{self, BatteryState, ChannelCondition, DroneEvent, FlightMode, GnssRtkMode},
     elapsed, now,
 };
@@ -478,6 +478,7 @@ impl DroneCoordinator {
         let track_start = ChannelCondition::test(&cfg.track_start, rc);
         let track_stop = ChannelCondition::test(&cfg.track_stop, rc);
         let set_home = ChannelCondition::test(&cfg.set_home, rc);
+        let display_ir = ChannelCondition::test(&cfg.display_ir, rc);
 
         // start tracking
         if self
@@ -511,6 +512,16 @@ impl DroneCoordinator {
         {
             self.broadway.flo_events.send(FloEvent::Command(
                 FloCommand::SwitchToOpenLoop,
+                CommandSource::DroneRC,
+            ))?;
+        }
+
+        // Choose what the operator's live view shows.
+        if let Some(source) =
+            rc_display_source(&mut self.rc_program_state.display_ir_cd, display_ir)
+        {
+            self.broadway.flo_events.send(FloEvent::Command(
+                FloCommand::SetDisplaySource(source),
                 CommandSource::DroneRC,
             ))?;
         }
@@ -720,9 +731,67 @@ pub fn spawn_mavlink(
     Ok(main_jh)
 }
 
+/// The display source the RC switch is asking for, or `None` if it has not
+/// changed since the previous RC frame.
+///
+/// Unlike the other RC conditions this one is a *level*, not a trigger: both
+/// directions have to be acted on, so this uses [`ChangeDetector::update`]
+/// rather than `update_and_has_changed_to`. Note that
+/// [`ChannelCondition::test`] reports false for stale RC data, so losing the
+/// link falls the view back to the webcam, which is the safe default.
+fn rc_display_source(
+    display_ir_cd: &mut flo_core::ChangeDetector<bool>,
+    display_ir: bool,
+) -> Option<DisplaySource> {
+    let requested = if display_ir {
+        DisplaySource::StrandCamMain
+    } else {
+        DisplaySource::Webcam
+    };
+    display_ir_cd.update(&display_ir).then_some(requested)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_local_position_out_of_bounds;
+    use flo_core::drone_structs::RcProgramState;
+
+    use super::{DisplaySource, is_local_position_out_of_bounds, rc_display_source};
+
+    /// The switch is a level, so the operator flicking it either way has to
+    /// change the view — and holding it still must not resend on every RC frame.
+    #[test]
+    fn the_rc_display_switch_acts_on_both_directions_and_only_on_change() {
+        let mut state = RcProgramState::default();
+        let mut step = |on| rc_display_source(&mut state.display_ir_cd, on);
+
+        assert_eq!(
+            step(false),
+            None,
+            "the webcam is already the display source at startup; nothing to say"
+        );
+        assert_eq!(step(false), None, "and holding the switch stays quiet");
+
+        assert_eq!(step(true), Some(DisplaySource::StrandCamMain));
+        assert_eq!(step(true), None, "held on, not resent every frame");
+
+        assert_eq!(
+            step(false),
+            Some(DisplaySource::Webcam),
+            "flicking back has to switch the view back"
+        );
+    }
+
+    /// After a FLO restart the operator may still be holding the switch in the
+    /// IR position, and no transition is coming. The seeded change detector is
+    /// what makes the first RC frame re-assert it.
+    #[test]
+    fn an_ir_view_is_reasserted_on_the_first_rc_frame_after_a_restart() {
+        let mut state = RcProgramState::default();
+        assert_eq!(
+            rc_display_source(&mut state.display_ir_cd, true),
+            Some(DisplaySource::StrandCamMain)
+        );
+    }
 
     #[test]
     fn local_position_out_of_bounds_is_false_when_inside_limit() {

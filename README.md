@@ -198,9 +198,19 @@ adapters while integrations migrate to the in-process input.
 
 ## `camshow` binary
 
-`camshow` is a separate desktop process that shows a USB webcam feed and draws
-an OSD overlay received from `flo` over TCP. Keeping it as a separate process
-means camera preview can keep running even while `flo` is restarted.
+`camshow` is a separate process that captures a USB webcam feed and draws an OSD
+overlay received from `flo` over TCP. Keeping it as a separate process means
+camera capture can keep running even while `flo` is restarted.
+
+Each displayed frame goes to whichever outputs the CLI enables — a local video
+display, an H.264/RTP stream, both at once, or neither. These are runtime
+options only; there is one binary and no build-time choice to make. Recording
+the clean (no-OSD) webcam video to disk on `flo`'s command happens regardless of
+which outputs are on.
+
+What is *displayed* is also selectable at runtime: the FPV webcam with its OSD,
+or a tracking camera relayed from `flo-strand-cam`. See [Switching the display
+source](#switching-the-display-source).
 
 ### Build and run
 
@@ -208,15 +218,39 @@ Build:
 
     cargo build --release -p camshow
 
-Run with defaults:
+Show the video locally:
 
-    cargo run --release -p camshow
+    cargo run --release -p camshow -- --gui --windowed
 
-Useful options:
+Stream to a groundstation, headless:
+
+    cargo run --release -p camshow -- --rtp-dest 192.168.1.20:5600
+
+Do both at once:
+
+    cargo run --release -p camshow -- --gui --rtp-dest 192.168.1.20:5600
+
+Output options:
+
+- `--gui` Show the video in a local window. Fullscreen unless `--windowed` is
+  also given. Without this flag no window is opened.
+- `--rtp-dest <HOST:PORT>` Stream the OSD-stamped video as H.264/RTP/UDP to this
+  destination, e.g. an OpenIPC-style groundstation receiver. Without this flag
+  nothing is streamed. Tuning (all optional, and only accepted alongside
+  `--rtp-dest`): `--rtp-encoder <ffmpeg|openh264>`, `--rtp-bitrate-kbps`,
+  `--rtp-fps`, `--rtp-mtu`, `--rtp-idr-interval`, `--rtp-dump-annexb <FILE>`.
+  `flo` can change the bitrate — or disable and re-enable the stream — while it
+  runs.
+
+Other options:
 
 - `--listen <ADDR>` TCP listen address for `flo` connections.
   Default: `127.0.0.1:2224`.
-- `--windowed` Run in a window instead of fullscreen.
+- `--video-listen <ADDR>` TCP listen address for the video link, over which
+  `flo-strand-cam` relays tracking-camera frames. Default: `127.0.0.1:2225`.
+- `--display-source <webcam|strand-cam-main|strand-cam-secondary>` What to
+  display and stream at startup. Default: `webcam`. `flo` overrides this
+  whenever the operator switches; mainly useful for bench testing.
 - `--fpv-cam <HUMAN_NAME>` Prefer a specific webcam name. If not set, the
   first available camera is used.
 - `--test-pattern` Show a fixed OSD test pattern whenever `flo` is not
@@ -225,7 +259,7 @@ Useful options:
 
 Example:
 
-    cargo run --release -p camshow -- --windowed --listen 127.0.0.1:2224
+    cargo run --release -p camshow -- --gui --windowed --listen 127.0.0.1:2224
 
 ### Connect `flo` to `camshow`
 
@@ -261,3 +295,61 @@ Or override from CLI when running `flo`:
 When recording is enabled in `flo`, recording start/stop is forwarded to
 `camshow`. `camshow` writes webcam MP4 output (and a matching OSD SRT sidecar)
 into the recording directory selected by `flo`.
+
+### Switching the display source
+
+While flying, the operator can switch what the local display and the RTP stream
+show between the FPV webcam and the main tracking (IR) camera. Configure an RC
+channel condition for it:
+
+```yaml
+mavlink_config:
+  # ...
+rc_config:
+  # ...
+  display_ir:
+    ch_no: 8
+    val_min: 0.5
+    val_max: 1.0
+```
+
+Unlike `track_start` / `track_stop` / `set_home`, this is a **level**, not a
+trigger: while the condition holds, the tracking camera is displayed; leave it
+and the view returns to the webcam. Losing the RC link also returns it to the
+webcam.
+
+The frames come from `flo-strand-cam`, which relays them to `camshow` over the
+video link. This is on by default and needs no configuration; the section exists
+to change it:
+
+```yaml
+flo-strand-cam:
+  main: # ...
+  video_relay:
+    enabled: true
+    camshow_video_addr: 127.0.0.1:2225   # matches camshow's --video-listen
+    max_fps: 30.0                        # per camera
+```
+
+Nothing is sent while the webcam is selected, so with no `display_ir` configured
+the relay costs nothing.
+
+Four things to know about the switched view:
+
+- **The recording never changes.** It is always the clean FPV webcam, and its
+  OSD sidecar keeps logging `flo`'s live canvas even while the tracking camera
+  is displayed.
+- **No OSD is drawn on a tracking-camera frame.** The canvas is calibrated for
+  the FPV camera's geometry, so it would put the marks in the wrong place. The
+  operator therefore has no on-screen telemetry while looking at the IR view.
+- **The RTP receiver resyncs on every switch.** The cameras have different
+  resolutions and the H.264 encoder cannot change size, so it is rebuilt with a
+  new SSRC. If a groundstation does not cope, the fix is to scale relayed frames
+  to the webcam's geometry so the stream format never changes.
+- **A dead relay falls back to the webcam.** If `flo` dies or the tracking
+  camera stalls, `camshow` shows the webcam and logs it rather than freezing on
+  the last frame. `camshow`'s frame watchdog watches the webcam only, so this is
+  never a process restart.
+
+`--display-source` on `camshow` sets the same thing at startup, which is how to
+bench-test the path without MAVLink.

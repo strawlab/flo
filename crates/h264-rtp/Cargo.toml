@@ -1,0 +1,11 @@
+[package]
+name = "h264-rtp"
+version = "0.1.0"
+edition = "2024"
+description = "RFC 6184 H.264 RTP payloader (pure packetization, no I/O)"
+
+[dependencies]
+# deps published on crates.io
+rand.workspace = true
+rtp-rs.workspace = true
+thiserror.workspace = true
