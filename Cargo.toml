@@ -189,27 +189,27 @@ simplebgc = { path = "crates/simplebgc" }
 simplebgc-derive = { path = "crates/simplebgc-derive" }
 tokio-mavlink = { path = "crates/tokio-mavlink" }
 
-ads-webasm = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ci2 = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ci2-async = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ci2-pylon = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ci2-sim = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ci2-vimba = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ci2-webcam = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-download-verify = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ffmpeg-rewriter = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-ffmpeg-writer = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-frame-source = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-srt-writer = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-strand-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-strand-bui-backend-session-types = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-strand-cam = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96", default-features = false }
-strand-cam-bui-components = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-strand-cam-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-strand-dynamic-frame = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
-zip-or-dir = { git = "https://github.com/strawlab/strand-braid", rev = "23c8e5e4198e2240e8e4ebafcb4c4bdc4ad41e96" }
+ads-webasm = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ci2 = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ci2-async = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ci2-pylon = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ci2-sim = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ci2-vimba = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ci2-webcam = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+download-verify = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ffmpeg-rewriter = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+ffmpeg-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+frame-source = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+srt-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+strand-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+strand-bui-backend-session-types = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+strand-cam = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef", default-features = false }
+strand-cam-bui-components = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+strand-cam-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+strand-dynamic-frame = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+zip-or-dir = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 
 [features]
 default = ["bundle_files"]
