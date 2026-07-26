@@ -4,7 +4,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
 };
 use simplebgc::{IncomingCommand, OutgoingCommand, ParamsQuery, Payload, RollPitchYaw, V2Codec};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tokio_util::codec::Framed;
 
@@ -16,18 +16,24 @@ use flo_core::{
 pub(crate) mod custom_messages;
 
 const BAUD_RATE: u32 = 115_200;
+/// A short stream warm-up used before sending the first control command.
+const STREAM_WARMUP_PACKETS: u64 = 100;
+const STREAM_WARMUP_SETTLE_DURATION: Duration = Duration::from_millis(250);
 
 struct InitializationResult {
     messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
     messages_rx: SplitStream<Framed<SerialStream, V2Codec>>,
     offset_yaw: f64,
     offset_pitch: f64,
+    stream_requested_at: Instant,
 }
 
 async fn initialize_gimbals(
     mut messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
     mut messages_rx: SplitStream<Framed<SerialStream, V2Codec>>,
 ) -> Result<InitializationResult> {
+    let initialization_started = Instant::now();
+    tracing::debug!("starting SimpleBGC initialization");
     {
         //send control config (to disable confirmation responses)
         let ax_cfg = simplebgc::AxisControlConfigParams {
@@ -65,6 +71,7 @@ async fn initialize_gimbals(
             profile_id: 0,
         }))
         .await?;
+    tracing::debug!("requested SimpleBGC encoder offsets");
 
     let mut results;
     loop {
@@ -80,6 +87,10 @@ async fn initialize_gimbals(
                     cmd.encoder_offset.roll,
                 );
                 tracing::info!("gimbal encoder offsets (raw) y-p-r: {y}, {p}, {r}");
+                tracing::debug!(
+                    elapsed = ?initialization_started.elapsed(),
+                    "received SimpleBGC encoder offsets"
+                );
                 let offset_yaw = (cmd.encoder_offset.yaw as f64) / ((1 << 14) as f64);
                 let offset_pitch = (cmd.encoder_offset.pitch as f64) / ((1 << 14) as f64);
 
@@ -88,11 +99,13 @@ async fn initialize_gimbals(
                     messages_rx,
                     offset_yaw,
                     offset_pitch,
+                    // Replaced immediately after the stream request below.
+                    stream_requested_at: Instant::now(),
                 };
                 break;
             }
-            _ => {
-                tracing::info!("got some other message while waiting for encoder offsets");
+            msg => {
+                tracing::debug!(?msg, "received message while waiting for encoder offsets");
             }
         }
     }
@@ -106,6 +119,7 @@ async fn initialize_gimbals(
             ..Default::default()
         };
 
+        let stream_requested_at = Instant::now();
         results
             .messages_tx
             .send(OutgoingCommand::RawMessage(simplebgc::RawMessage {
@@ -114,6 +128,8 @@ async fn initialize_gimbals(
             }))
             .await
             .unwrap();
+        results.stream_requested_at = stream_requested_at;
+        tracing::debug!("requested SimpleBGC realtime encoder stream");
     }
     Ok(results)
 }
@@ -141,6 +157,7 @@ pub async fn run_gimbal_loop(
     // Loop forever in case of timeout on gimbals.
     loop {
         // Initialize serial port.
+        tracing::debug!("Initializing port \"{}\", {BAUD_RATE} baud", cfg.port_path);
         let serial_device = tokio_serial::new(&cfg.port_path, BAUD_RATE)
             .open_native_async()
             .with_context(|| format!("Failed to open Gimbal serial device {}", cfg.port_path))?;
@@ -150,6 +167,7 @@ pub async fn run_gimbal_loop(
         let (messages_tx, messages_rx) = framed.split();
         let gimbal_config_fut = initialize_gimbals(messages_tx, messages_rx);
         let ir = tokio::time::timeout(Duration::from_millis(5000), gimbal_config_fut).await??;
+        let (stream_warmed_up_tx, stream_warmed_up_rx) = tokio::sync::watch::channel(false);
 
         // Run the main gimbal loops forever. This future only completes when
         // the gimbal is done, which only happens on an error. If the error is
@@ -161,6 +179,8 @@ pub async fn run_gimbal_loop(
             motor_position_tx.clone(),
             floz_logger.clone(),
             cfg.clone(),
+            stream_warmed_up_tx,
+            stream_warmed_up_rx,
         )
         .await
         {
@@ -184,12 +204,15 @@ async fn run_gimbal_loop_internal(
     motor_position_tx: tokio::sync::mpsc::Sender<MotorPositionResult>,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     cfg: GimbalConfig,
+    stream_warmed_up_tx: tokio::sync::watch::Sender<bool>,
+    mut stream_warmed_up_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), InternalGimbalError> {
     let InitializationResult {
         mut messages_tx,
         mut messages_rx,
         offset_yaw,
         offset_pitch,
+        stream_requested_at,
     } = ir;
     let pan_rev: FloatType = if cfg.reverse_pan { -1.0 } else { 1.0 };
     let tilt_rev: FloatType = if cfg.reverse_tilt { -1.0 } else { 1.0 };
@@ -206,6 +229,10 @@ async fn run_gimbal_loop_internal(
 
     //loop for encoder readout
     let rx_loop = async {
+        let mut telemetry_count = 0_u64;
+        let mut telemetry_since_stream_start = 0_u64;
+        let mut first_custom_telemetry = true;
+        let mut last_telemetry_report = Instant::now();
         let mut last_imu_angles = RollPitchYaw::<FloatType> {
             roll: 0.0,
             pitch: 0.0,
@@ -222,6 +249,33 @@ async fn run_gimbal_loop_internal(
                 IncomingCommand::RawMessage(msg) => {
                     match msg.typ {
                         simplebgc::constants::CMD_REALTIME_DATA_CUSTOM => {
+                            if first_custom_telemetry {
+                                tracing::debug!(
+                                    elapsed = ?stream_requested_at.elapsed(),
+                                    "received first SimpleBGC custom realtime packet"
+                                );
+                                first_custom_telemetry = false;
+                            }
+                            telemetry_count += 1;
+                            telemetry_since_stream_start += 1;
+                            if telemetry_since_stream_start == STREAM_WARMUP_PACKETS {
+                                stream_warmed_up_tx.send_replace(true);
+                                tracing::info!(
+                                    telemetry_since_stream_start,
+                                    "SimpleBGC realtime stream warm-up complete"
+                                );
+                            }
+                            let telemetry_elapsed = last_telemetry_report.elapsed();
+                            if telemetry_elapsed >= Duration::from_secs(1) {
+                                tracing::debug!(
+                                    telemetry_count,
+                                    telemetry_hz =
+                                        telemetry_count as f64 / telemetry_elapsed.as_secs_f64(),
+                                    "SimpleBGC realtime telemetry receive rate"
+                                );
+                                telemetry_count = 0;
+                                last_telemetry_report = Instant::now();
+                            }
                             let msg_data: custom_messages::RealTimeDataCustomFlo =
                                 Payload::from_bytes(msg.payload).unwrap();
 
@@ -323,13 +377,28 @@ async fn run_gimbal_loop_internal(
                             motor_position_tx.send(ret).await.unwrap();
                         }
                         _ => {
-                            tracing::info!("unknown message #{}", msg.typ);
+                            tracing::debug!(
+                                command_id = msg.typ,
+                                payload_len = msg.payload.len(),
+                                elapsed = ?stream_requested_at.elapsed(),
+                                "received non-custom SimpleBGC raw message after stream request"
+                            );
                         }
                     }
                 }
-                IncomingCommand::CommandConfirm(_) => {}
+                IncomingCommand::CommandConfirm(confirm) => {
+                    tracing::debug!(
+                        ?confirm,
+                        elapsed = ?stream_requested_at.elapsed(),
+                        "received SimpleBGC command confirmation after stream request"
+                    );
+                }
                 msg => {
-                    tracing::info!("got some other message from the gimbal: {msg:?}");
+                    tracing::debug!(
+                        ?msg,
+                        elapsed = ?stream_requested_at.elapsed(),
+                        "received non-custom SimpleBGC message after stream request"
+                    );
                 }
             }
         }
@@ -346,6 +415,21 @@ async fn run_gimbal_loop_internal(
         };
 
         let mut last_mode = (MotorDriveMode::Position, true);
+        let mut control_count = 0_u64;
+        let mut last_control_report = Instant::now();
+
+        if !*stream_warmed_up_rx.borrow() {
+            tracing::debug!(
+                stream_warmup_packets = STREAM_WARMUP_PACKETS,
+                "waiting to send SimpleBGC controls until realtime stream warm-up completes"
+            );
+            stream_warmed_up_rx.changed().await?;
+        }
+        tracing::debug!(
+            ?STREAM_WARMUP_SETTLE_DURATION,
+            "waiting briefly before sending first SimpleBGC control"
+        );
+        tokio::time::sleep(STREAM_WARMUP_SETTLE_DURATION).await;
 
         loop {
             let current_motors = {
@@ -447,6 +531,24 @@ async fn run_gimbal_loop_internal(
                 }
             }
 
+            control_count += 1;
+            let control_elapsed = last_control_report.elapsed();
+            if control_elapsed >= Duration::from_secs(1) {
+                tracing::debug!(
+                    control_count,
+                    control_hz = control_count as f64 / control_elapsed.as_secs_f64(),
+                    drive_mode = ?current_motors.drivemode,
+                    relative_frame = current_motors.rel_frame,
+                    pan_target_radians = current_motors.pan.0,
+                    tilt_target_radians = current_motors.tilt.0,
+                    pan_speed_radians_per_second = current_motors.vpan,
+                    tilt_speed_radians_per_second = current_motors.vtilt,
+                    "SimpleBGC control command transmit rate and latest target"
+                );
+                control_count = 0;
+                last_control_report = Instant::now();
+            }
+
             //limit the rate of sending the commands.
             // This is a workaround for some mysterious bug, where
             // incoming messages start to arrive in large packs every
@@ -461,14 +563,16 @@ async fn run_gimbal_loop_internal(
     tokio::pin!(control_loop);
 
     // Futures should run forever, but if one ends it is an error and we should raise it.
-    tokio::select! {
+    let loop_result = tokio::select! {
         rx_result = &mut rx_loop => {
-            rx_result?;
+            rx_result
         }
         control_result = &mut control_loop => {
-            control_result.map_err(|report| InternalGimbalError::Wrapped{report})?;
+            control_result.map_err(|report| InternalGimbalError::Wrapped{report})
         }
-    }
+    };
+
+    loop_result?;
 
     Ok(())
 }

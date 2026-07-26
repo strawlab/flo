@@ -1802,6 +1802,7 @@ async fn app_main(
 
     // Create channel for motor position feedback.
     let (motor_position_tx, mut motor_position_rx) = mpsc::channel::<MotorPositionResult>(10);
+    let mut motor_position_tx = Some(motor_position_tx);
 
     let mut converter_handle: JoinHandle<eyre::Result<()>> = {
         let mut rx1 = broadway.flo_events.subscribe();
@@ -1851,8 +1852,12 @@ async fn app_main(
         tracing::error!("PWM output enabled, but no PWM serial device specified");
     }
 
-    // Launch task to run serial IO for rpi pico pantilt PWM motors
-    let mut motor_task_join_handle = if let Some(pwm_serial) = cli.pwm_serial {
+    // Launch task to run serial IO for rpi pico pantilt PWM motors. Gimbal
+    // startup is deferred until the coordinator is ready to consume its
+    // bounded motor-position channel.
+    let motor_task_start: Box<dyn FnOnce() -> JoinHandle<eyre::Result<()>>>;
+    let mut motor_position_tx_for_backend = motor_position_tx.clone();
+    if let Some(pwm_serial) = cli.pwm_serial {
         my_state.motor_type = MotorType::PwmServo;
 
         let baud_rate = 115_200;
@@ -1867,11 +1872,12 @@ async fn app_main(
         let tilt_motor_config = device_config.tilt_motor_config.clone();
 
         let motors_rx = motors_rx.clone();
-        {
-            let handle2 = handle.clone();
-            handle.spawn(async move {
+        let handle2 = handle.clone();
+        motor_task_start = Box::new(move || {
+            let io_handle = handle2.clone();
+            handle2.spawn(async move {
                 pwm_serial_io::run_rpi_pico_pwm_serial_loop(
-                    &handle2,
+                    &io_handle,
                     motors_rx,
                     serial_device,
                     pan_pwm_config,
@@ -1881,7 +1887,7 @@ async fn app_main(
                 )
                 .await
             })
-        }
+        });
     } else if let Some(trinamic_pan) = cli.trinamic_pan {
         my_state.motor_type = MotorType::Trinamic;
         let pan_trinamic_config = device_config.pan_trinamic_config.as_mut().unwrap();
@@ -1915,56 +1921,55 @@ async fn app_main(
         let tilt_trinamic_config = tilt_trinamic_config.clone();
 
         let motors_rx = motors_rx.clone();
-        handle.spawn(async move {
-            trinamic_io::run_trinamic_loop(
-                motors_rx,
-                motor_position_tx,
-                pan_device,
-                tilt_device,
-                focus_device,
-                pan_trinamic_config,
-                tilt_trinamic_config,
-            )
-            .await
-        })
+        motor_task_start = Box::new(move || {
+            handle.spawn(async move {
+                trinamic_io::run_trinamic_loop(
+                    motors_rx,
+                    motor_position_tx_for_backend
+                        .take()
+                        .expect("motor-position sender is available for trinamic"),
+                    pan_device,
+                    tilt_device,
+                    focus_device,
+                    pan_trinamic_config,
+                    tilt_trinamic_config,
+                )
+                .await
+            })
+        });
     } else if let Some(cfg) = device_config.gimbal_config.clone() {
         my_state.motor_type = MotorType::Gimbal;
         let flo_saver_tx = flo_saver_tx.clone();
         let motors_rx = motors_rx.clone();
-        handle.spawn(async move {
-            sbgc_gimbal::run_gimbal_loop(motors_rx, motor_position_tx, flo_saver_tx, cfg).await
-        })
+        motor_task_start = Box::new(move || {
+            let motor_position_tx = motor_position_tx
+                .take()
+                .expect("motor-position sender is available for gimbal");
+            handle.spawn(async move {
+                sbgc_gimbal::run_gimbal_loop(motors_rx, motor_position_tx, flo_saver_tx, cfg).await
+            })
+        });
     } else {
         tracing::warn!("No motor control method specified.");
-        handle.spawn(async {
-            loop {
-                futures::future::pending().await
-            }
-        })
-    };
+        motor_task_start = Box::new(move || {
+            handle.spawn(async {
+                loop {
+                    futures::future::pending().await
+                }
+            })
+        });
+    }
 
-    let (mut focus_motor_task, focusing): (Pin<Box<dyn Future<Output = _>>>, bool) =
+    let (delayed_tilta_focus_port, focusing) =
         match &device_config.focus_motor_config.as_ref().unwrap().motor {
-            FocusMotorType::NoMotor => (Box::pin(pending()), false),
+            FocusMotorType::NoMotor => (None, false),
             FocusMotorType::Trinamic(_) => {
                 if my_state.motor_type != MotorType::Trinamic {
                     eyre::bail!("trinamic focus with non-trinamic pan/tilt not yet implemented");
                 }
-                //nothing to do, already handled when setting up pan/tilt
-                (Box::pin(pending()), true)
+                (None, true) // handled by the deferred Trinamic backend task
             }
-            FocusMotorType::Tilta(tcfg) => {
-                //let task = tilta_io::run_tilta_loop();
-                //(Some(task), true)
-                let port = tcfg.port.clone();
-                let jh = {
-                    let handle2 = handle.clone();
-                    handle.spawn(async move {
-                        tilta_io::run_tilta_loop(&handle2, port.as_str(), motors_rx).await
-                    })
-                };
-                (Box::pin(jh), true)
-            }
+            FocusMotorType::Tilta(tcfg) => (Some(tcfg.port.clone()), true),
         };
     my_state.focusing = focusing;
 
@@ -2178,6 +2183,20 @@ async fn app_main(
         precapture_buffered_rx,
         strand_cams,
     );
+
+    // No motor backend is spawned until after the coordinator exists. The
+    // coordinator select loop below is the consumer of motor_position_rx.
+    let mut motor_task_join_handle = motor_task_start();
+    let mut focus_motor_task: Pin<Box<dyn Future<Output = _>>> =
+        if let Some(port) = delayed_tilta_focus_port {
+            let handle2 = handle.clone();
+            let motors_rx = motors_rx.clone();
+            Box::pin(handle.spawn(async move {
+                tilta_io::run_tilta_loop(&handle2, port.as_str(), motors_rx).await
+            }))
+        } else {
+            Box::pin(pending())
+        };
 
     // Main loop. Keep its result so extensions receive their shutdown signal
     // even if a subsystem returns an error rather than taking a normal break.
