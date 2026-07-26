@@ -259,6 +259,7 @@ struct AppState {
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
 }
 
+#[expect(dead_code)]
 fn display_qr_url(url: &str) {
     use qrcodegen::{QrCode, QrCodeEcc};
     use std::io::stdout;
@@ -447,8 +448,8 @@ pub async fn start_listener(
         tracing::info!("FLO listener at {listener_local_addr}, predicted URL: {url}");
 
         if !is_loopback_uri(&url) {
-            println!("QR code for {url}");
-            display_qr_url(&format!("{url}"));
+            // println!("QR code for {url}");
+            // display_qr_url(&format!("{url}"));
         }
     }
 
