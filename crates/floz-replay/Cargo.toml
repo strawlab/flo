@@ -20,3 +20,9 @@ tokio.workspace = true
 floz-parser.workspace = true
 flo-core.workspace = true
 flo.workspace = true
+
+[features]
+default = ["bundle_files"]
+
+bundle_files = ["flo/bundle_files"]
+serve_files = ["flo/serve_files"]
