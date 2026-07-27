@@ -307,7 +307,7 @@ pub(crate) fn kalman_step(
                 let v_cov = sq(10.0); //initial velocity variance. #FIXME: this should be in config
                 *kalman_dist_estimates = Some((StateAndCovariance::new(
                     na::Matrix2x1::<FloatType>::new(distance.as_float(), 0.0),
-                    na::OMatrix::<FloatType, na::U2, na::U2>::new(dist_obs_cov, 0.0, v_cov, 0.0),
+                    na::OMatrix::<FloatType, na::U2, na::U2>::new(dist_obs_cov, 0.0, 0.0, v_cov),
                 ),));
             }
         }
