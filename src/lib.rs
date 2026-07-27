@@ -1452,14 +1452,6 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    if std::env::var_os("RUST_LOG").is_none() {
-        let envstr = format!("{}=info,info", env!("CARGO_PKG_NAME")).replace('-', "_");
-        // SAFETY: We ensure that this only happens in single-threaded code
-        // because this is immediately at the start of run() and no other
-        // threads have started.
-        unsafe { std::env::set_var("RUST_LOG", envstr) };
-    }
-
     let cli = parse_cli(args);
     let (log_dir, data_dir) = if let Some(dd) = cli.data_dir.as_ref() {
         (dd.clone(), dd.clone())
