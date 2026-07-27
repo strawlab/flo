@@ -252,9 +252,17 @@ pub(crate) fn kalman_step(
 
             // Initialize state directly from observation.
             // TODO: check the initial covariance.
+            let ang_cov = sq(kf_params.observation_noise);
+            let angv_cov = sq(kf_params.motion_noise);
+
             *kalman_estimates = Some((StateAndCovariance::new(
-                na::Matrix4x1::<FloatType>::identity(),
-                na::OMatrix::<FloatType, na::U4, na::U4>::identity(),
+                na::Matrix4x1::<FloatType>::new(pan_observed.as_float(), tilt_observed.as_float(), 0.0, 0.0),
+                na::OMatrix::<FloatType, na::U4, na::U4>::new(
+                    ang_cov, 0.0, 0.0, 0.0,
+                    0.0, ang_cov, 0.0, 0.0,
+                    0.0, 0.0, angv_cov, 0.0,
+                    0.0, 0.0, 0.0, angv_cov,
+                ),
             ),));
         }
     }
