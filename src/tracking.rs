@@ -256,11 +256,11 @@ pub(crate) fn kalman_step(
             let angv_cov = sq(kf_params.motion_noise);
 
             *kalman_estimates = Some((StateAndCovariance::new(
-                na::Matrix4x1::<FloatType>::new(pan_observed.as_float(), 0.0, tilt_observed.as_float(), 0.0),
+                na::Matrix4x1::<FloatType>::new(pan_observed.as_float(), tilt_observed.as_float(), 0.0, 0.0),
                 na::OMatrix::<FloatType, na::U4, na::U4>::new(
                     ang_cov, 0.0, 0.0, 0.0,
-                    0.0, angv_cov, 0.0, 0.0,
-                    0.0, 0.0, ang_cov, 0.0,
+                    0.0, ang_cov, 0.0, 0.0,
+                    0.0, 0.0, angv_cov, 0.0,
                     0.0, 0.0, 0.0, angv_cov,
                 ),
             ),));
