@@ -2,8 +2,8 @@ use std::io::{Seek, Write};
 
 use color_eyre::eyre::Result;
 use flo_core::{
-    FloControllerConfig, GimbalEncoderData, GimbalEncoderOffsets, MomentCentroid, SaveToDiskMsg,
-    StampedBMsg, StampedJson, StampedMomentCentroid,
+    FloControllerConfig, GimbalEncoderData, GimbalEncoderOffsets, GimbalProvenance, MomentCentroid,
+    SaveToDiskMsg, StampedBMsg, StampedJson, StampedMomentCentroid,
 };
 use serde::{Deserialize, Serialize};
 
@@ -320,6 +320,7 @@ pub(crate) fn writer_task_main(
     tracing::debug!("Starting floz writer task. {}:{}", file!(), line!());
 
     let mut encoder_offsets = None;
+    let mut gimbal_provenance = None;
 
     // Pre-capture ("post-trigger") RAM buffer. Holds recent data messages
     // while not recording so that starting a recording also writes the
@@ -346,6 +347,7 @@ pub(crate) fn writer_task_main(
                             creation_time,
                             output_dirname,
                             encoder_offsets.as_ref(),
+                            gimbal_provenance.as_deref(),
                             config,
                             raw_config_source,
                         )?;
@@ -380,6 +382,14 @@ pub(crate) fn writer_task_main(
                 }
                 // Cache value.
                 encoder_offsets = Some(offsets);
+            }
+            GimbalProvenance(provenance) => {
+                if let Some(ref mut ws) = writing_state.as_mut() {
+                    ws.save_gimbal_provenance(&provenance)?;
+                }
+                // Cache so recordings started later in the session still carry
+                // the controller identity read at connection time.
+                gimbal_provenance = Some(provenance);
             }
             // All remaining variants carry per-event data. While recording,
             // write them straight to disk; otherwise feed the pre-capture
@@ -565,6 +575,11 @@ The archive typically contains:
 - `motor_positions.csv` — measured motor/gimbal positions over time.
 - `encoder_data.csv` — raw gimbal IMU and encoder readings.
 - `encoder_offsets.csv` — gimbal encoder offsets used during the recording.
+- `gimbal-provenance.yaml` — gimbal controller identity (microcontroller id,
+  firmware version, active profile) and its stored encoder configuration, read
+  at connection time, with a fingerprint of the configuration. Comparing the
+  fingerprint across recordings detects a re-calibration that left no other
+  trace.
 - `broadway.jsonl` — line-delimited JSON log of FLO events and commands.
 
 Not every file is present in every recording; the exact set depends on the
@@ -580,6 +595,7 @@ impl WritingState {
         creation_time_local: chrono::DateTime<chrono::Local>,
         output_dirname: camino::Utf8PathBuf,
         encoder_offsets: Option<&GimbalEncoderOffsets>,
+        gimbal_provenance: Option<&GimbalProvenance>,
         config: &FloControllerConfig,
         raw_config_source: Option<&str>,
     ) -> Result<Self> {
@@ -675,6 +691,10 @@ impl WritingState {
             result.save_encoder_offsets(encoder_offsets)?;
         }
 
+        if let Some(gimbal_provenance) = gimbal_provenance {
+            result.save_gimbal_provenance(gimbal_provenance)?;
+        }
+
         Ok(result)
     }
 
@@ -682,7 +702,7 @@ impl WritingState {
     ///
     /// Used both for live messages while recording and for replaying the
     /// pre-capture buffer. Control messages (`Quit`, `ToggleSavingFloz`,
-    /// `SetPreCaptureSeconds`, `GimbalEncoderOffsets`) are handled by the
+    /// `SetPreCaptureSeconds`, `GimbalEncoderOffsets`, `GimbalProvenance`) are handled by the
     /// caller and never reach here.
     fn save_data_msg(&mut self, msg: SaveToDiskMsg) -> Result<()> {
         use SaveToDiskMsg::*;
@@ -722,6 +742,18 @@ impl WritingState {
 
     fn save_centroid(&mut self, centroid_data: StampedMomentCentroid) -> Result<()> {
         self.centroid_wtr.serialize(centroid_data)?;
+        Ok(())
+    }
+
+    /// Write the gimbal controller's identity and stored configuration.
+    ///
+    /// Written once per recording rather than appended: it is a property of the
+    /// connection, not a time series.
+    fn save_gimbal_provenance(&mut self, provenance: &GimbalProvenance) -> Result<()> {
+        let path = self.output_dirname.join(flo_core::GIMBAL_PROVENANCE_FNAME);
+        let buf = serde_yaml::to_string(provenance)?;
+        let mut fd = std::fs::File::create(path)?;
+        fd.write_all(buf.as_bytes())?;
         Ok(())
     }
 

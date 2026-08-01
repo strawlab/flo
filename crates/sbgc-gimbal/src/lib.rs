@@ -14,17 +14,26 @@ use flo_core::{
 };
 
 pub(crate) mod custom_messages;
+mod provenance;
 
 const BAUD_RATE: u32 = 115_200;
 /// A short stream warm-up used before sending the first control command.
 const STREAM_WARMUP_PACKETS: u64 = 100;
 const STREAM_WARMUP_SETTLE_DURATION: Duration = Duration::from_millis(250);
+/// How long to keep collecting startup query responses once the required
+/// encoder offsets have arrived.
+///
+/// Only the offsets are needed to fly. The identity and configuration queries
+/// are provenance, and provenance must never be able to ground the aircraft --
+/// if a board does not answer them, that is recorded and startup continues.
+const PROVENANCE_COLLECT_TIMEOUT: Duration = Duration::from_millis(1500);
 
 struct InitializationResult {
     messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
     messages_rx: SplitStream<Framed<SerialStream, V2Codec>>,
     offset_yaw: f64,
     offset_pitch: f64,
+    provenance: flo_core::GimbalProvenance,
     stream_requested_at: Instant,
 }
 
@@ -66,20 +75,44 @@ async fn initialize_gimbals(
             .await?;
     }
 
-    messages_tx
-        .send(OutgoingCommand::ReadParamsExt(ParamsQuery {
-            profile_id: 0,
-        }))
-        .await?;
-    tracing::debug!("requested SimpleBGC encoder offsets");
+    // Ask the board to describe itself, then for its stored parameters.
+    //
+    // Only ReadParamsExt is needed to fly -- it carries the encoder offsets.
+    // The other three are provenance: BOARD_INFO_3 carries the microcontroller
+    // id, which is the only hardware serial this controller has, and the
+    // parameter sets carry the encoder calibration that turns a count into an
+    // angle. All are read-only and cost a few milliseconds at 115200 baud.
+    for query in [
+        OutgoingCommand::BoardInfo,
+        OutgoingCommand::BoardInfo3,
+        OutgoingCommand::ReadParams3(ParamsQuery { profile_id: 0 }),
+        OutgoingCommand::ReadParamsExt(ParamsQuery { profile_id: 0 }),
+    ] {
+        messages_tx.send(query).await?;
+    }
+    tracing::debug!("requested SimpleBGC encoder offsets and board provenance");
 
-    let mut results;
-    loop {
-        let msg = messages_rx
-            .next()
-            .await
-            .ok_or_else(|| eyre::eyre!("no response from gimbal"))??;
+    // Collect until every query is answered, or until the provenance deadline
+    // expires with the required offsets in hand. A board that does not
+    // implement BOARD_INFO_3 must still fly.
+    let mut queries = provenance::StartupQueries::default();
+    let collect_deadline = Instant::now() + PROVENANCE_COLLECT_TIMEOUT;
+    while !queries.is_complete() {
+        let remaining = collect_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let msg = match tokio::time::timeout(remaining, messages_rx.next()).await {
+            Err(_elapsed) => break,
+            Ok(None) => return Err(eyre::eyre!("no response from gimbal")),
+            Ok(Some(msg)) => msg?,
+        };
         match msg {
+            IncomingCommand::BoardInfo(cmd) => queries.board_info = Some(cmd),
+            IncomingCommand::BoardInfo3(cmd) => queries.board_info_3 = Some(cmd),
+            IncomingCommand::ReadParams3(cmd) | IncomingCommand::ReadParams(cmd) => {
+                queries.params_3 = Some(cmd)
+            }
             IncomingCommand::ReadParamsExt(cmd) => {
                 let (y, p, r) = (
                     cmd.encoder_offset.yaw,
@@ -91,24 +124,62 @@ async fn initialize_gimbals(
                     elapsed = ?initialization_started.elapsed(),
                     "received SimpleBGC encoder offsets"
                 );
-                let offset_yaw = (cmd.encoder_offset.yaw as f64) / ((1 << 14) as f64);
-                let offset_pitch = (cmd.encoder_offset.pitch as f64) / ((1 << 14) as f64);
-
-                results = InitializationResult {
-                    messages_tx,
-                    messages_rx,
-                    offset_yaw,
-                    offset_pitch,
-                    // Replaced immediately after the stream request below.
-                    stream_requested_at: Instant::now(),
-                };
-                break;
+                queries.params_ext = Some(cmd);
             }
             msg => {
-                tracing::debug!(?msg, "received message while waiting for encoder offsets");
+                tracing::debug!(?msg, "received message while waiting for startup queries");
             }
         }
     }
+
+    let params_ext = queries
+        .params_ext
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("gimbal did not return encoder offsets"))?;
+    let offset_yaw = (params_ext.encoder_offset.yaw as f64) / ((1 << 14) as f64);
+    let offset_pitch = (params_ext.encoder_offset.pitch as f64) / ((1 << 14) as f64);
+
+    let provenance = provenance::build(&queries);
+    if provenance.unanswered.is_empty() {
+        tracing::debug!("gimbal answered every startup provenance query");
+    } else {
+        tracing::warn!(
+            unanswered = ?provenance.unanswered,
+            "gimbal left some provenance queries unanswered; recording what it did return"
+        );
+    }
+    if let Some(board) = &provenance.board {
+        tracing::info!(
+            mcu_id = %board.mcu_id,
+            firmware = %board.firmware_version,
+            profile = board.profile_current,
+            fingerprint = provenance.config_fingerprint_sha256.as_deref().unwrap_or("-"),
+            "gimbal controller identified"
+        );
+    }
+    if let Some(encoders) = &provenance.encoders {
+        // A direct-drive axis reads 1000 here. Anything else means the encoder
+        // count is geared relative to the joint, which an analysis that assumes
+        // a unit scale would silently get wrong.
+        tracing::info!(
+            gear_ratio_milli_ypr = ?(
+                encoders.gear_ratio_milli.yaw,
+                encoders.gear_ratio_milli.pitch,
+                encoders.gear_ratio_milli.roll,
+            ),
+            "gimbal encoder gear ratios"
+        );
+    }
+
+    let mut results = InitializationResult {
+        messages_tx,
+        messages_rx,
+        offset_yaw,
+        offset_pitch,
+        provenance,
+        // Replaced immediately after the stream request below.
+        stream_requested_at: Instant::now(),
+    };
 
     {
         // Request realtime encoder data stream.
@@ -212,6 +283,7 @@ async fn run_gimbal_loop_internal(
         mut messages_rx,
         offset_yaw,
         offset_pitch,
+        provenance,
         stream_requested_at,
     } = ir;
     let pan_rev: FloatType = if cfg.reverse_pan { -1.0 } else { 1.0 };
@@ -225,6 +297,14 @@ async fn run_gimbal_loop_internal(
                 yaw: offset_yaw,
             },
         ))
+        .map_err(wrap)?;
+
+    // Save the controller's identity and stored configuration. Held by the
+    // writer and re-emitted into every subsequent recording, so a recording
+    // started hours after connection still says which board and which
+    // calibration produced it.
+    floz_logger
+        .send(SaveToDiskMsg::GimbalProvenance(Box::new(provenance)))
         .map_err(wrap)?;
 
     //loop for encoder readout

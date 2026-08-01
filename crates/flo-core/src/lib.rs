@@ -70,6 +70,12 @@ pub const TRACKING_STATE_FNAME: &str = "tracking_state.csv";
 pub const CENTROID_FNAME: &str = "centroid.csv";
 pub const ENCODER_DATA_FNAME: &str = "encoder_data.csv";
 pub const ENCODER_OFFSETS_FNAME: &str = "encoder_offsets.csv";
+/// Gimbal controller identity and stored configuration, queried at startup.
+///
+/// See [`GimbalProvenance`]. This is the record that lets a later analysis
+/// establish *which* controller, running *which* firmware, with *which* encoder
+/// calibration, produced a recording -- none of which is otherwise recoverable.
+pub const GIMBAL_PROVENANCE_FNAME: &str = "gimbal-provenance.yaml";
 /// Serialized [`FloControllerConfig`] saved alongside the recorded tables.
 pub const FLO_CONFIG_FNAME: &str = "flo-config.yaml";
 /// Newline-delimited JSON log of [`StampedBMsg`] events (detections, mode
@@ -1355,6 +1361,8 @@ pub enum SaveToDiskMsg {
     StampedTrackingState(Box<StampedTrackingState>),
     /// Gimbal encoder offsets
     GimbalEncoderOffsets(GimbalEncoderOffsets),
+    /// Gimbal controller identity and stored configuration, read at startup.
+    GimbalProvenance(Box<GimbalProvenance>),
     /// Gimbal encoder data
     GimbalEncoderData(GimbalEncoderData),
     /// Catch-all for (time)stamped JSON data from MAVLink
@@ -1404,6 +1412,99 @@ pub enum BMsg {
 pub struct GimbalEncoderOffsets {
     pub pitch: f64,
     pub yaw: f64,
+}
+
+/// A per-axis triple, matching the gimbal controller's roll/pitch/yaw ordering.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy)]
+pub struct AxisTriple<T> {
+    pub roll: T,
+    pub pitch: T,
+    pub yaw: T,
+}
+
+/// Identity of the gimbal controller board and the firmware it is running.
+///
+/// `mcu_id` is the microcontroller's unique device identifier: a hardware
+/// serial number for the board, readable over the wire. Without it, "which
+/// controller was this?" is unanswerable after the fact.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct GimbalBoardIdentity {
+    /// Unique microcontroller id, lowercase hex. The board's serial number.
+    pub mcu_id: String,
+    /// Board device id, lowercase hex.
+    pub device_id: String,
+    pub board_version_raw: u8,
+    /// Decoded board version, e.g. `"3.0"`.
+    pub board_version: String,
+    pub firmware_version_raw: u16,
+    /// Decoded firmware version, e.g. `"2.68b7"`.
+    pub firmware_version: String,
+    pub firmware_extra_id: u32,
+    pub board_features_raw: u16,
+    /// Decoded feature bits. `Encoders` and `CoggingCorrection` change how an
+    /// encoder count becomes an angle, so they are geometry, not trivia.
+    pub board_features: Vec<String>,
+    pub state_flags_raw: u8,
+    pub eeprom_size: u32,
+    /// How many profile slots the board has.
+    pub profile_slots: u8,
+    /// Which profile slot is active. Switching slots replaces the entire
+    /// parameter set with no other outward trace.
+    pub profile_current: u8,
+}
+
+/// The gimbal's stored encoder calibration and configuration.
+///
+/// Every field here participates in turning a raw encoder count into an angle,
+/// so every field is part of the geometric chain even though none of it is
+/// mechanical.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct GimbalEncoderConfig {
+    /// Raw stored offset, units of 2^-14 turn.
+    pub offset_raw: AxisTriple<i16>,
+    /// Offset in turns (`offset_raw / 2^14`), as applied by FLO.
+    pub offset_turns: AxisTriple<f64>,
+    /// Magnetic field offset calibration, raw units.
+    pub field_offset_raw: AxisTriple<i16>,
+    /// Gear ratio in units of 0.001. Direct drive reads 1000, i.e. 1.000, in
+    /// which case an encoder *scale* is 1 by construction and any apparent
+    /// scale error is really something else.
+    pub gear_ratio_milli: AxisTriple<u16>,
+    pub encoder_type: AxisTriple<u8>,
+    pub encoder_cfg: AxisTriple<u8>,
+    /// Manual-set time, units of 10 ms.
+    pub manual_set_time_10ms: AxisTriple<u8>,
+}
+
+/// Everything the gimbal controller can tell us about itself, captured once per
+/// connection and stored in the recording.
+///
+/// The point is that this is *machine-observable*: a controller's configuration
+/// can be read at every recording, so a change in it can be detected by
+/// comparing consecutive recordings rather than by hoping someone remembered to
+/// write down that they re-ran a calibration.
+///
+/// `raw_payloads` keeps the verbatim response bytes of each query, so a future
+/// analysis can re-parse fields nobody thought to name today. Provenance you
+/// have to anticipate is provenance you will lose.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct GimbalProvenance {
+    pub queried_at: chrono::DateTime<chrono::Local>,
+    pub board: Option<GimbalBoardIdentity>,
+    pub encoders: Option<GimbalEncoderConfig>,
+    /// SHA-256 over the verbatim configuration payloads, excluding anything
+    /// that varies between boots. Two recordings sharing this digest were made
+    /// under an identical controller configuration; a change between
+    /// consecutive recordings *is* an adjustment event, whether or not anyone
+    /// logged one.
+    pub config_fingerprint_sha256: Option<String>,
+    /// Which payloads the fingerprint covers, in digest order.
+    pub fingerprint_covers: Vec<String>,
+    /// Verbatim response payloads, keyed by command name, lowercase hex.
+    pub raw_payloads: std::collections::BTreeMap<String, String>,
+    /// Queries that went unanswered. Recorded rather than omitted: a board that
+    /// does not support a query is a fact about the board.
+    pub unanswered: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
