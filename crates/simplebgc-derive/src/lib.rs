@@ -309,7 +309,7 @@ fn get_parser_for_field(info: &FieldInfo) -> Option<TokenStream2> {
                         .filter_map(|(elem_idx, elem_ty)| {
                             // recursion ftw
                             get_parser_for_field(&FieldInfo {
-                                name: format!("{}[{}]", &info.name, elem_idx),
+                                name: format!("{}[{elem_idx}]", info.name),
                                 kind: FieldKind::Raw {
                                     ty: (*elem_ty).clone(),
                                 },
@@ -418,7 +418,7 @@ fn get_serializer_for_field(info: &FieldInfo) -> Option<TokenStream2> {
                         .filter_map(|(elem_idx, elem_ty)| {
                             // recursion ftw
                             get_serializer_for_field(&FieldInfo {
-                                name: format!("{}[{}]", &info.name, elem_idx),
+                                name: format!("{}[{elem_idx}]", info.name),
                                 kind: FieldKind::Raw {
                                     ty: (*elem_ty).clone(),
                                 },

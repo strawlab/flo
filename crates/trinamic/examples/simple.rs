@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
         trinamic::MotorParameters::TMCM1240(trinamic::TMCM1240Parameters::default()),
     )
     .await?;
-    println!("Opened pan axis device: {}", &cli.pan);
+    println!("Opened pan axis device: {}", cli.pan);
 
     println!("sleeping...");
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
