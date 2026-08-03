@@ -204,11 +204,29 @@ pub type KalmanEstimatesGlobalDynamic = Option<(adskalman::StateAndCovariance<Fl
 /// Kalman estimates for distance estimation
 pub type KalmanEstimatesDistance = Option<(adskalman::StateAndCovariance<FloatType, na::U2>,)>;
 
+/// Noise parameters for one Kalman filter.
+///
+/// Both fields are **RMS** (root-mean-square) values, for both the pan/tilt
+/// filter ([`FloControllerConfig::kalman_filter_parameters`]) and the distance
+/// filter ([`FloControllerConfig::kalman_filter_dist_parameters`]). The Kalman
+/// filter itself works in variances, so `kalman_step` squares them at the point
+/// of use.
+///
+/// Compatibility warning for old config files and old `.floz` recordings: the
+/// pan/tilt filter used to consume these two fields *unsquared*, i.e. as
+/// variances, while the distance filter always squared them. Any
+/// `kalman_filter_parameters` block written before 2026-08-03 therefore holds
+/// variances, and must be square-rooted to mean the same thing under the
+/// current code. The `kalman_filter_dist_parameters` block is unaffected. The
+/// example configs in this repository were converted in the same commit that
+/// unified the convention.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct KalmanFilterParameters {
-    /// RMS of unknown random acceleration.
+    /// RMS of the unknown random acceleration: rad/s² for the pan/tilt filter,
+    /// m/s² for the distance filter.
     pub motion_noise: FloatType,
-    /// RMS measurement noise.
+    /// RMS measurement noise: rad for the pan/tilt filter, m at 1 m range
+    /// (internally scaled by r²) for the distance filter.
     pub observation_noise: FloatType,
 }
 
@@ -876,9 +894,12 @@ impl MomentCentroid {
 
 impl Default for KalmanFilterParameters {
     fn default() -> Self {
+        // RMS values. These are the square roots of the variances this default
+        // carried while the pan/tilt filter consumed the fields unsquared, so
+        // the effective tuning is unchanged: 1e2 rad²/s³ and 1e-3 rad².
         KalmanFilterParameters {
-            motion_noise: 1e2,
-            observation_noise: 1e-3,
+            motion_noise: 10.0,
+            observation_noise: 0.031_622_776_601_683_79,
         }
     }
 }
