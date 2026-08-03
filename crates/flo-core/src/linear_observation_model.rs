@@ -74,6 +74,8 @@ where
 }
 
 impl<R: RealField + Copy> DynamicPositionObservationModel1D<R> {
+    /// `variance` is a measurement **variance**, not an RMS value. It becomes
+    /// `R` unchanged.
     pub fn new(variance: R) -> Self {
         let mut me = Self {
             observation_matrix: OMatrix::<_, U1, U2>::zeros(),
@@ -135,6 +137,8 @@ where
 }
 
 impl<R: RealField> DynamicPositionObservationModel2D<R> {
+    /// `var_phi` and `var_theta` are measurement **variances**, not RMS values.
+    /// They become the diagonal of `R` unchanged.
     pub fn new(var_phi: R, var_theta: R) -> Self {
         let one: R = na::convert(1.0);
         let zero: R = na::convert(0.0);

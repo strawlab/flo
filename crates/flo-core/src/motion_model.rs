@@ -30,8 +30,9 @@ where
         // Create transition model.
         let transition_model = OMatrix::<_, U1, U1>::new(one);
 
-        let t22 = dt / na::convert(1.0);
-        let transition_noise_covariance = OMatrix::<_, U1, U1>::new(t22) * noise_scale;
+        // Random walk: the position integrates white noise of variance
+        // `noise_scale`, so uncertainty grows linearly in `dt`.
+        let transition_noise_covariance = OMatrix::<_, U1, U1>::new(dt) * noise_scale;
         let transition_model_transpose = transition_model.transpose();
         Self {
             transition_model,
@@ -58,6 +59,9 @@ where
     }
 }
 
+/// Constant-velocity (integrated white-noise acceleration) model in 1D.
+///
+/// State vector convention: `(x, x_dot)`.
 pub struct Dynamic1DModel<R>
 where
     R: RealField + Copy,
@@ -72,6 +76,8 @@ impl<R> Dynamic1DModel<R>
 where
     R: RealField + Copy,
 {
+    /// `noise_scale` is the **variance** of the unknown acceleration, not its
+    /// RMS. Callers holding an RMS value must square it first.
     pub fn new(dt: R, noise_scale: R) -> Self
     where
         f64: From<R>,
@@ -126,7 +132,12 @@ where
     }
 }
 
-// dynamic (constant velocity) 2D motion model in global coordinates,
+/// Constant-velocity (integrated white-noise acceleration) model for two
+/// independent axes in global angular coordinates.
+///
+/// State vector convention: `(phi, theta, phi_dot, theta_dot)` — both positions
+/// first, then both velocities. Note this is *not* the per-axis interleaving
+/// `(phi, phi_dot, theta, theta_dot)`.
 pub struct Dynamic2DModel<R>
 where
     R: RealField,
@@ -141,6 +152,8 @@ impl<R> Dynamic2DModel<R>
 where
     R: RealField,
 {
+    /// `noise_scale` is the **variance** of the unknown angular acceleration,
+    /// not its RMS. Callers holding an RMS value must square it first.
     pub fn new(dt: R, noise_scale: R) -> Self
     where
         f64: From<R>,
@@ -201,82 +214,238 @@ where
 
 #[cfg(test)]
 mod tests {
-    use adskalman::StateAndCovariance;
+    use adskalman::{KalmanFilterNoControl, StateAndCovariance};
     use approx::assert_relative_eq;
     use na::{Matrix1, Matrix2, Matrix4, Vector1, Vector2, Vector4};
 
     use super::*;
+    use crate::linear_observation_model::{
+        DynamicPositionObservationModel1D, DynamicPositionObservationModel2D,
+    };
+    use crate::math::sq;
 
-    /// Test that doing updates every frame without observations
-    /// is equal to doing an update with a longer dt.
+    /// Assert that splitting a prediction interval into `n` equal sub-steps
+    /// gives the same estimate as a single prediction spanning the whole
+    /// interval, for `n` in 1..=5.
+    ///
+    /// `$ctor` is a closure taking `dt` and returning the model to test.
+    ///
+    /// This is the property that makes it safe for the controller to keep
+    /// predicting at the control-loop rate while observations are missing: the
+    /// accumulated uncertainty must not depend on how finely the interval was
+    /// sliced. It holds exactly (to floating point) because the process noise
+    /// covariance of an integrated-white-noise model satisfies
+    /// `Q(2dt) = F(dt) Q(dt) F(dt)' + Q(dt)`.
+    macro_rules! assert_predict_composes {
+        ($ctor:expr, $est0:expr) => {{
+            let dt = 0.017;
+            for n in 1..=5u32 {
+                let stepwise = $ctor(dt);
+                let mut est = $est0.clone();
+                for _ in 0..n {
+                    est = stepwise.predict(&est);
+                }
+
+                let single = $ctor(dt * f64::from(n));
+                let est_single = single.predict(&$est0);
+
+                assert_relative_eq!(
+                    est.state(),
+                    est_single.state(),
+                    epsilon = 1e-12,
+                    max_relative = 1e-12
+                );
+                assert_relative_eq!(
+                    est.covariance(),
+                    est_single.covariance(),
+                    epsilon = 1e-12,
+                    max_relative = 1e-12
+                );
+            }
+        }};
+    }
+
+    /// Deliberately not a scaled identity: a non-diagonal prior exercises the
+    /// `F P F'` cross terms, which a diagonal prior would leave untested.
+    fn prior_1d() -> StateAndCovariance<f64, U2> {
+        #[rustfmt::skip]
+        let covariance = Matrix2::new(
+            2.0, 0.5,
+            0.5, 7.0,
+        );
+        StateAndCovariance::new(Vector2::new(1.2, 3.4), covariance)
+    }
+
+    /// Symmetric and diagonally dominant, hence positive definite.
+    fn prior_2d() -> StateAndCovariance<f64, U4> {
+        #[rustfmt::skip]
+        let covariance = Matrix4::new(
+            2.0, 0.3, 0.1, 0.0,
+            0.3, 3.0, 0.0, 0.2,
+            0.1, 0.0, 1.5, 0.4,
+            0.0, 0.2, 0.4, 2.5,
+        );
+        StateAndCovariance::new(Vector4::new(0.1, -0.2, 0.3, 0.4), covariance)
+    }
+
     #[test]
-    fn test_missing_data_via_large_dt_2d() {
-        let motion_noise_scale = 1.234;
-        // Try a few values.
-        for dt1 in &[1.23, 2.0, 5.0] {
-            let mm1 = Static1DModel::<f64>::new(*dt1, motion_noise_scale);
+    fn test_predict_composes_static_1d() {
+        let est0 = StateAndCovariance::new(Vector1::new(1.2), Matrix1::new(42.0));
+        assert_predict_composes!(|dt| Static1DModel::<f64>::new(dt, 1.234), est0);
+    }
 
-            let state0 = Vector1::new(1.2);
-            let covar0 = 42.0 * Matrix1::<f64>::identity();
+    #[test]
+    fn test_predict_composes_dynamic_1d() {
+        assert_predict_composes!(|dt| Dynamic1DModel::new(dt, 1.234), prior_1d());
+    }
 
-            let est0 = StateAndCovariance::new(state0, covar0);
+    #[test]
+    fn test_predict_composes_dynamic_2d() {
+        assert_predict_composes!(|dt| Dynamic2DModel::new(dt, 1.234), prior_2d());
+    }
 
-            // Run two time steps of duration dt.
-            let est1_1 = mm1.predict(&est0);
-            let est1_2 = mm1.predict(&est1_1);
+    /// The same property as `test_predict_composes_dynamic_2d`, but driven
+    /// through the whole filter the way `flo`'s controller drives it.
+    ///
+    /// When no centroid is detected the controller passes a NAN observation,
+    /// which `adskalman` treats as missing and returns the prior unchanged. So
+    /// two control-loop steps without a detection must leave exactly the same
+    /// uncertainty as one step of twice the duration.
+    #[test]
+    fn test_missing_observation_matches_longer_dt_2d() {
+        let motion_noise_scale = 3.0;
+        let obs_var = 1e-8;
+        let observation_model = DynamicPositionObservationModel2D::new(obs_var, obs_var);
+        let missing = Vector2::new(f64::NAN, f64::NAN);
 
-            // Run one time step of duration 2*dt.
-            let mm2 = Static1DModel::<f64>::new(2.0 * dt1, motion_noise_scale);
-            let est2_2 = mm2.predict(&est0);
+        let est0 = prior_2d();
+        let dt = 0.005;
 
-            assert_relative_eq!(est1_2.state(), est2_2.state());
-            assert_relative_eq!(est1_2.covariance(), est2_2.covariance());
+        let stepwise_model = Dynamic2DModel::new(dt, motion_noise_scale);
+        let stepwise = KalmanFilterNoControl::new(&stepwise_model, &observation_model);
+        let mut est = est0.clone();
+        for _ in 0..2 {
+            est = stepwise.step(&est, &missing).unwrap();
         }
+
+        let single_model = Dynamic2DModel::new(2.0 * dt, motion_noise_scale);
+        let single = KalmanFilterNoControl::new(&single_model, &observation_model);
+        let est_single = single.step(&est0, &missing).unwrap();
+
+        assert_relative_eq!(
+            est.state(),
+            est_single.state(),
+            epsilon = 1e-12,
+            max_relative = 1e-12
+        );
+        assert_relative_eq!(
+            est.covariance(),
+            est_single.covariance(),
+            epsilon = 1e-12,
+            max_relative = 1e-12
+        );
     }
 
+    /// As `test_missing_observation_matches_longer_dt_2d`, for the distance
+    /// filter, which misses observations whenever stereopsis fails.
     #[test]
-    fn test_covariance_missing_frames_dynamic_1d() {
-        let motion_noise_scale = 1.234;
-        let dt1 = 5.678;
-        let model1 = Dynamic1DModel::new(dt1, motion_noise_scale);
+    fn test_missing_observation_matches_longer_dt_1d() {
+        let motion_noise_scale = sq(20.0);
+        let observation_model = DynamicPositionObservationModel1D::new(sq(0.0005));
+        let missing = Vector1::new(f64::NAN);
 
-        let state0 = Vector2::new(1.2, 3.4);
-        let covar0 = 42.0 * Matrix2::<f64>::identity();
+        let est0 = prior_1d();
+        let dt = 0.005;
 
-        let est0 = StateAndCovariance::new(state0, covar0);
+        let stepwise_model = Dynamic1DModel::new(dt, motion_noise_scale);
+        let stepwise = KalmanFilterNoControl::new(&stepwise_model, &observation_model);
+        let mut est = est0.clone();
+        for _ in 0..2 {
+            est = stepwise.step(&est, &missing).unwrap();
+        }
 
-        // Run two time steps of duration dt.
-        let est1_1 = model1.predict(&est0);
-        let est1_2 = model1.predict(&est1_1);
+        let single_model = Dynamic1DModel::new(2.0 * dt, motion_noise_scale);
+        let single = KalmanFilterNoControl::new(&single_model, &observation_model);
+        let est_single = single.step(&est0, &missing).unwrap();
 
-        // Run one time step of duration 2*dt.
-        let model2 = Dynamic1DModel::new(2.0 * dt1, motion_noise_scale);
-        let est2_2 = model2.predict(&est0);
-
-        assert_relative_eq!(est1_2.state(), est2_2.state());
-        assert_relative_eq!(est1_2.covariance(), est2_2.covariance());
+        assert_relative_eq!(
+            est.state(),
+            est_single.state(),
+            epsilon = 1e-12,
+            max_relative = 1e-12
+        );
+        assert_relative_eq!(
+            est.covariance(),
+            est_single.covariance(),
+            epsilon = 1e-12,
+            max_relative = 1e-12
+        );
     }
 
+    /// A covariance matrix must be symmetric. Guards against transposition and
+    /// argument-order slips in the hand-written matrix literals above, which
+    /// `nalgebra`'s row-major `new` makes easy to get wrong.
     #[test]
-    fn test_covariance_missing_frames_dynamic_2d() {
-        let motion_noise_scale = 1.234;
-        let dt1 = 5.678;
-        let model1 = Dynamic2DModel::new(dt1, motion_noise_scale);
+    fn test_transition_noise_covariance_is_symmetric() {
+        let dt = 0.017;
+        let q = 1.234;
 
-        let state0 = Vector4::new(1.2, 3.4, 5.6, 7.8);
-        let covar0 = 42.0 * Matrix4::<f64>::identity();
+        let q_1d = *Dynamic1DModel::new(dt, q).Q();
+        assert_relative_eq!(q_1d, q_1d.transpose());
 
-        let est0 = StateAndCovariance::new(state0, covar0);
+        let q_2d = *Dynamic2DModel::new(dt, q).Q();
+        assert_relative_eq!(q_2d, q_2d.transpose());
+    }
 
-        // Run two time steps of duration dt.
-        let est1_1 = model1.predict(&est0);
-        let est1_2 = model1.predict(&est1_1);
+    /// The process noise of a constant-velocity model integrates an unknown
+    /// acceleration of variance `q`, giving the standard
+    /// `q * [[dt^3/3, dt^2/2], [dt^2/2, dt]]`. Pin that form down explicitly so
+    /// the closed form cannot drift from the composition property above.
+    #[test]
+    fn test_dynamic_1d_matches_closed_form() {
+        let dt = 0.017;
+        let q = 1.234;
 
-        // Run one time step of duration 2*dt.
-        let model2 = Dynamic2DModel::new(2.0 * dt1, motion_noise_scale);
-        let est2_2 = model2.predict(&est0);
+        #[rustfmt::skip]
+        let expected = Matrix2::new(
+            dt * dt * dt / 3.0, dt * dt / 2.0,
+            dt * dt / 2.0,      dt,
+        ) * q;
+        assert_relative_eq!(*Dynamic1DModel::new(dt, q).Q(), expected);
 
-        assert_relative_eq!(est1_2.state(), est2_2.state());
-        assert_relative_eq!(est1_2.covariance(), est2_2.covariance());
+        #[rustfmt::skip]
+        let expected_f = Matrix2::new(
+            1.0, dt,
+            0.0, 1.0,
+        );
+        assert_relative_eq!(*Dynamic1DModel::new(dt, q).F(), expected_f);
+    }
+
+    /// The 2D model is two independent copies of the 1D model, interleaved as
+    /// `(phi, theta, phi_dot, theta_dot)`.
+    #[test]
+    fn test_dynamic_2d_is_two_independent_1d_axes() {
+        let dt = 0.017;
+        let q = 1.234;
+        let model_1d = Dynamic1DModel::new(dt, q);
+        let model_2d = Dynamic2DModel::new(dt, q);
+
+        // Map 1D index (position, velocity) = (0, 1) onto the 2D layout for
+        // each axis: phi is (0, 2) and theta is (1, 3).
+        for axis in 0..2 {
+            let idx = [axis, axis + 2];
+            for (i, &i2) in idx.iter().enumerate() {
+                for (j, &j2) in idx.iter().enumerate() {
+                    assert_relative_eq!(model_2d.Q()[(i2, j2)], model_1d.Q()[(i, j)]);
+                    assert_relative_eq!(model_2d.F()[(i2, j2)], model_1d.F()[(i, j)]);
+                }
+            }
+        }
+
+        // ... and the two axes must not be coupled.
+        for (i, j) in [(0, 1), (0, 3), (2, 1), (2, 3)] {
+            assert_relative_eq!(model_2d.Q()[(i, j)], 0.0);
+            assert_relative_eq!(model_2d.F()[(i, j)], 0.0);
+        }
     }
 }
