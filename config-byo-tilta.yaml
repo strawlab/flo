@@ -1,3 +1,7 @@
+# Config schema version. Version 2 means kalman_filter_parameters holds
+# RMS values; version 1 (or a missing field) meant variances and is
+# auto-converted on load with a warning.
+config_version: 2
 geometry: MovingMirror
 kalman_filter_parameters:
   # Pan/tilt filter. Both values are RMS (root-mean-square), as for

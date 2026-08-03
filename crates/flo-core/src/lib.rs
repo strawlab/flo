@@ -212,14 +212,13 @@ pub type KalmanEstimatesDistance = Option<(adskalman::StateAndCovariance<FloatTy
 /// filter itself works in variances, so `kalman_step` squares them at the point
 /// of use.
 ///
-/// Compatibility warning for old config files and old `.floz` recordings: the
-/// pan/tilt filter used to consume these two fields *unsquared*, i.e. as
-/// variances, while the distance filter always squared them. Any
-/// `kalman_filter_parameters` block written before 2026-08-03 therefore holds
-/// variances, and must be square-rooted to mean the same thing under the
-/// current code. The `kalman_filter_dist_parameters` block is unaffected. The
-/// example configs in this repository were converted in the same commit that
-/// unified the convention.
+/// The pan/tilt filter used to consume these two fields *unsquared*, i.e. as
+/// variances, while the distance filter always squared them. A
+/// `kalman_filter_parameters` block from a config at [`LEGACY_CONFIG_VERSION`]
+/// — including one embedded in an old `.floz` recording — therefore holds
+/// variances. [`migrate_config`] square-roots it on load, so such a file keeps
+/// behaving exactly as it did. The `kalman_filter_dist_parameters` block is
+/// unaffected.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct KalmanFilterParameters {
     /// RMS of the unknown random acceleration: rad/s² for the pan/tilt filter,
@@ -232,6 +231,82 @@ pub struct KalmanFilterParameters {
 
 fn is_false(val: &bool) -> bool {
     !val
+}
+
+/// Current config schema version, written into [`FloControllerConfig::config_version`].
+///
+/// Bump this only when the *meaning* of an existing field changes, so that an
+/// older file cannot be read correctly as-is, and teach [`migrate_config`] how to
+/// convert. Adding a new optional field does not need a bump.
+///
+/// * **1** (also assumed when the field is absent, see
+///   [`LEGACY_CONFIG_VERSION`]): `kalman_filter_parameters` holds variances,
+///   while `kalman_filter_dist_parameters` holds RMS values.
+/// * **2**: both blocks hold RMS values.
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
+/// Version assumed for a config file with no `config_version` field.
+///
+/// Versioning was introduced together with version 2, so every file that
+/// predates it — and therefore omits the field — is a version 1 file.
+pub const LEGACY_CONFIG_VERSION: u32 = 1;
+
+/// `serde` default for [`FloControllerConfig::config_version`].
+fn legacy_config_version() -> u32 {
+    LEGACY_CONFIG_VERSION
+}
+
+/// Bring a freshly deserialized config up to [`CURRENT_CONFIG_VERSION`].
+///
+/// Returns one human-readable note per conversion applied, for the caller to log.
+/// An empty return means the config was already current. Idempotent: migrating an
+/// already-migrated config is a no-op, because the version is stamped forward.
+///
+/// Migrating is preferred over rejecting old files: the conversions here are all
+/// exact, so an old config keeps producing exactly the filter behavior it always
+/// did rather than failing to load.
+///
+/// Errors if a value cannot be converted, rather than producing a `NaN` that
+/// would quietly disable a filter.
+pub fn migrate_config(cfg: &mut FloControllerConfig) -> Result<Vec<String>, eyre::Error> {
+    let mut notes = Vec::new();
+    let from_version = cfg.config_version;
+
+    if from_version < 2 {
+        // The pan/tilt filter used to consume these two fields unsquared, i.e.
+        // as variances. It now squares them, as the distance filter always did,
+        // so take the square root to preserve the effective tuning exactly.
+        // `kalman_filter_dist_parameters` was already RMS and is left alone.
+        let p = &mut cfg.kalman_filter_parameters;
+        let (motion_var, obs_var) = (p.motion_noise, p.observation_noise);
+        if !(motion_var >= 0.0 && obs_var >= 0.0) {
+            eyre::bail!(
+                "at config_version {from_version} `kalman_filter_parameters` holds \
+                 variances, so motion_noise ({motion_var}) and observation_noise \
+                 ({obs_var}) must both be non-negative to be converted to RMS values"
+            );
+        }
+        p.motion_noise = motion_var.sqrt();
+        p.observation_noise = obs_var.sqrt();
+        notes.push(format!(
+            "this config is version {from_version}, in which `kalman_filter_parameters` held \
+             variances; converted to the version {CURRENT_CONFIG_VERSION} RMS values \
+             (motion_noise {motion_var} -> {}, observation_noise {obs_var} -> {}). The filter \
+             behaves exactly as before. To silence this, store the new values and set \
+             `config_version: {CURRENT_CONFIG_VERSION}`.",
+            p.motion_noise, p.observation_noise,
+        ));
+    }
+
+    if from_version > CURRENT_CONFIG_VERSION {
+        eyre::bail!(
+            "config_version {from_version} is newer than this build understands \
+             ({CURRENT_CONFIG_VERSION}); use a newer FLO"
+        );
+    }
+
+    cfg.config_version = CURRENT_CONFIG_VERSION;
+    Ok(notes)
 }
 
 /// Top-level device configuration.
@@ -247,6 +322,15 @@ fn is_false(val: &bool) -> bool {
 /// deserializing, use `validate_config`.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct FloControllerConfig {
+    /// Schema version of this config file. See [`CURRENT_CONFIG_VERSION`] for
+    /// what each version means.
+    ///
+    /// Absent means [`LEGACY_CONFIG_VERSION`], i.e. a file written before
+    /// versioning existed. [`migrate_config`] brings such a file up to the
+    /// current version.
+    #[serde(default = "legacy_config_version")]
+    pub config_version: u32,
+
     pub geometry: SystemGeometry,
 
     #[serde(default, skip_serializing_if = "is_false")]
@@ -907,6 +991,8 @@ impl Default for KalmanFilterParameters {
 impl Default for FloControllerConfig {
     fn default() -> Self {
         Self {
+            // Built in code, so it already uses the current field meanings.
+            config_version: CURRENT_CONFIG_VERSION,
             geometry: SystemGeometry::default(),
             pwm_output_enabled: false,
             strand_cam_main: Default::default(),
@@ -1304,4 +1390,116 @@ fn test_motor_position_result_csv_serialize_with_imu_velocity() -> eyre::Result<
     motor_position_wtr.flush()?;
 
     Ok(())
+}
+
+/// A config written before versioning existed holds variances in
+/// `kalman_filter_parameters`. Migrating must square-root them, so that the
+/// filter — which now squares them — sees exactly the `Q` and `R` that the old
+/// file produced under the old code.
+#[test]
+fn test_migrate_converts_legacy_kalman_variances_to_rms() {
+    use approx::assert_relative_eq;
+
+    // The values config-byo.yaml carried while these fields were variances.
+    let mut cfg = FloControllerConfig {
+        config_version: LEGACY_CONFIG_VERSION,
+        kalman_filter_parameters: KalmanFilterParameters {
+            motion_noise: 3.0,
+            observation_noise: 1e-4,
+        },
+        kalman_filter_dist_parameters: Some(KalmanFilterParameters {
+            motion_noise: 20.0,
+            observation_noise: 5e-4,
+        }),
+        ..Default::default()
+    };
+
+    let notes = migrate_config(&mut cfg).unwrap();
+
+    assert_eq!(notes.len(), 1, "expected one conversion, got {notes:?}");
+    assert_eq!(cfg.config_version, CURRENT_CONFIG_VERSION);
+
+    // Squaring the migrated RMS values recovers the variances the file meant.
+    let p = &cfg.kalman_filter_parameters;
+    assert_relative_eq!(sq(p.motion_noise), 3.0, max_relative = 1e-12);
+    assert_relative_eq!(sq(p.observation_noise), 1e-4, max_relative = 1e-12);
+
+    // The distance block was always RMS, so it must be left exactly alone.
+    let d = cfg.kalman_filter_dist_parameters.as_ref().unwrap();
+    assert_eq!(d.motion_noise, 20.0);
+    assert_eq!(d.observation_noise, 5e-4);
+}
+
+/// Migrating twice must not convert twice. Guards the case where a config is
+/// round-tripped through the migration more than once.
+#[test]
+fn test_migrate_config_is_idempotent() {
+    let mut cfg = FloControllerConfig {
+        config_version: LEGACY_CONFIG_VERSION,
+        kalman_filter_parameters: KalmanFilterParameters {
+            motion_noise: 3.0,
+            observation_noise: 1e-4,
+        },
+        ..Default::default()
+    };
+
+    assert_eq!(migrate_config(&mut cfg).unwrap().len(), 1);
+    let once = cfg.clone();
+
+    assert!(
+        migrate_config(&mut cfg).unwrap().is_empty(),
+        "second migration should be a no-op"
+    );
+    assert_eq!(cfg, once);
+}
+
+/// An already-current config must be left untouched and reported as such, so
+/// the operator is not warned about a file that needs no attention.
+#[test]
+fn test_migrate_config_leaves_current_config_alone() {
+    let cfg = FloControllerConfig {
+        kalman_filter_parameters: KalmanFilterParameters {
+            motion_noise: 1.732_050_807_568_877_2,
+            observation_noise: 0.01,
+        },
+        ..Default::default()
+    };
+    let mut migrated = cfg.clone();
+
+    assert!(migrate_config(&mut migrated).unwrap().is_empty());
+    assert_eq!(migrated, cfg);
+}
+
+/// A negative variance cannot be square-rooted. Erroring beats storing the
+/// resulting `NaN`, which would quietly disable the filter for the whole flight.
+#[test]
+fn test_migrate_config_rejects_negative_legacy_variance() {
+    for params in [
+        KalmanFilterParameters {
+            motion_noise: -1.0,
+            observation_noise: 1e-4,
+        },
+        KalmanFilterParameters {
+            motion_noise: 3.0,
+            observation_noise: -1e-4,
+        },
+    ] {
+        let mut cfg = FloControllerConfig {
+            config_version: LEGACY_CONFIG_VERSION,
+            kalman_filter_parameters: params,
+            ..Default::default()
+        };
+        assert!(migrate_config(&mut cfg).is_err());
+    }
+}
+
+/// A config from a newer FLO may use field meanings this build does not know,
+/// so refuse it rather than misinterpret it.
+#[test]
+fn test_migrate_config_rejects_a_future_version() {
+    let mut cfg = FloControllerConfig {
+        config_version: CURRENT_CONFIG_VERSION + 1,
+        ..Default::default()
+    };
+    assert!(migrate_config(&mut cfg).is_err());
 }

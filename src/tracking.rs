@@ -808,9 +808,23 @@ mod tests {
         ];
 
         for (name, yaml, accel_var, obs_var) in cases {
-            let cfg: FloControllerConfig = serde_yaml::from_str(yaml).expect(name);
-            let params = &cfg.kalman_filter_parameters;
+            let mut cfg: FloControllerConfig = serde_yaml::from_str(yaml).expect(name);
 
+            // Each checked-in config declares the current version, so loading it
+            // must not convert anything. Without this, the values below would be
+            // square-rooted a second time on every startup.
+            assert_eq!(
+                cfg.config_version,
+                flo_core::CURRENT_CONFIG_VERSION,
+                "{name} should declare the current config_version"
+            );
+            let notes = flo_core::migrate_config(&mut cfg).unwrap();
+            assert!(
+                notes.is_empty(),
+                "{name} should need no migration: {notes:?}"
+            );
+
+            let params = &cfg.kalman_filter_parameters;
             assert_relative_eq!(
                 angle_acceleration_variance(params),
                 accel_var,
@@ -818,6 +832,45 @@ mod tests {
             );
             assert_relative_eq!(
                 angle_observation_variance(params),
+                obs_var,
+                max_relative = 1e-12
+            );
+
+            // The same file as it looked before versioning: no `config_version`
+            // and the pan/tilt values still variances. Migration must recover
+            // exactly the tuning asserted above.
+            let legacy = yaml
+                .replace(
+                    &format!("config_version: {}\n", flo_core::CURRENT_CONFIG_VERSION),
+                    "",
+                )
+                .replace(
+                    &format!("motion_noise: {}", params.motion_noise),
+                    &format!("motion_noise: {accel_var}"),
+                )
+                .replace(
+                    &format!("observation_noise: {}", params.observation_noise),
+                    &format!("observation_noise: {obs_var}"),
+                );
+            let mut legacy_cfg: FloControllerConfig = serde_yaml::from_str(&legacy).expect(name);
+            assert_eq!(
+                legacy_cfg.config_version,
+                flo_core::LEGACY_CONFIG_VERSION,
+                "{name} legacy variant: a missing config_version must default to the \
+                 pre-versioning version, not to 0"
+            );
+
+            let notes = flo_core::migrate_config(&mut legacy_cfg).unwrap();
+            assert_eq!(notes.len(), 1, "{name} legacy variant should be converted");
+
+            let migrated = &legacy_cfg.kalman_filter_parameters;
+            assert_relative_eq!(
+                angle_acceleration_variance(migrated),
+                accel_var,
+                max_relative = 1e-12
+            );
+            assert_relative_eq!(
+                angle_observation_variance(migrated),
                 obs_var,
                 max_relative = 1e-12
             );
