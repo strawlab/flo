@@ -255,15 +255,21 @@ pub(crate) fn kalman_step(
             let ang_cov = sq(kf_params.observation_noise);
             let angv_cov = sq(kf_params.motion_noise);
 
-            *kalman_estimates = Some((StateAndCovariance::new(
-                na::Matrix4x1::<FloatType>::new(pan_observed.as_float(), tilt_observed.as_float(), 0.0, 0.0),
-                na::OMatrix::<FloatType, na::U4, na::U4>::new(
-                    ang_cov, 0.0, 0.0, 0.0,
-                    0.0, ang_cov, 0.0, 0.0,
-                    0.0, 0.0, angv_cov, 0.0,
-                    0.0, 0.0, 0.0, angv_cov,
-                ),
-            ),));
+            // state vector convention: (phi, theta, phi_dot, theta_dot)
+            let state = na::Matrix4x1::<FloatType>::new(
+                pan_observed.as_float(),
+                tilt_observed.as_float(),
+                0.0,
+                0.0,
+            );
+            #[rustfmt::skip]
+            let covariance = na::OMatrix::<FloatType, na::U4, na::U4>::new(
+                ang_cov, 0.0,     0.0,      0.0,
+                0.0,     ang_cov, 0.0,      0.0,
+                0.0,     0.0,     angv_cov, 0.0,
+                0.0,     0.0,     0.0,      angv_cov,
+            );
+            *kalman_estimates = Some((StateAndCovariance::new(state, covariance),));
         }
     }
 
