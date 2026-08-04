@@ -343,6 +343,10 @@ pub(crate) fn kalman_step(
 
     if let Some(kf_dist_params) = cfg.kalman_filter_dist_parameters.as_ref() {
         let dist_obs = distance.as_float();
+        // `distance` comes from stereo disparity (`StereopsisCalibration::centroids_to_distance`),
+        // where depth ~ 1/disparity. A roughly constant pixel-level disparity error therefore
+        // produces a depth error that grows with r^2, so the calibrated 1-m RMS noise is scaled
+        // by r^2 here before being squared into the variance the Kalman filter expects.
         let dist_obs_cov = sq(kf_dist_params.observation_noise * sq(dist_obs));
         if let Some(kalman_dist_estimates) = kalman_dist_estimates.as_mut() {
             let kf_dist_estimate = &mut &mut kalman_dist_estimates.0;
