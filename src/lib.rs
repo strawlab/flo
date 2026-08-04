@@ -962,6 +962,13 @@ pub fn run(options: AppOptions) -> Result<()> {
         }
     };
 
+    // Bring an older config file up to the current schema. Anything whose
+    // meaning changed is converted here rather than silently reinterpreted, and
+    // every conversion is warned about so the operator knows to update the file.
+    for note in flo_core::migrate_config(&mut device_config)? {
+        tracing::warn!("migrating config: {note}");
+    }
+
     // Set the initial home from the motor neutral positions. The home
     // position can be updated by the operator.
     my_state.home_position = (

@@ -114,11 +114,15 @@ strand-cam-storetype.workspace = true
 # for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
 # sudo apt install librust-alsa-sys-dev
 
+[dev-dependencies]
+approx.workspace = true
+
 [target.'cfg(target_os = "windows")'.dependencies]
 ansi_term = "0.12.1"
 
 [workspace.dependencies]
 adskalman = { version = "0.17", default-features = false }
+approx = "0.5"
 axum = "0.8.1"
 bytes = "1"
 cam-geom = "0.16"

@@ -4,8 +4,9 @@ use nalgebra as na;
 
 use flo_core::{
     Angle, Broadway, CentroidToAngleCalibration, DeviceMode, DeviceState, FloControllerConfig,
-    FloatType, FocusMotorType, ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType,
-    RadialDistance, SensorAngle2D, StereopsisState, TrackingState, motion_model, sq,
+    FloatType, FocusMotorType, KalmanFilterParameters, ModeChangeReason, MomentCentroid,
+    MotorPositionResult, MotorType, RadialDistance, SensorAngle2D, StereopsisState, TrackingState,
+    motion_model, sq,
 };
 
 ///returns position and velocity after dt, given init. pos,  velocity, and acceleration limit,
@@ -101,6 +102,86 @@ pub(crate) fn centroid_to_sensor_angles(
         // Observed angles are NAN if centroid values not present.
         SensorAngle2D::nan()
     }
+}
+
+/// Variance of a pan/tilt angle measurement, i.e. one diagonal entry of the
+/// filter's `R`.
+///
+/// [`KalmanFilterParameters::observation_noise`] is an RMS, so it is squared
+/// here. Squaring happens in this one place so that the filter and
+/// [`initial_angle_estimate`] cannot drift apart.
+fn angle_observation_variance(kf_params: &KalmanFilterParameters) -> FloatType {
+    sq(kf_params.observation_noise)
+}
+
+/// Variance of the unknown angular acceleration, i.e. the process noise scale
+/// the motion model expects.
+///
+/// [`KalmanFilterParameters::motion_noise`] is an RMS, so it is squared here.
+fn angle_acceleration_variance(kf_params: &KalmanFilterParameters) -> FloatType {
+    sq(kf_params.motion_noise)
+}
+
+/// Initial state and covariance for the pan/tilt filter, seeded from a single
+/// position observation.
+///
+/// The state *is* the observation, so the position block of the covariance is
+/// exactly the filter's measurement covariance `R`. Velocity cannot be inferred
+/// from a single position, so it starts at zero with a deliberately
+/// uninformative variance, scaled by how agile the config says the target is.
+///
+/// Getting this right matters because the filter is re-initialized every time
+/// the controller re-acquires a target (see the `kalman_estimates = None` resets
+/// on mode change), and the resulting state drives the motor command directly.
+fn initial_angle_estimate(
+    kf_params: &KalmanFilterParameters,
+    pan_observed: Angle,
+    tilt_observed: Angle,
+) -> StateAndCovariance<FloatType, na::U4> {
+    /// Prior ignorance about the target's angular speed, expressed as the time
+    /// over which the unknown acceleration is allowed to act.
+    const INITIAL_VELOCITY_HORIZON_SECS: FloatType = 1.0;
+
+    // Position starts as certain as the measurement it came from. Acceleration
+    // variance times a duration gives a velocity variance.
+    let ang_cov = angle_observation_variance(kf_params);
+    let angv_cov = angle_acceleration_variance(kf_params) * INITIAL_VELOCITY_HORIZON_SECS;
+
+    // state vector convention: (phi, theta, phi_dot, theta_dot)
+    let state = na::Matrix4x1::<FloatType>::new(
+        pan_observed.as_float(),
+        tilt_observed.as_float(),
+        0.0,
+        0.0,
+    );
+    #[rustfmt::skip]
+    let covariance = na::OMatrix::<FloatType, na::U4, na::U4>::new(
+        ang_cov, 0.0,     0.0,      0.0,
+        0.0,     ang_cov, 0.0,      0.0,
+        0.0,     0.0,     angv_cov, 0.0,
+        0.0,     0.0,     0.0,      angv_cov,
+    );
+    StateAndCovariance::new(state, covariance)
+}
+
+/// Initial state and covariance for the distance filter, seeded from a single
+/// stereopsis observation. `dist_obs_cov` is the filter's `R` at this range.
+///
+/// State vector convention: `(r, r_dot)`.
+fn initial_distance_estimate(
+    dist_obs_cov: FloatType,
+    distance: RadialDistance,
+) -> StateAndCovariance<FloatType, na::U2> {
+    let v_cov = sq(10.0); //initial velocity variance. #FIXME: this should be in config
+    #[rustfmt::skip]
+    let covariance = na::OMatrix::<FloatType, na::U2, na::U2>::new(
+        dist_obs_cov, 0.0,
+        0.0,          v_cov,
+    );
+    StateAndCovariance::new(
+        na::Matrix2x1::<FloatType>::new(distance.as_float(), 0.0),
+        covariance,
+    )
 }
 
 /// Updates tracking_state. {pan_obs, tilt_obs, kalman_estimates, last_observation}
@@ -220,14 +301,14 @@ pub(crate) fn kalman_step(
         let kf_estimate = &mut &mut kalman_estimates.0;
 
         // Build Kalman filter using Global Coordinate 2D Dynamic model
-
-        let transition_model = motion_model::Dynamic2DModel::new(dt_secs, kf_params.motion_noise);
+        let transition_model =
+            motion_model::Dynamic2DModel::new(dt_secs, angle_acceleration_variance(kf_params));
 
         // this is a simple linear observation model. The nonlinearity is taken into account whern calculating the observed pan & tilt angles. alternative approach: build pan-tilt dependent observation model
+        let ang_var = angle_observation_variance(kf_params);
         let observation_model =
             flo_core::linear_observation_model::DynamicPositionObservationModel2D::new(
-                kf_params.observation_noise,
-                kf_params.observation_noise,
+                ang_var, ang_var,
             );
         // create Kalman filter with above models (in adskalman crate)
         let kf = KalmanFilterNoControl::new(&transition_model, &observation_model);
@@ -249,12 +330,10 @@ pub(crate) fn kalman_step(
 
         if !is_nan(sensor_x) && !is_nan(sensor_y) {
             // Use observation to initialize estimate.
-
-            // Initialize state directly from observation.
-            // TODO: check the initial covariance.
-            *kalman_estimates = Some((StateAndCovariance::new(
-                na::Matrix4x1::<FloatType>::identity(),
-                na::OMatrix::<FloatType, na::U4, na::U4>::identity(),
+            *kalman_estimates = Some((initial_angle_estimate(
+                kf_params,
+                pan_observed,
+                tilt_observed,
             ),));
         }
     }
@@ -296,11 +375,7 @@ pub(crate) fn kalman_step(
         } else {
             // No existing state estimate.
             if !is_nan(distance.as_float()) {
-                let v_cov = sq(10.0); //initial velocity variance. #FIXME: this should be in config
-                *kalman_dist_estimates = Some((StateAndCovariance::new(
-                    na::Matrix2x1::<FloatType>::new(distance.as_float(), 0.0),
-                    na::OMatrix::<FloatType, na::U2, na::U2>::new(dist_obs_cov, 0.0, v_cov, 0.0),
-                ),));
+                *kalman_dist_estimates = Some((initial_distance_estimate(dist_obs_cov, distance),));
             }
         }
     }
@@ -672,4 +747,209 @@ pub(crate) fn compute_motor_output(
 #[inline]
 fn is_nan<R: nalgebra::RealField>(x: R) -> bool {
     x.partial_cmp(&R::zero()).is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use approx::assert_relative_eq;
+
+    use super::*;
+
+    fn kf_params() -> KalmanFilterParameters {
+        // Values from config-byo.yaml. RMS, so sqrt(3) rad/s² of acceleration
+        // and 0.01 rad of measurement noise.
+        KalmanFilterParameters {
+            motion_noise: 1.732_050_807_568_877_2,
+            observation_noise: 0.01,
+        }
+    }
+
+    /// The config fields are RMS values and the filter works in variances, so
+    /// exactly one squaring must happen between them. Pinned against literals
+    /// rather than against the helpers, so that dropping or doubling the `sq()`
+    /// fails here instead of silently retuning every deployment.
+    #[test]
+    fn test_noise_parameters_are_squared_exactly_once() {
+        let params = kf_params();
+
+        assert_relative_eq!(angle_observation_variance(&params), 1e-4);
+        assert_relative_eq!(angle_acceleration_variance(&params), 3.0);
+    }
+
+    /// Pin the *effective* pan/tilt tuning of the checked-in configs.
+    ///
+    /// `motion_noise` and `observation_noise` were variances until the pan/tilt
+    /// filter was changed to square them, at which point every config was
+    /// square-rooted to keep the filter behaving identically. These are the
+    /// variances from before that conversion, so this test fails if a config's
+    /// RMS value is edited as though it were still a variance — which would
+    /// retune a rig silently rather than visibly.
+    #[test]
+    fn test_example_configs_preserve_their_effective_tuning() {
+        let cases = [
+            (
+                "config-byo.yaml",
+                include_str!("../config-byo.yaml"),
+                3.0,
+                1e-4,
+            ),
+            (
+                "config-byo-tilta.yaml",
+                include_str!("../config-byo-tilta.yaml"),
+                3.0,
+                1e-4,
+            ),
+            (
+                "config-mini.yaml",
+                include_str!("../config-mini.yaml"),
+                1000.0,
+                1e-4,
+            ),
+        ];
+
+        for (name, yaml, accel_var, obs_var) in cases {
+            let mut cfg: FloControllerConfig = serde_yaml::from_str(yaml).expect(name);
+
+            // Each checked-in config declares the current version, so loading it
+            // must not convert anything. Without this, the values below would be
+            // square-rooted a second time on every startup.
+            assert_eq!(
+                cfg.config_version,
+                flo_core::CURRENT_CONFIG_VERSION,
+                "{name} should declare the current config_version"
+            );
+            let notes = flo_core::migrate_config(&mut cfg).unwrap();
+            assert!(
+                notes.is_empty(),
+                "{name} should need no migration: {notes:?}"
+            );
+
+            let params = &cfg.kalman_filter_parameters;
+            assert_relative_eq!(
+                angle_acceleration_variance(params),
+                accel_var,
+                max_relative = 1e-12
+            );
+            assert_relative_eq!(
+                angle_observation_variance(params),
+                obs_var,
+                max_relative = 1e-12
+            );
+
+            // The same file as it looked before versioning: no `config_version`
+            // and the pan/tilt values still variances. Migration must recover
+            // exactly the tuning asserted above.
+            let legacy = yaml
+                .replace(
+                    &format!("config_version: {}\n", flo_core::CURRENT_CONFIG_VERSION),
+                    "",
+                )
+                .replace(
+                    &format!("motion_noise: {}", params.motion_noise),
+                    &format!("motion_noise: {accel_var}"),
+                )
+                .replace(
+                    &format!("observation_noise: {}", params.observation_noise),
+                    &format!("observation_noise: {obs_var}"),
+                );
+            let mut legacy_cfg: FloControllerConfig = serde_yaml::from_str(&legacy).expect(name);
+            assert_eq!(
+                legacy_cfg.config_version,
+                flo_core::LEGACY_CONFIG_VERSION,
+                "{name} legacy variant: a missing config_version must default to the \
+                 pre-versioning version, not to 0"
+            );
+
+            let notes = flo_core::migrate_config(&mut legacy_cfg).unwrap();
+            assert_eq!(notes.len(), 1, "{name} legacy variant should be converted");
+
+            let migrated = &legacy_cfg.kalman_filter_parameters;
+            assert_relative_eq!(
+                angle_acceleration_variance(migrated),
+                accel_var,
+                max_relative = 1e-12
+            );
+            assert_relative_eq!(
+                angle_observation_variance(migrated),
+                obs_var,
+                max_relative = 1e-12
+            );
+        }
+    }
+
+    /// A filter re-initialized from an observation must point *at* that
+    /// observation. It previously used `Matrix4x1::identity()`, which in
+    /// nalgebra is `[1, 0, 0, 0]` rather than all-ones, so every re-acquisition
+    /// claimed the target sat at pan = 1 rad and tilt = 0. Because the state
+    /// feeds the motor command directly, that slewed the gimbal to ~57 degrees.
+    #[test]
+    fn test_angle_estimate_is_seeded_from_the_observation() {
+        let est = initial_angle_estimate(&kf_params(), Angle(0.25), Angle(-0.5));
+
+        assert_relative_eq!(est.state()[0], 0.25);
+        assert_relative_eq!(est.state()[1], -0.5);
+        // Velocity is unobservable from one position, so it must start at rest
+        // rather than at some arbitrary nonzero rate.
+        assert_relative_eq!(est.state()[2], 0.0);
+        assert_relative_eq!(est.state()[3], 0.0);
+    }
+
+    /// The state is exactly the observation, so its position uncertainty is
+    /// exactly the measurement uncertainty the filter will use for `R`. Any
+    /// other value makes the first update inconsistent with the initialization.
+    #[test]
+    fn test_angle_estimate_position_covariance_equals_the_filters_r() {
+        let params = kf_params();
+        let est = initial_angle_estimate(&params, Angle(0.25), Angle(-0.5));
+
+        let r = angle_observation_variance(&params);
+        assert_relative_eq!(est.covariance()[(0, 0)], r);
+        assert_relative_eq!(est.covariance()[(1, 1)], r);
+        // Velocity must be much less certain than position, or the filter will
+        // not accept the velocity implied by subsequent observations.
+        assert!(est.covariance()[(2, 2)] > est.covariance()[(0, 0)]);
+        assert!(est.covariance()[(3, 3)] > est.covariance()[(1, 1)]);
+    }
+
+    /// Both initial covariances must be symmetric with the variances on the
+    /// diagonal. The distance filter used to build
+    /// `Matrix2x2::new(dist_obs_cov, 0.0, v_cov, 0.0)`, and because nalgebra's
+    /// `new` is row-major that put the velocity variance in an off-diagonal
+    /// slot and left the velocity variance itself at zero -- asymmetric,
+    /// singular, and claiming perfect certainty about the range rate.
+    #[test]
+    fn test_initial_covariances_are_symmetric_and_diagonal() {
+        let ang = *initial_angle_estimate(&kf_params(), Angle(0.25), Angle(-0.5)).covariance();
+        assert_relative_eq!(ang, ang.transpose());
+
+        let dist = *initial_distance_estimate(1e-6, RadialDistance(3.0)).covariance();
+        assert_relative_eq!(dist, dist.transpose());
+
+        // The position and velocity blocks start uncorrelated.
+        for m in [ang.fixed_view::<2, 2>(0, 2), ang.fixed_view::<2, 2>(2, 0)] {
+            assert_relative_eq!(m.into_owned(), na::Matrix2::zeros());
+        }
+        assert_relative_eq!(dist[(0, 1)], 0.0);
+        assert_relative_eq!(dist[(1, 0)], 0.0);
+
+        // Every variance must be strictly positive: a zero on the diagonal is a
+        // claim of perfect knowledge that the filter can never recover from.
+        for i in 0..4 {
+            assert!(ang[(i, i)] > 0.0, "angle variance {i} is not positive");
+        }
+        for i in 0..2 {
+            assert!(dist[(i, i)] > 0.0, "distance variance {i} is not positive");
+        }
+    }
+
+    #[test]
+    fn test_distance_estimate_is_seeded_from_the_observation() {
+        let dist_obs_cov = 1e-6;
+        let est = initial_distance_estimate(dist_obs_cov, RadialDistance(3.0));
+
+        assert_relative_eq!(est.state()[0], 3.0);
+        assert_relative_eq!(est.state()[1], 0.0);
+        assert_relative_eq!(est.covariance()[(0, 0)], dist_obs_cov);
+        assert!(est.covariance()[(1, 1)] > est.covariance()[(0, 0)]);
+    }
 }

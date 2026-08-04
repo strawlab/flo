@@ -1,7 +1,18 @@
+# Config schema version. Version 2 means kalman_filter_parameters holds
+# RMS values; version 1 (or a missing field) meant variances and is
+# auto-converted on load with a warning.
+config_version: 2
 geometry: MovingMirror
 kalman_filter_parameters:
-  motion_noise: 3.0
-  observation_noise: 0.0001
+  # Pan/tilt filter. Both values are RMS (root-mean-square), as for
+  # kalman_filter_dist_parameters; kalman_step squares them.
+  #
+  # RMS of the unknown random angular acceleration [rad/s^2].
+  # Was 3.0 when this field held a variance [rad^2/s^3].
+  motion_noise: 1.7320508075688772
+  # RMS of the angular measurement noise [rad].
+  # Was 0.0001 when this field held a variance [rad^2].
+  observation_noise: 0.01
 kalman_filter_dist_parameters:
   # Motion noise [m/s2] for constant-speed dynamic model is
   # root-mean-square of (unknown random) acceleration [m/s2].
