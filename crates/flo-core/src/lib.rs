@@ -342,9 +342,7 @@ pub struct FloControllerConfig {
     /// Kalman filter parameters for distance estimation
     ///
     /// motion_noise: Motion noise (m/s²) for constant-speed dynamic model is
-    /// root-mean-square of (unknown random) acceleration (m/s²). Flying animals
-    /// have thrust to mass ratios anywhere between circa 11 and 50 m/s² [doi:
-    /// 10.1098/rsos.160746]. Honey bees are probably around 17 m/s².
+    /// root-mean-square of (unknown random) acceleration (m/s²).
     ///
     /// observation_noise: rms measurement noise at 1 meter; this is internally
     /// scaled according to stereopsis law (i.e., multiplied by r^2)
