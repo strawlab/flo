@@ -152,7 +152,7 @@ log = "0.4.17"
 wasm-logger = "0.2.0"
 yew = { version = "0.22.0", features = ["csr"] }
 machine-vision-formats = "0.1.5"
-mavlink = { version = "0.17", default-features = false }
+mavlink = { version = "0.12.2", default-features = false }
 multiwii_serial_protocol_v2 = "0.1.12"
 nalgebra = { version = "0.34", default-features = false }
 num-derive = "0.4.2"
