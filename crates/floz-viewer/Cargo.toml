@@ -1,0 +1,36 @@
+[package]
+name = "floz-viewer"
+version = "0.1.0"
+authors = ["Andrew Straw <strawman@astraw.com>"]
+edition = "2024"
+description = "web based .floz file viewer"
+
+[dependencies]
+log.workspace = true
+wasm-logger.workspace = true
+gloo-file.workspace = true
+yew.workspace = true
+
+# Versions match the strand-braid git rev used for ads-webasm.
+js-sys = "0.3.77"
+wasm-bindgen = "0.2.100"
+wasm-bindgen-futures = "0.4"
+
+floz-parser.workspace = true
+flo-core.workspace = true
+zip-or-dir.workspace = true
+ads-webasm.workspace = true
+
+[dependencies.web-sys]
+version = "0.3.72"
+features = [
+    "Blob",
+    "Event",
+    "File",
+    "FileList",
+    "FileReader",
+    "FileSystemFileHandle",
+    "HtmlInputElement",
+    "DataTransfer",
+    "DragEvent",
+]

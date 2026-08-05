@@ -1,0 +1,21 @@
+[package]
+name = "floz-parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# deps published on crates.io
+tracing.workspace = true
+color-eyre.workspace = true
+csv.workspace = true
+
+# flo and strand-braid deps
+flo-core.workspace = true
+zip-or-dir.workspace = true
+
+[dev-dependencies]
+# deps published on crates.io
+tracing-subscriber.workspace = true
+
+# flo and strand-braid deps
+download-verify.workspace = true

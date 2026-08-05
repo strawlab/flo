@@ -1,0 +1,325 @@
+// Inlined from ads-webasm/scss/_custom_file_upload.scss
+div.custom-file-upload-div-outer {
+    margin: 2px;
+    padding: 1px;
+    border-width: 1px;
+    border-style: solid;
+}
+
+.custom-file-upload-dropzone {
+    background-color: mediumseagreen;
+}
+
+div.custom-file-upload-div-inner {
+    margin: 10px;
+}
+
+.custom-file-upload-fs {
+    font-size: 80%;
+}
+
+input[type="file"].custom-file-upload-input {
+    display: none;
+}
+
+.custom-file-upload {
+    cursor: pointer;
+}
+
+// Inlined from ads-webasm/scss/_lds_ellipsis.scss
+// Source: https://loading.io/css/
+
+.lds-ellipsis {
+    display: inline-block;
+    position: relative;
+    width: 64px;
+    height: 64px;
+}
+.lds-ellipsis div {
+    position: absolute;
+    top: 27px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: white;
+    animation-timing-function: cubic-bezier(0, 1, 1, 0);
+}
+.lds-ellipsis div:nth-child(1) {
+    left: 6px;
+    animation: lds-ellipsis1 0.6s infinite;
+}
+.lds-ellipsis div:nth-child(2) {
+    left: 6px;
+    animation: lds-ellipsis2 0.6s infinite;
+}
+.lds-ellipsis div:nth-child(3) {
+    left: 26px;
+    animation: lds-ellipsis2 0.6s infinite;
+}
+.lds-ellipsis div:nth-child(4) {
+    left: 45px;
+    animation: lds-ellipsis3 0.6s infinite;
+}
+@keyframes lds-ellipsis1 {
+    0%   { transform: scale(0); }
+    100% { transform: scale(1); }
+}
+@keyframes lds-ellipsis3 {
+    0%   { transform: scale(1); }
+    100% { transform: scale(0); }
+}
+@keyframes lds-ellipsis2 {
+    0%   { transform: translate(0, 0); }
+    100% { transform: translate(19px, 0); }
+}
+
+// ---------------------------------------------------------------------------
+// App styles
+// ---------------------------------------------------------------------------
+
+$footer-height: 2.5rem;
+
+:root {
+    color-scheme: light dark;
+    --bg: #f6f3ee;
+    --panel: #ffffff;
+    --panel-muted: #f0ebe4;
+    --text: #24272b;
+    --muted: #68707b;
+    --border: #d7cec1;
+    --accent: #137f83;
+    --accent-strong: #0c6266;
+    --danger: #b33a3a;
+    --shadow: 0 12px 32px rgba(32, 24, 16, 0.10);
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #111417;
+        --panel: #1a2025;
+        --panel-muted: #232b31;
+        --text: #edf1f3;
+        --muted: #a8b1ba;
+        --border: #34404a;
+        --accent: #38aeb3;
+        --accent-strong: #70d0d3;
+        --danger: #f27c7c;
+        --shadow: 0 14px 36px rgba(0, 0, 0, 0.32);
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+}
+
+body {
+    background:
+        linear-gradient(180deg, rgba(19, 127, 131, 0.10), transparent 340px),
+        var(--bg);
+    color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+a {
+    color: var(--accent-strong);
+}
+
+button,
+.custom-file-upload {
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--accent);
+    color: #ffffff;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding: 0 14px;
+    font: inherit;
+    font-weight: 650;
+}
+
+button:disabled,
+button[disabled] {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.compute-modal {
+    align-items: flex-start;
+    background-color: rgba(0, 0, 0, 0.48);
+    display: flex;
+    inset: 0;
+    justify-content: center;
+    padding: 18px;
+    position: fixed;
+    z-index: 20;
+}
+
+.compute-modal-inner {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    color: var(--text);
+    max-width: 720px;
+    padding: 18px 24px;
+    text-align: center;
+    width: min(90vw, 720px);
+}
+
+.display-none {
+    display: none;
+}
+
+#page-container {
+    min-height: 100vh;
+    position: relative;
+}
+
+#content-wrap {
+    margin: 0 auto;
+    max-width: 1280px;
+    padding: 28px 24px calc($footer-height + 28px);
+}
+
+.app-header {
+    align-items: center;
+    display: flex;
+    gap: 20px;
+    justify-content: space-between;
+    margin-bottom: 22px;
+}
+
+.app-header h1 {
+    font-size: 2rem;
+    line-height: 1.05;
+    margin: 0 0 8px;
+}
+
+.app-header p,
+.panel-heading p,
+.empty-state p {
+    color: var(--muted);
+    margin: 0;
+}
+
+.viewer-main {
+    display: grid;
+    gap: 18px;
+}
+
+.panel,
+.empty-state {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    padding: 18px;
+}
+
+.panel-heading {
+    align-items: baseline;
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+
+.panel-heading h2,
+.empty-state h2 {
+    font-size: 1.15rem;
+    margin: 0;
+}
+
+.error-state {
+    border-color: color-mix(in srgb, var(--danger), var(--border) 45%);
+}
+
+.metric-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.metric-card,
+.plot-card {
+    background: var(--panel-muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.metric-card {
+    min-height: 84px;
+    padding: 12px;
+}
+
+.metric-card span {
+    color: var(--muted);
+    display: block;
+    font-size: 0.78rem;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+}
+
+.metric-card strong {
+    display: block;
+    font-size: 1.25rem;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+.plot-card {
+    overflow: hidden;
+    padding: 8px 8px 4px;
+}
+
+.plot-label {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin: 8px 4px 2px;
+}
+
+.plot {
+    height: 260px;
+    width: 100%;
+}
+
+#footer {
+    bottom: 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+    height: $footer-height;
+    left: 0;
+    padding: 0 24px 14px;
+    position: absolute;
+    width: 100%;
+}
+
+@media (max-width: 900px) {
+    #content-wrap {
+        padding: 18px 14px calc($footer-height + 24px);
+    }
+
+    .app-header,
+    .panel-heading {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .metric-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 560px) {
+    .metric-grid {
+        grid-template-columns: 1fr;
+    }
+}
