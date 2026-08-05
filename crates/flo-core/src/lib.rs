@@ -697,6 +697,12 @@ pub struct DeviceState {
     pub home_position: (Angle, Angle, RadialDistance),
     pub floz_recording_path: Option<RecordingPath>,
     pub webcam_recording_path: Option<RecordingPath>,
+    /// Configured pre-capture buffer window in seconds (0 = disabled).
+    #[serde(default)]
+    pub precapture_window_secs: FloatType,
+    /// Amount of data currently held in the pre-capture buffer, in seconds.
+    #[serde(default)]
+    pub precapture_buffered_secs: FloatType,
     pub stereopsis_state: Option<StereopsisState>,
     /// Is data from cameras stale.
     pub cam_stale: CamStaleBitmask,
@@ -916,6 +922,15 @@ pub struct StrandCamConfig {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub on_attach_json_commands: Vec<String>,
+
+    /// Expected recording frame rate of this camera, in frames per second.
+    ///
+    /// Used to convert the pre-capture window (configured in seconds) into the
+    /// frame count that Strand Cam's post-trigger buffer expects
+    /// (`CamArg::SetPostTriggerBufferSize`). When omitted, `flo` cannot size
+    /// the camera's pre-capture buffer and will skip configuring it.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub expected_fps: Option<FloatType>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
@@ -1204,6 +1219,8 @@ impl DeviceState {
             home_position: (Angle(0.0), Angle(0.0), RadialDistance(1.0)),
             floz_recording_path: None,
             webcam_recording_path: None,
+            precapture_window_secs: 0.0,
+            precapture_buffered_secs: 0.0,
             stereopsis_state: Default::default(),
             cam_stale: Default::default(),
         }
@@ -1286,7 +1303,18 @@ fn unique_id_to_hex(unique_id: &[u8; DEVICE_ID_LEN], hex_out: &mut [u8; DEVICE_I
 #[derive(Debug)]
 pub enum SaveToDiskMsg {
     /// Start or stop saving data to disk.
-    ToggleSavingFloz(Option<(chrono::DateTime<chrono::Local>, camino::Utf8PathBuf)>),
+    ///
+    /// On start, the boolean requests that the pre-capture buffer be flushed
+    /// into the new recording first (so it begins with the buffered window).
+    /// A normal recording passes `false` and ignores the buffer.
+    ToggleSavingFloz(Option<(chrono::DateTime<chrono::Local>, camino::Utf8PathBuf, bool)>),
+    /// Set the pre-capture buffer window in seconds (0 disables and clears it).
+    ///
+    /// While not recording, the writer task retains recent data messages in a
+    /// RAM ring buffer covering this window. When recording subsequently
+    /// starts, the buffered data is written first, so the recording includes
+    /// the preceding window. See [`FloCommand::SetPreCaptureSeconds`].
+    SetPreCaptureSeconds(FloatType),
     /// New centroid data
     CentroidData((chrono::DateTime<chrono::Local>, MomentCentroid)),
     /// New tracking state data

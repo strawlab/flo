@@ -62,6 +62,16 @@ pub enum FloCommand {
     SetHomePosition((Option<Angle>, Option<Angle>, Option<RadialDistance>)),
     SetHomePositionFromCurrent,
     SetRecordingState(bool),
+    /// Start a recording that also includes the buffered pre-capture window
+    /// (the "post-trigger" button). Stopping uses `SetRecordingState(false)`.
+    StartPreCaptureRecording,
+    /// Set the pre-capture ("post-trigger") buffer window, in seconds.
+    ///
+    /// When greater than zero, the most recent data is held in RAM so that
+    /// starting a recording also writes the preceding window to disk — letting
+    /// the operator "go back in time" and capture an event that already
+    /// happened. Zero disables buffering and discards anything buffered.
+    SetPreCaptureSeconds(FloatType),
     SetDistCorr(FloatType),
     AdjustFocus(i32),
 }

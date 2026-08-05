@@ -184,6 +184,8 @@ struct FloCoordinator<'a> {
     cam_session_secondary: Option<HttpSession>,
     camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
     highmag_visible_recorder: Option<h264_recorder::H264Recorder>,
+    /// Seconds of data currently held in the writer's pre-capture buffer.
+    precapture_buffered_rx: watch::Receiver<f64>,
 }
 
 impl<'a> FloCoordinator<'a> {
@@ -200,6 +202,7 @@ impl<'a> FloCoordinator<'a> {
         broadway: Broadway,
         camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
         data_dir: &'a camino::Utf8Path,
+        precapture_buffered_rx: watch::Receiver<f64>,
     ) -> Result<Self> {
         let (cam_session_main, cam_session_secondary, secondary_cam_name) =
             init_strand_cams(device_config).await?;
@@ -227,6 +230,7 @@ impl<'a> FloCoordinator<'a> {
             cam_session_secondary,
             camshow_recording_tx,
             highmag_visible_recorder: None,
+            precapture_buffered_rx,
         })
     }
 
@@ -436,10 +440,11 @@ impl<'a> FloCoordinator<'a> {
         self.motors_tx.send(current_motors.clone())?;
         self.my_state.cached_motors = current_motors;
         if let Some(next_mode) = next_mode {
-            self.handle_command(
-                FloCommand::SwitchMode(next_mode.0, next_mode.1),
-                CommandSource::Automation,
-            )?;
+            // Equivalent to handling FloCommand::SwitchMode from
+            // CommandSource::Automation, but called directly so this hot,
+            // synchronous path need not go through the (now async) command
+            // handler.
+            self.switch_to_mode(next_mode.0, next_mode.1)?;
         }
         Ok(())
     }
@@ -460,21 +465,171 @@ impl<'a> FloCoordinator<'a> {
         );
 
         self.my_state.mode = self.tracking_state.mode; //my_state.mode is just a mirror of tracking_state.mode, make sure it's up to date
+        // Reflect the writer's current pre-capture buffer fill.
+        self.my_state.precapture_buffered_secs = *self.precapture_buffered_rx.borrow();
         // relay to HTTP server
         self.from_device_http_tx.send(self.my_state.clone())?;
         self.my_state.stereopsis_state = None; //a hack to skip failed stereopsis detections because of centroid packets not arriving promptly, as there are many
         Ok(())
     }
 
-    fn handle_event(&mut self, evt: FloEvent) -> Result<()> {
+    async fn handle_event(&mut self, evt: FloEvent) -> Result<()> {
         use FloEvent as E;
         if let E::Command(cmd, src) = evt {
-            self.handle_command(cmd, src)?;
+            self.handle_command(cmd, src).await?;
         }
         Ok(())
     }
 
-    fn handle_command(&mut self, msg: FloCommand, src: CommandSource) -> Result<()> {
+    /// Start saving a recording.
+    ///
+    /// When `include_precapture` is true, the writer flushes its pre-capture
+    /// buffer into the new recording so it begins with the buffered window
+    /// (the "post-trigger" behavior). A normal recording passes false.
+    fn start_recording(&mut self, include_precapture: bool) -> Result<()> {
+        let creation_time = chrono::Local::now();
+        let floz_dirname = creation_time.format(FLO_DIRNAME_TEMPLATE).to_string();
+        if !FLO_DIRNAME_RE.is_match(&floz_dirname) {
+            tracing::error!("new dirname does not match expected pattern");
+        }
+        let full_floz_dirname = self.data_dir.join(floz_dirname);
+        self.my_state.floz_recording_path = Some(flo_core::RecordingPath::from_path_and_time(
+            full_floz_dirname.to_string(),
+            creation_time,
+        ));
+
+        if let Some(prettycam_cfg) = self.device_config.highmag_visible_recorder.as_ref() {
+            let highmag_visible_recording_path = creation_time
+                .format(HIGHMAG_VISIBLE_MP4_PATH_TEMPLATE)
+                .to_string();
+            let fullpath = self.data_dir.join(highmag_visible_recording_path);
+            tracing::info!("Starting highmag recording \"{fullpath}\"");
+
+            self.highmag_visible_recorder = Some(h264_recorder::H264Recorder::new(
+                &fullpath,
+                &prettycam_cfg.ffmpeg_cli,
+            )?);
+        }
+
+        // The webcam file lives wherever camshow puts it. We record an
+        // indicative path (using flo's data dir) so operators can see the
+        // basename in the BUI; camshow generates the actual file name from
+        // `creation_time`.
+        if self.camshow_recording_tx.is_some() {
+            let webcam_fname = creation_time.format(WEBCAM_MP4_PATH_TEMPLATE).to_string();
+            let display_path = self.data_dir.join(webcam_fname);
+            self.my_state.webcam_recording_path =
+                Some(flo_core::RecordingPath::from_path_and_time(
+                    display_path.to_string(),
+                    creation_time,
+                ));
+        }
+
+        let mp4_cfg = self
+            .device_config
+            .osd_config
+            .as_ref()
+            .and_then(|c| c.camshow_mp4_cfg.clone())
+            .unwrap_or_default();
+        let camshow_cmd = camshow_client::Command::Start(Box::new(camshow_protocol::RecordingStart {
+            creation_time,
+            data_dir: self.data_dir.to_path_buf(),
+            mp4_cfg,
+        }));
+
+        self.flo_saver_tx
+            .send(SaveToDiskMsg::ToggleSavingFloz(Some((
+                creation_time,
+                full_floz_dirname,
+                include_precapture,
+            ))))
+            .unwrap();
+        if let Some(tx) = self.camshow_recording_tx.as_ref() {
+            // Best-effort: camshow may not be connected. The link task buffers
+            // commands and forwards on reconnect.
+            let _ = tx.send(camshow_cmd);
+        }
+        Ok(())
+    }
+
+    /// Stop saving the current recording, finalizing all outputs.
+    fn stop_recording(&mut self) -> Result<()> {
+        self.my_state.floz_recording_path = None;
+        self.my_state.webcam_recording_path = None;
+
+        if let Some(recorder) = self.highmag_visible_recorder.take() {
+            match recorder.close() {
+                Ok(()) => {
+                    tracing::info!("Highmag recording stopped");
+                }
+                Err(e) => {
+                    tracing::error!("Error stopping highmag recording: {e}");
+                }
+            }
+        }
+
+        self.flo_saver_tx
+            .send(SaveToDiskMsg::ToggleSavingFloz(None))
+            .unwrap();
+        if let Some(tx) = self.camshow_recording_tx.as_ref() {
+            let _ = tx.send(camshow_client::Command::Stop);
+        }
+        Ok(())
+    }
+
+    /// Send a `CamArg` to every connected tracking-camera control session.
+    async fn send_cam_arg_to_all(&mut self, arg: strand_cam_remote_control::CamArg) {
+        for sess in [&mut self.cam_session_main, &mut self.cam_session_secondary]
+            .into_iter()
+            .flatten()
+        {
+            post_cam_arg(sess, arg.clone()).await;
+        }
+    }
+
+    /// Size each tracking camera's post-trigger buffer to match `secs` of
+    /// pre-capture, using that camera's configured `expected_fps`. Cameras
+    /// without a configured frame rate are skipped with a warning, since the
+    /// seconds→frames conversion is impossible without it.
+    async fn set_cam_precapture_buffer(&mut self, secs: f64) {
+        // Read frame rates up front so the camera config (immutable borrow) and
+        // the sessions (mutable borrow) are not borrowed simultaneously.
+        let main_fps = self
+            .device_config
+            .strand_cam_main
+            .as_ref()
+            .and_then(|c| c.expected_fps);
+        let secondary_fps = self
+            .device_config
+            .strand_cam_secondary
+            .as_ref()
+            .and_then(|c| c.expected_fps);
+
+        for (sess, fps) in [
+            (&mut self.cam_session_main, main_fps),
+            (&mut self.cam_session_secondary, secondary_fps),
+        ] {
+            let Some(sess) = sess.as_mut() else { continue };
+            match fps {
+                Some(fps) if fps > 0.0 => {
+                    let frames = (secs * fps).ceil().max(0.0) as usize;
+                    post_cam_arg(
+                        sess,
+                        strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames),
+                    )
+                    .await;
+                }
+                _ => {
+                    tracing::warn!(
+                        "Cannot size Strand Cam pre-capture buffer: no `expected_fps` \
+                         configured for this camera"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, msg: FloCommand, src: CommandSource) -> Result<()> {
         let was_closed_loop = self.tracking_state.mode == DeviceMode::ClosedLoop;
 
         match msg {
@@ -561,87 +716,41 @@ impl<'a> FloCoordinator<'a> {
                 };
             }
             FloCommand::SetRecordingState(enable) => {
-                let (floz_msg, camshow_cmd) = if enable {
-                    let creation_time = chrono::Local::now();
-                    let floz_dirname = creation_time.format(FLO_DIRNAME_TEMPLATE).to_string();
-                    if !FLO_DIRNAME_RE.is_match(&floz_dirname) {
-                        tracing::error!("new dirname does not match expected pattern");
-                    }
-                    let full_floz_dirname = self.data_dir.join(floz_dirname);
-                    self.my_state.floz_recording_path =
-                        Some(flo_core::RecordingPath::from_path_and_time(
-                            full_floz_dirname.to_string(),
-                            creation_time,
-                        ));
-
-                    if let Some(prettycam_cfg) =
-                        self.device_config.highmag_visible_recorder.as_ref()
-                    {
-                        let highmag_visible_recording_path = creation_time
-                            .format(HIGHMAG_VISIBLE_MP4_PATH_TEMPLATE)
-                            .to_string();
-                        let fullpath = self.data_dir.join(highmag_visible_recording_path);
-                        tracing::info!("Starting highmag recording \"{fullpath}\"");
-
-                        self.highmag_visible_recorder = Some(h264_recorder::H264Recorder::new(
-                            &fullpath,
-                            &prettycam_cfg.ffmpeg_cli,
-                        )?);
-                    }
-
-                    // The webcam file lives wherever camshow puts it. We
-                    // record an indicative path (using flo's data dir) so
-                    // operators can see the basename in the BUI; camshow
-                    // generates the actual file name from `creation_time`.
-                    if self.camshow_recording_tx.is_some() {
-                        let webcam_fname =
-                            creation_time.format(WEBCAM_MP4_PATH_TEMPLATE).to_string();
-                        let display_path = self.data_dir.join(webcam_fname);
-                        self.my_state.webcam_recording_path =
-                            Some(flo_core::RecordingPath::from_path_and_time(
-                                display_path.to_string(),
-                                creation_time,
-                            ));
-                    }
-
-                    let mp4_cfg = self
-                        .device_config
-                        .osd_config
-                        .as_ref()
-                        .and_then(|c| c.camshow_mp4_cfg.clone())
-                        .unwrap_or_default();
-                    let camshow_cmd = camshow_client::Command::Start(Box::new(
-                        camshow_protocol::RecordingStart {
-                            creation_time,
-                            data_dir: self.data_dir.to_path_buf(),
-                            mp4_cfg,
-                        },
-                    ));
-                    (Some((creation_time, full_floz_dirname)), camshow_cmd)
+                if enable {
+                    // Normal recording: start from now, ignoring the
+                    // pre-capture buffer.
+                    self.start_recording(false)?;
                 } else {
-                    self.my_state.floz_recording_path = None;
-                    self.my_state.webcam_recording_path = None;
-
-                    if let Some(recorder) = self.highmag_visible_recorder.take() {
-                        match recorder.close() {
-                            Ok(()) => {
-                                tracing::info!("Highmag recording stopped");
-                            }
-                            Err(e) => {
-                                tracing::error!("Error stopping highmag recording: {e}");
-                            }
-                        }
-                    }
-                    (None, camshow_client::Command::Stop)
-                };
-                self.flo_saver_tx
-                    .send(SaveToDiskMsg::ToggleSavingFloz(floz_msg))
-                    .unwrap();
-                if let Some(tx) = self.camshow_recording_tx.as_ref() {
-                    // Best-effort: camshow may not be connected. The link
-                    // task buffers commands and forwards on reconnect.
-                    let _ = tx.send(camshow_cmd);
+                    self.stop_recording()?;
                 }
+            }
+            FloCommand::StartPreCaptureRecording => {
+                // Post-trigger: start a recording that also includes the
+                // buffered pre-capture window. Stopping uses the normal
+                // SetRecordingState(false) path.
+                self.start_recording(true)?;
+                // Have the tracking cameras flush their own post-trigger
+                // buffers into their MP4s too, so the recorded video also
+                // begins in the past.
+                self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::PostTrigger)
+                    .await;
+            }
+            FloCommand::SetPreCaptureSeconds(secs) => {
+                let secs = secs.max(0.0);
+                tracing::info!("Setting pre-capture buffer to {secs} seconds");
+                self.my_state.precapture_window_secs = secs;
+                if secs <= 0.0 {
+                    // Buffer is being emptied; reflect that immediately rather
+                    // than waiting for the next slow tick.
+                    self.my_state.precapture_buffered_secs = 0.0;
+                }
+                self.flo_saver_tx
+                    .send(SaveToDiskMsg::SetPreCaptureSeconds(secs))
+                    .unwrap();
+                self.from_device_http_tx.send(self.my_state.clone())?;
+                // Mirror the window onto the tracking cameras' own post-trigger
+                // buffers so their video can be pre-captured too.
+                self.set_cam_precapture_buffer(secs).await;
             }
         };
         Ok(())
@@ -661,29 +770,10 @@ impl<'a> FloCoordinator<'a> {
                 }
 
                 // start/stop saving .mp4 file on tracking cameras
-                for cam_session in
-                    [&mut self.cam_session_main, &mut self.cam_session_secondary].iter_mut()
-                {
-                    if let Some(sess) = cam_session.as_mut() {
-                        let body =
-                            axum::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
-                                serde_json::to_vec(&strand_cam_storetype::CallbackType::ToCamera(
-                                    strand_cam_remote_control::CamArg::SetIsRecordingMp4(
-                                        want_recording,
-                                    ),
-                                ))
-                                .unwrap(),
-                            )));
-                        match sess.post("callback", body).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Ignoring error requesting Strand Cam to record: {e}"
-                                );
-                            }
-                        }
-                    }
-                }
+                self.send_cam_arg_to_all(
+                    strand_cam_remote_control::CamArg::SetIsRecordingMp4(want_recording),
+                )
+                .await;
             }
             _ => {}
         };
@@ -746,6 +836,20 @@ fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
         stamp.elapsed() > std::time::Duration::from_secs(1)
     } else {
         true
+    }
+}
+
+/// POST a single `CamArg` to a Strand Cam control session. Errors are logged
+/// and otherwise ignored, since the camera may be transiently unreachable.
+async fn post_cam_arg(sess: &mut HttpSession, arg: strand_cam_remote_control::CamArg) {
+    let body = axum::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
+        serde_json::to_vec(&strand_cam_storetype::CallbackType::ToCamera(arg)).unwrap(),
+    )));
+    match sess.post("callback", body).await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("Ignoring error sending command to Strand Cam: {e}");
+        }
     }
 }
 
@@ -1186,6 +1290,10 @@ async fn app_main(
 
     let (flo_saver_tx, flo_saver_rx) = mpsc::unbounded_channel();
 
+    // Reports how many seconds of data the writer currently holds in its
+    // pre-capture buffer, so the BUI can display it.
+    let (precapture_buffered_tx, precapture_buffered_rx) = watch::channel(0.0f64);
+
     let _write_closer = writing_state::WriteCloser::new(flo_saver_tx.clone());
 
     //delivers drone status from mavlink thread to flo main loop
@@ -1295,7 +1403,9 @@ async fn app_main(
     let mut saver_handle = {
         // Spawn task for saving data to disk
         let device_config = device_config.clone();
-        handle.spawn_blocking(move || writing_state::writer_task_main(flo_saver_rx, &device_config))
+        handle.spawn_blocking(move || {
+            writing_state::writer_task_main(flo_saver_rx, &device_config, precapture_buffered_tx)
+        })
     };
 
     if device_config.pwm_output_enabled && cli.pwm_serial.is_none() {
@@ -1564,6 +1674,7 @@ async fn app_main(
         broadway,
         camshow_recording_tx,
         data_dir,
+        precapture_buffered_rx,
     )
     .await?;
 
@@ -1616,7 +1727,7 @@ async fn app_main(
             }
             flo_event = flo_events_rx_stream.next() => {
                 let flo_event = flo_event.ok_or_else(|| eyre::eyre!("FLO events channel closed"))??;
-                coordinator.handle_event(flo_event)?;
+                coordinator.handle_event(flo_event).await?;
             }
             motor_position = motor_position_rx.recv() => {
                 let motor_position = motor_position.ok_or_else(|| eyre::eyre!("motor position channel closed"))?;

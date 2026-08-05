@@ -54,6 +54,10 @@ tracking_thresholds:
 motor_timeconstant_secs: .001
 strand_cam_main:
   url: http://127.0.0.1:5555
+  # Used to size the camera's post-trigger buffer for pre-capture recording
+  # (the seconds configured in the BUI are converted to frames via this rate).
+  # Should match SetMp4MaxFramerate below.
+  expected_fps: 60.0
   on_attach_json_commands:
   - '{"ToCamera":{"SetImOpsCenterX":960}}'
   - '{"ToCamera":{"SetImOpsCenterY":600}}'
