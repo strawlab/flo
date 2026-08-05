@@ -28,6 +28,26 @@ jobs:
         with:
           version: 'v0.21.14'
 
+      - name: Fetch dependencies (also checks out the strand-braid git dependency)
+        run: cargo fetch --locked
+
+      # strand-cam's build script runs `trunk`, which shells out to a nested
+      # cargo that runs offline (see strand-braid's build-util::trunk_build) to
+      # avoid deadlocking the outer build's package-cache lock. That nested
+      # cargo first runs `cargo metadata`, which resolves the *entire*
+      # strand-braid workspace graph for every platform -- including crates
+      # (e.g. braid-triggerbox, pulled in by braid-run) that flo itself never
+      # depends on, so the fetch above never downloads them. Fetch the whole
+      # nested workspace here, with network access, so the offline call below
+      # finds everything already cached. Mirrors the pre-fetch step
+      # strand-braid's own CI uses for the same reason.
+      - name: Pre-fetch strand-braid's full dependency graph
+        run: |
+          for manifest in "$HOME"/.cargo/git/checkouts/strand-braid-*/*/Cargo.toml; do
+            [ -f "$manifest" ] || continue
+            cargo fetch --manifest-path "$manifest"
+          done
+
       - name: Build workspace
         run: cargo build --release --locked --workspace
 
