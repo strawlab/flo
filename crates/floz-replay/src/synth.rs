@@ -169,7 +169,6 @@ struct Sample {
     secondary: Option<MomentCentroid>,
 }
 
-#[expect(clippy::too_many_arguments)]
 fn project(
     opt: &SynthArgs,
     cfg: &FloControllerConfig,

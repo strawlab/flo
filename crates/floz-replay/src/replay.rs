@@ -93,7 +93,7 @@ pub fn run_with_sink(
     // Build the camera-name relabeling map from first-seen order: the first
     // distinct camera becomes `--primary-cam`, the second `--secondary-cam`.
     // Cameras without an override keep their recorded name.
-    let cam_remap = build_cam_remap(&centroids, &opt);
+    let cam_remap = build_cam_remap(&centroids, opt);
     for (orig, new) in &cam_remap {
         if orig != new {
             tracing::info!("Relabeling camera {orig:?} -> {new:?}");
