@@ -825,17 +825,13 @@ impl Drop for WritingState {
             tracing::info!("creating zip file {output_zipfile}");
             // zip the output_dirname directory
             {
-                let mut file = bufwriter(output_zipfile).unwrap();
-
-                let header = "FLOZ file. This is a standard ZIP file with a \
-            specific schema.\n";
-                file.write_all(header.as_bytes()).unwrap();
+                let file = bufwriter(output_zipfile).unwrap();
 
                 let walkdir = walkdir::WalkDir::new(&output_dirname);
 
-                // Reorder the results to save the README_MD_FNAME file first
-                // so that the first bytes of the file have it. This is why we
-                // special-case the file here.
+                // Store README.md first and without compression so that its
+                // contents remain visible near the beginning of the archive.
+                // Deflate the remaining files to keep normal recordings small.
                 let mut readme_entry: Option<walkdir::DirEntry> = None;
 
                 let mut files = Vec::new();
@@ -846,22 +842,19 @@ impl Drop for WritingState {
                         files.push(entry);
                     }
                 }
+                let mut zip_wtr = floz_writer::FlozWriter::new(file, Some(6)).unwrap();
+
                 if let Some(entry) = readme_entry {
-                    files.insert(0, entry);
+                    crate::zip_dir::zip_dir(
+                        &mut std::iter::once(entry),
+                        &output_dirname,
+                        &mut zip_wtr,
+                    )
+                    .expect("zip README.md");
                 }
 
-                let mut zip_wtr = zip::ZipWriter::new(file);
-                let options = zip::write::SimpleFileOptions::default()
-                    .large_file(true)
-                    .unix_permissions(0o755);
-
-                crate::zip_dir::zip_dir(
-                    &mut files.into_iter(),
-                    &output_dirname,
-                    &mut zip_wtr,
-                    options,
-                )
-                .expect("zip_dir");
+                crate::zip_dir::zip_dir(&mut files.into_iter(), &output_dirname, &mut zip_wtr)
+                    .expect("zip remaining recording files");
                 zip_wtr.finish().unwrap();
             }
 

@@ -1,26 +1,20 @@
 [package]
-name = "floz-retrack"
+name = "floz-repack"
 version = "0.1.0"
 edition = "2024"
 authors = ["Andrew Straw <strawman@astraw.com>"]
-description = "Re-estimate distance offline from a .floz file's saved centroid data"
+description = "Re-compress a .floz file's ZIP archive in place"
 
 [dependencies]
 # deps published on crates.io
 clap = { workspace = true, features = ["derive"] }
 color-eyre.workspace = true
-chrono = { workspace = true, features = ["clock", "std", "serde"] }
-csv.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-panic.workspace = true
 zip.workspace = true
 
-# flo and strand-braid deps
-floz-parser.workspace = true
 floz-writer.workspace = true
-flo-core.workspace = true
-zip-or-dir.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

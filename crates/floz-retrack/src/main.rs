@@ -18,7 +18,6 @@
 //! the recomputed `tracking_state` rows.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -30,10 +29,7 @@ use flo_core::{
     StampedMomentCentroid, StereopsisCalibration, TRACKING_STATE_FNAME,
 };
 
-/// Text written before the ZIP data in a `.floz` file (the format is a ZIP with
-/// a small identifying prefix). Mirrors what the FLO recorder writes.
-const FLOZ_HEADER: &str = "FLOZ file. This is a standard ZIP file with a specific schema.\n";
-const README_FNAME: &str = "README.md";
+use floz_writer::{FlozWriter, README_FNAME};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -230,28 +226,13 @@ fn write_retracked_floz<R: std::io::Read + std::io::Seek>(
 
     let file = std::fs::File::create(output)
         .with_context(|| format!("Creating output {}", output.display()))?;
-    let mut file = std::io::BufWriter::new(file);
-    file.write_all(FLOZ_HEADER.as_bytes())?;
-
-    let mut zip = zip::ZipWriter::new(file);
+    let file = std::io::BufWriter::new(file);
+    let mut zip = FlozWriter::new(file, Some(6))?;
     // Data tables are compressed. The README is stored uncompressed and first
     // (see the sort above) so the start of the file is human-readable, matching
     // the `.braidz` convention.
-    let compressed = zip::write::SimpleFileOptions::default()
-        .large_file(true)
-        .compression_method(zip::CompressionMethod::Deflated)
-        .unix_permissions(0o755);
-    let stored = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .unix_permissions(0o755);
-
     for name in &names {
-        let options = if name == README_FNAME {
-            stored
-        } else {
-            compressed
-        };
-        zip.start_file(name, options)?;
+        zip.start_file(name)?;
         if name == TRACKING_STATE_FNAME {
             let mut wtr = csv::Writer::from_writer(&mut zip);
             for row in tracking_states {
