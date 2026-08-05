@@ -132,6 +132,19 @@ Then run FLO with something like this:
 Note that in the FLO config file you can configure imops and other aspects of
 strand-cam automatically in the `on_attach_json_commands` section.
 
+For every configured camera with a live HTTP session, FLO also exposes the
+same Braid-compatible reverse-proxy endpoint:
+
+```text
+http://<flo-address>/cam-proxy/<percent-encoded-camera-name>/<camera-path>
+```
+
+The camera name is the authoritative name reported by Strand Camera's
+`/cam-name` endpoint. For example, the proxied camera root for
+`Basler-40522040` is `/cam-proxy/Basler%2D40522040/`. Requests use FLO's own
+browser authentication; FLO supplies its saved Strand Camera session cookie to
+the upstream request.
+
 ## Running without hardware (simulation / testing)
 
 You can run the full `flo` controller — tracking, Kalman filter, distance

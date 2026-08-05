@@ -82,6 +82,7 @@ struct App {
     precapture_seconds: TypedInputStorage<Seconds>,
     last_state: Option<flo_core::DeviceState>,
     cfg: Option<flo_core::FloControllerConfig>,
+    strand_cameras: Vec<flo_core::StrandCamProxyInfo>,
     es: EventSource,
     _listeners: Vec<EventListener>,
     query_gamepad_interval: Option<Interval>,
@@ -229,6 +230,7 @@ impl Component for App {
 
             last_state: None,
             cfg: None,
+            strand_cameras: Vec::new(),
             _listeners,
             query_gamepad_interval: None,
             last_gamepad_timestamp: 0.0,
@@ -369,6 +371,9 @@ impl Component for App {
                                 }
 
                                 self.cfg = Some(cfg);
+                            }
+                            BuiEventData::StrandCameras(cameras) => {
+                                self.strand_cameras = cameras;
                             }
                         }
                     }
