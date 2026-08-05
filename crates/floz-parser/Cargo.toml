@@ -8,6 +8,9 @@ edition = "2024"
 tracing.workspace = true
 color-eyre.workspace = true
 csv.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
 
 # flo and strand-braid deps
 flo-core.workspace = true

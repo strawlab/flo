@@ -1,0 +1,22 @@
+[package]
+name = "floz-cli"
+version = "0.1.0"
+edition = "2024"
+authors = ["Andrew Straw <strawman@astraw.com>"]
+description = "CLI tool to inspect and query .floz tracking data files"
+
+[dependencies]
+# deps published on crates.io
+clap = { workspace = true, features = ["derive"] }
+color-eyre.workspace = true
+chrono = { workspace = true, features = ["clock", "std", "serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-panic.workspace = true
+
+# flo and strand-braid deps
+floz-parser.workspace = true
+flo-core.workspace = true
+zip-or-dir.workspace = true

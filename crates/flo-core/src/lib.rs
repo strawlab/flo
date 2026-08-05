@@ -34,6 +34,14 @@ pub type CamNameString = String;
 
 pub const MOTOR_POSITIONS_FNAME: &str = "motor_positions.csv";
 pub const TRACKING_STATE_FNAME: &str = "tracking_state.csv";
+pub const CENTROID_FNAME: &str = "centroid.csv";
+pub const ENCODER_DATA_FNAME: &str = "encoder_data.csv";
+pub const ENCODER_OFFSETS_FNAME: &str = "encoder_offsets.csv";
+/// Serialized [`FloControllerConfig`] saved alongside the recorded tables.
+pub const FLO_CONFIG_FNAME: &str = "flo-config.yaml";
+/// Newline-delimited JSON log of [`StampedBMsg`] events (detections, mode
+/// changes, commands) recorded during a session.
+pub const BROADWAY_FNAME: &str = "broadway.jsonl";
 
 pub use pwm_motor_types::{
     DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,
@@ -1053,6 +1061,30 @@ impl MomentCentroid {
     pub fn y(&self) -> FloatType {
         self.mu01 / self.mu00
     }
+}
+
+/// A [MomentCentroid] stamped with the time it was received, as saved to the
+/// `centroid.csv` file within a `.floz` archive.
+///
+/// This is kept as a superset of [MomentCentroid] (see the
+/// `test_stamped_is_superset` test in the `flo` crate). The `deny_unknown_fields`
+/// attribute ensures new fields added to [MomentCentroid] are not silently
+/// dropped here.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct StampedMomentCentroid {
+    pub received_timestamp: chrono::DateTime<chrono::Local>,
+    pub schema_version: u8,
+    pub framenumber: u32,
+    pub timestamp_source: TimestampSource,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub mu00: FloatType,
+    pub mu01: FloatType,
+    pub mu10: FloatType,
+    pub center_x: u32,
+    pub center_y: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cam_name: CamNameString,
 }
 
 impl Default for KalmanFilterParameters {
