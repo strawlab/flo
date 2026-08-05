@@ -1063,6 +1063,29 @@ impl MomentCentroid {
     }
 }
 
+/// A message sent over UDP to the FLO controller's centroid listener.
+///
+/// This is the wire payload exchanged on the controller's `--udp-addr` port.
+/// The live source is Strand Camera's `imops` module; tools such as
+/// `floz-replay` produce the same messages to drive the controller without
+/// hardware. Encoding is CBOR via [encode_udp_msg]; decoding via
+/// [decode_udp_msg]. Keep this type and the encoding here as the single source
+/// of truth so any sender stays byte-compatible with the controller.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub enum UdpMsg {
+    Centroid(MomentCentroid),
+}
+
+/// Encode a [UdpMsg] to the CBOR bytes sent on the FLO UDP port.
+pub fn encode_udp_msg(msg: &UdpMsg) -> Result<Vec<u8>, serde_cbor::Error> {
+    serde_cbor::to_vec(msg)
+}
+
+/// Decode a [UdpMsg] from CBOR bytes received on the FLO UDP port.
+pub fn decode_udp_msg(buf: &[u8]) -> Result<UdpMsg, serde_cbor::Error> {
+    serde_cbor::from_slice(buf)
+}
+
 /// A [MomentCentroid] stamped with the time it was received, as saved to the
 /// `centroid.csv` file within a `.floz` archive.
 ///

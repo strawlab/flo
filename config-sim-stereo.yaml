@@ -1,0 +1,83 @@
+# Hardware-free STEREO simulation config for FLO.
+#
+# This config runs the controller with no camera or motor hardware, with a
+# secondary (stereo) camera assigned so distance tracking via stereopsis is
+# exercised. Drive it with the `floz-replay synth` tool, which projects a
+# virtual-insect trajectory through this same calibration:
+#
+#   flo --config config-sim-stereo.yaml --udp-addr 127.0.0.1:8080
+#   floz-replay synth --config config-sim-stereo.yaml --target 127.0.0.1:8080 \
+#       --distance 3 --distance-amplitude 1
+#
+# Notes:
+#   * No `strand_cam_main` / `strand_cam_secondary` blocks: nothing connects to
+#     Strand Camera. Centroids arrive over UDP instead.
+#   * No motor flags on the `flo` command line: motor commands are computed and
+#     discarded.
+#   * `secondary_cam_name` must match `floz-replay synth --secondary-cam`
+#     (default `synth-secondary`); the synth tool's `--primary-cam` default is
+#     `synth-primary`.
+# Config schema version. Version 2 means kalman_filter_parameters holds
+# RMS values; version 1 (or a missing field) meant variances and is
+# auto-converted on load with a warning.
+config_version: 2
+geometry: MovingCamera
+pwm_output_enabled: false
+kalman_filter_parameters:
+  # Pan/tilt filter. Both values are RMS (root-mean-square), as for
+  # kalman_filter_dist_parameters; kalman_step squares them.
+  #
+  # RMS of the unknown random angular acceleration [rad/s^2].
+  # Was 1000.0 when this field held a variance [rad^2/s^3].
+  motion_noise: 31.622776601683793
+  # RMS of the angular measurement noise [rad].
+  # Was 0.0001 when this field held a variance [rad^2].
+  observation_noise: 0.01
+control_loop_timestep_secs: 0.001
+kp_pan_angle: 0.0
+kp_tilt_angle: 0.0
+ki_pan_angle:  20.0
+ki_tilt_angle:  15.0
+centroid_to_sensor_x_angle_func:
+# needs to be adjusted to specific camera/lens combination
+  dx_gain: 0.00035 # 5.6 um / 16mm    (px pitch / focal length)
+  dy_gain: 0.0
+  offset: 0.0
+centroid_to_sensor_y_angle_func:
+  dx_gain: 0.0
+  dy_gain: -0.00035 # same here, minus sign due to mounting
+  offset: 0.0
+pan_motor_config:
+  endpoint_low: -1.5708
+  endpoint_high: 1.5708
+  neutral_position: 0.0
+tilt_motor_config:
+  endpoint_low: -0.7854
+  endpoint_high: 0.5
+  neutral_position: 0.0
+pan_pwm_config:
+  low_value: 700.0
+  high_value: 2600.0
+tilt_pwm_config:
+  low_value: 1200.0
+  high_value: 2000.0
+tracking_thresholds:
+  # how long to keep tracking the lost animal with estimated velocity,
+  # before switching to SuspendedClosedLoop (staring at the last observation)
+  msecs_to_suspend: 1000
+  # how long to stay in SuspendedClosedLoop before centering
+  msecs_to_acquire_lock: 30000
+motor_timeconstant_secs: .001
+# Name of the second (stereo) camera. With no `strand_cam_secondary` HTTP
+# session to report it, the controller falls back to this value so stereopsis
+# works headless. Must match `floz-replay synth --secondary-cam`.
+secondary_cam_name: synth-secondary
+# Stereopsis calibration: distance r (m) maps to the main-vs-stereo x disparity
+# (px) as disparity = x_offset(r). These are example values; `floz-replay synth`
+# inverts exactly this model, so recovered distance matches the requested range.
+stereopsis_calib:
+  r1_m: 2.0
+  x_offset_1_px: 20.0
+  r2_m: 5.0
+  x_offset_2_px: 10.0
+  pixel_size_um: 3.4
