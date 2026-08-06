@@ -793,31 +793,31 @@ mod tests {
         let cases = [
             (
                 "config-byo.yaml",
-                include_str!("../config-byo.yaml"),
+                include_str!("../../../config-byo.yaml"),
                 3.0,
                 1e-4,
             ),
             (
                 "config-byo-tilta.yaml",
-                include_str!("../config-byo-tilta.yaml"),
+                include_str!("../../../config-byo-tilta.yaml"),
                 3.0,
                 1e-4,
             ),
             (
                 "config-mini.yaml",
-                include_str!("../config-mini.yaml"),
+                include_str!("../../../config-mini.yaml"),
                 1000.0,
                 1e-4,
             ),
             (
                 "config-sim-stereo.yaml",
-                include_str!("../config-sim-stereo.yaml"),
+                include_str!("../../../config-sim-stereo.yaml"),
                 1000.0,
                 1e-4,
             ),
             (
                 "config-flo-strand-cam-sim.yaml",
-                include_str!("../config-flo-strand-cam-sim.yaml"),
+                include_str!("../../../config-flo-strand-cam-sim.yaml"),
                 1000.0,
                 1e-4,
             ),
