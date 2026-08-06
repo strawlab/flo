@@ -995,7 +995,10 @@ fn embedded_secondary_camera_name(embedded: &[CameraRegistration]) -> Result<Opt
         .map(|camera| camera.name.clone()))
 }
 
-async fn init_strand_cams(mut embedded: Vec<CameraRegistration>) -> Result<InitializedStrandCams> {
+async fn init_strand_cams(
+    mut embedded: Vec<CameraRegistration>,
+    mut camera_host_task: Option<&mut JoinHandle<Result<()>>>,
+) -> Result<InitializedStrandCams> {
     let secondary_cam_name = embedded_secondary_camera_name(&embedded)?;
 
     let mut embedded_routers = flo_webserver::EmbeddedStrandCamRouters::new();
@@ -1003,12 +1006,23 @@ async fn init_strand_cams(mut embedded: Vec<CameraRegistration>) -> Result<Initi
         let Some(router_rx) = camera.router_rx.take() else {
             continue;
         };
-        let router = router_rx.await.map_err(|_| {
-            eyre::eyre!(
-                "embedded Strand Camera {:?} stopped before providing its browser router",
-                camera.name
-            )
-        })?;
+        let router = match router_rx.await {
+            Ok(router) => router,
+            Err(_) => {
+                let context = format!(
+                    "embedded Strand Camera {:?} stopped before providing its browser router",
+                    camera.name
+                );
+                let Some(camera_host_task) = camera_host_task.as_deref_mut() else {
+                    return Err(eyre::eyre!(context));
+                };
+                return match camera_host_task.await {
+                    Ok(Ok(())) => Err(eyre::eyre!(context)),
+                    Ok(Err(error)) => Err(error).wrap_err(context),
+                    Err(error) => Err(error).wrap_err(context),
+                };
+            }
+        };
         if embedded_routers
             .insert(camera.name.clone(), router)
             .is_some()
@@ -1698,7 +1712,8 @@ async fn app_main(
         None => None,
     };
 
-    let strand_cams = init_strand_cams(embedded_camera_registrations).await?;
+    let strand_cams =
+        init_strand_cams(embedded_camera_registrations, camera_host_task.as_mut()).await?;
     let embedded_strand_cam_routers = strand_cams.embedded_routers();
     let strand_cam_proxy_info = strand_cams.proxy_info();
 
@@ -2125,6 +2140,25 @@ mod tests {
             control_tx: None,
             expected_fps: None,
         }
+    }
+
+    #[tokio::test]
+    async fn embedded_camera_startup_preserves_camera_host_error() {
+        let (router_tx, router_rx) = tokio::sync::oneshot::channel();
+        let mut camera = embedded_camera(StrandCamRole::Main, "broken-camera");
+        camera.router_rx = Some(router_rx);
+        let mut camera_host_task = tokio::spawn(async move {
+            drop(router_tx);
+            Err(eyre::eyre!("detailed camera backend error"))
+        });
+
+        let error = match init_strand_cams(vec![camera], Some(&mut camera_host_task)).await {
+            Ok(_) => panic!("camera startup unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let report = format!("{error:?}");
+        assert!(report.contains("broken-camera"));
+        assert!(report.contains("detailed camera backend error"));
     }
 
     #[test]
