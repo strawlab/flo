@@ -52,6 +52,7 @@ use state::OsdSnapshot;
 /// Used for the log file name and to name the threads this spawns (for
 /// `ps`/thread-dump readability).
 const APP_NAME: &str = "camshow";
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (git ", env!("GIT_HASH"), ")");
 
 /// How many raw frames may sit between the capture loop and the RTP encoder
 /// before frames get dropped rather than stalling capture.
@@ -77,7 +78,7 @@ impl From<DisplaySourceArg> for DisplaySource {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = VERSION, about, long_about = None)]
 struct Cli {
     /// TCP address to listen on for flo connections.
     #[arg(long, default_value = camshow_protocol::DEFAULT_CAMSHOW_ADDR)]

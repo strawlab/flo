@@ -25,6 +25,8 @@ mod video_relay;
 use video_relay::{VideoRelay, VideoRelayConfig};
 
 const APP_NAME: &str = "flo-strand-cam";
+/// Cargo package version and the source revision that produced this binary.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (git ", env!("GIT_HASH"), ")");
 /// The lossless Strand Camera-to-FLO queue only absorbs scheduling jitter. A
 /// deeper queue would retain several full frames and add tracking latency.
 const CAMERA_FRAME_SINK_QUEUE_CAPACITY: usize = 2;
@@ -1035,6 +1037,10 @@ where
     T: Into<OsString> + Clone,
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    if is_version_request(&args) {
+        println!("{APP_NAME} {VERSION}");
+        return Ok(());
+    }
     let config_path = config_path_from_args(&args)?;
     let (config, flo_config, raw_config_source) = load_composed_config(&config_path)?;
     flo::run_with_args_and_config(
@@ -1043,6 +1049,11 @@ where
         flo_config,
         Some(raw_config_source),
     )
+}
+
+fn is_version_request(args: &[OsString]) -> bool {
+    args.iter()
+        .any(|arg| matches!(arg.to_str(), Some("--version" | "-V")))
 }
 
 fn compose_options(
@@ -1089,6 +1100,19 @@ mod tests {
         assert_eq!(centroid.framenumber, 42);
         assert_eq!(centroid.cam_name, "sim-camera");
         assert_eq!(centroid.mu10, 3.0);
+    }
+
+    #[test]
+    fn version_arguments_do_not_require_a_configuration_file() {
+        assert!(is_version_request(&[
+            OsString::from("flo-strand-cam"),
+            OsString::from("--version"),
+        ]));
+        assert!(is_version_request(&[
+            OsString::from("flo-strand-cam"),
+            OsString::from("-V"),
+        ]));
+        assert!(!is_version_request(&[OsString::from("flo-strand-cam")]));
     }
 
     #[test]
