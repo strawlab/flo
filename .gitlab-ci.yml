@@ -105,7 +105,7 @@ pwm-motor-types:
     - cargo build --target thumbv6m-none-eabi
     - cargo test
 
-flo:
+flo-strand-cam:
   image: rust
   script:
     - apt-get update
@@ -126,15 +126,15 @@ flo:
     - ./build.sh
 
     - cargo test --workspace --all-targets
-    - cargo run --release -- --config config-byo.yaml show-config
-    - cargo run --release -- --config config-mini.yaml show-config
+    - cargo run --release -p flo-strand-cam -- --config config-byo.yaml show-config
+    - cargo run --release -p flo-strand-cam -- --config config-mini.yaml show-config
 
     - cd ${CI_PROJECT_DIR}
-    - cp target/release/flo flo.${CI_COMMIT_SHA}
+    - cp target/release/flo-strand-cam flo-strand-cam.${CI_COMMIT_SHA}
   artifacts:
     paths:
-      - flo.${CI_COMMIT_SHA}
-    name: "flo.${CI_COMMIT_SHA}"
+      - flo-strand-cam.${CI_COMMIT_SHA}
+    name: "flo-strand-cam.${CI_COMMIT_SHA}"
 
 test-crates:
   image: rust

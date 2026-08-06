@@ -1,8 +1,7 @@
 //! The composed FLO and Strand Camera application.
 //!
 //! This crate is the composition root for camera acquisition and FLO. It
-//! deliberately disables FLO's legacy UDP centroid listener and carries ImOps
-//! detections through bounded Tokio channels instead.
+//! carries ImOps detections through bounded Tokio channels.
 
 use color_eyre::eyre::{Context, Result, eyre};
 use flo_imops::{ImOpsDetection, ImOpsFrameMetadata, ImOpsProcessor, ImOpsProcessorConfig};
@@ -1024,7 +1023,7 @@ fn parse_composed_config(yaml: &str) -> Result<(CameraHostConfig, flo_core::FloC
 /// Run the composed application while retaining caller-supplied FLO options.
 ///
 /// Downstream binaries can use this to add ordinary [`flo::Extension`] values.
-/// The camera host and no-UDP policy remain owned by this crate.
+/// The camera host remains owned by this crate.
 pub fn run(options: flo::AppOptions) -> Result<()> {
     run_with_args(options, std::env::args_os())
 }
@@ -1059,7 +1058,6 @@ fn compose_options(
         config,
         controls: CameraControlChannels::new(),
     }));
-    options.enable_udp_listener = false;
     Ok(options)
 }
 
@@ -1151,13 +1149,14 @@ mod tests {
     }
 
     #[test]
-    fn integrated_app_disables_legacy_udp_centroid_listener() {
+    fn integrated_app_composes_a_camera_host() {
         let (config, _) =
             parse_composed_config(include_str!("../../../config-flo-strand-cam-sim.yaml")).unwrap();
         assert!(
-            !compose_options(flo::AppOptions::default(), config)
+            compose_options(flo::AppOptions::default(), config)
                 .unwrap()
-                .enable_udp_listener
+                .camera_host
+                .is_some()
         );
     }
 
@@ -1187,7 +1186,6 @@ mod tests {
         let composed = compose_options(options, config).unwrap();
         assert_eq!(composed.extensions.len(), 1);
         assert_eq!(composed.extensions[0].name(), "dummy");
-        assert!(!composed.enable_udp_listener);
 
         let (config, _) =
             parse_composed_config(include_str!("../../../config-flo-strand-cam-sim.yaml")).unwrap();

@@ -90,10 +90,6 @@ impl StrandCamProxyInfo {
     }
 }
 
-/// The default unicast UDP send/receive port.
-pub const UNICAST_UDP_DEFAULT_PORT: u16 = 8080;
-pub const UNICAST_UDP_DEFAULT: &str = const_format::concatcp!("0.0.0.0:", UNICAST_UDP_DEFAULT_PORT);
-
 pub type CamNameString = String;
 
 pub const MOTOR_POSITIONS_FNAME: &str = "motor_positions.csv";
@@ -590,26 +586,6 @@ pub struct FloControllerConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub encoder_lag: FloatType,
 
-    /// DEPRECATED. Name of the second (stereo) camera.
-    ///
-    /// Superseded by `strand_cam_secondary.cam_name`. Still honored for
-    /// backward compatibility (with a deprecation warning): if
-    /// `strand_cam_secondary` is also present, the two names must agree;
-    /// otherwise this name identifies the secondary camera on its own. New
-    /// configs should set `strand_cam_secondary.cam_name` instead.
-    #[serde(default, skip_serializing_if = "is_none_or_default")]
-    pub secondary_cam_name: Option<CamNameString>,
-
-    /// URL for Strand Cam instance connected to primary camera
-    ///
-    /// If this is the first connection, the token will be required here.
-    /// Otherwise, a saved cookie can be used and the token is not required.
-    #[serde(default, skip_serializing_if = "is_none_or_default")]
-    pub strand_cam_main: Option<StrandCamConfig>,
-
-    #[serde(default, skip_serializing_if = "is_none_or_default")]
-    pub strand_cam_secondary: Option<StrandCamConfig>,
-
     #[serde(default, skip_serializing_if = "is_default")]
     pub sounds_filenames: SoundsFilenames,
 
@@ -973,38 +949,6 @@ impl Default for TrinamicAxisConfig {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
-pub struct StrandCamConfig {
-    /// URL of the Strand Cam HTTP control session for this camera.
-    ///
-    /// When omitted, `flo` opens no HTTP session to this camera. This is the
-    /// hardware-free / simulation case: centroids are injected over UDP (e.g.
-    /// by `floz-replay`) rather than produced by a live camera. The camera is
-    /// then identified solely by `cam_name`, which is required in that case.
-    #[serde(default, skip_serializing_if = "is_none_or_default")]
-    pub url: Option<String>,
-
-    /// The camera's name, matching the `cam_name` field of incoming centroids.
-    ///
-    /// Required when `url` is omitted (it is how the controller identifies this
-    /// camera's centroids). When `url` is present this is optional; if given, it
-    /// is checked against the name the camera reports over HTTP.
-    #[serde(default, skip_serializing_if = "is_none_or_default")]
-    pub cam_name: Option<CamNameString>,
-
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub on_attach_json_commands: Vec<String>,
-
-    /// Expected recording frame rate of this camera, in frames per second.
-    ///
-    /// Used to convert the pre-capture window (configured in seconds) into the
-    /// frame count that Strand Cam's post-trigger buffer expects
-    /// (`CamArg::SetPostTriggerBufferSize`). When omitted, `flo` cannot size
-    /// the camera's pre-capture buffer and will skip configuring it.
-    #[serde(default, skip_serializing_if = "is_none_or_default")]
-    pub expected_fps: Option<FloatType>,
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct GimbalConfig {
     pub port_path: String,
     pub reverse_pan: bool,
@@ -1171,29 +1115,6 @@ impl MomentCentroid {
     }
 }
 
-/// A message sent over UDP to the FLO controller's centroid listener.
-///
-/// This is the wire payload exchanged on the controller's `--udp-addr` port.
-/// The live source is Strand Camera's `imops` module; tools such as
-/// `floz-replay` produce the same messages to drive the controller without
-/// hardware. Encoding is CBOR via [encode_udp_msg]; decoding via
-/// [decode_udp_msg]. Keep this type and the encoding here as the single source
-/// of truth so any sender stays byte-compatible with the controller.
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub enum UdpMsg {
-    Centroid(MomentCentroid),
-}
-
-/// Encode a [UdpMsg] to the CBOR bytes sent on the FLO UDP port.
-pub fn encode_udp_msg(msg: &UdpMsg) -> Result<Vec<u8>, serde_cbor::Error> {
-    serde_cbor::to_vec(msg)
-}
-
-/// Decode a [UdpMsg] from CBOR bytes received on the FLO UDP port.
-pub fn decode_udp_msg(buf: &[u8]) -> Result<UdpMsg, serde_cbor::Error> {
-    serde_cbor::from_slice(buf)
-}
-
 /// A [MomentCentroid] stamped with the time it was received, as saved to the
 /// `centroid.csv` file within a `.floz` archive.
 ///
@@ -1237,8 +1158,6 @@ impl Default for FloControllerConfig {
             config_version: CURRENT_CONFIG_VERSION,
             geometry: SystemGeometry::default(),
             pwm_output_enabled: false,
-            strand_cam_main: Default::default(),
-            strand_cam_secondary: Default::default(),
             kalman_filter_parameters: KalmanFilterParameters::default(),
             kalman_filter_dist_parameters: None,
             control_loop_timestep_secs: 0.001,
@@ -1266,7 +1185,6 @@ impl Default for FloControllerConfig {
             tracking_thresholds: Default::default(),
             motor_timeconstant_secs: 0.02,
             encoder_lag: 0.0,
-            secondary_cam_name: None,
             sounds_filenames: Default::default(),
             osd_config: None,
             highmag_visible_recorder: Default::default(),

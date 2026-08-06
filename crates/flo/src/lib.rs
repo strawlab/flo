@@ -26,13 +26,10 @@
 use clap::Parser;
 use color_eyre::eyre::{self, Result, WrapErr};
 use futures::StreamExt;
-use preferences_serde1::Preferences;
 use std::{
     future::{Future, pending},
     pin::Pin,
-    sync::{Arc, RwLock},
 };
-use strand_bui_backend_session::HttpSession;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -43,10 +40,9 @@ use tracing::{self as log};
 use flo_core::{
     Angle, Broadway, CamStaleBitmask, CommandSource, DeviceId, DeviceMode, DeviceState,
     DisplaySource, FloCommand, FloControllerConfig, FloEvent, FloatType, FocusMotorType,
-    GimbalConfig, LocalFloState,
-    ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType, MotorValueCache, OsdState,
-    PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg, StrandCamConfig, StrandCamRole,
-    UNICAST_UDP_DEFAULT, UdpMsg, drone_structs::DroneEvent,
+    GimbalConfig, LocalFloState, ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType,
+    MotorValueCache, OsdState, PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg,
+    StrandCamRole, drone_structs::DroneEvent,
 };
 use tracking::{centroid_to_sensor_angles, compute_motor_output, kalman_step};
 
@@ -60,8 +56,6 @@ mod pwm_serial_io;
 mod tilta_io;
 mod tracking;
 mod trinamic_io;
-mod udp_codec;
-mod udp_handling;
 mod writing_state;
 mod zip_dir;
 
@@ -154,8 +148,6 @@ static FLO_DIRNAME_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::
     regex::Regex::new(r"^flo[0-9]{8}_[0-9]{6}\.[0-9]+$").expect("FLO_DIRNAME_RE is a valid regex")
 });
 
-const STRAND_CAM_COOKIE_KEY: &str = "strand-cam-cookie";
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -200,10 +192,6 @@ struct Cli {
     /// networks need no access token. May be repeated or comma-separated.
     #[arg(long = "trusted-network", value_delimiter = ',')]
     trusted_networks: Vec<String>,
-
-    /// The address to bind for the UDP listener
-    #[arg(long, default_value = UNICAST_UDP_DEFAULT)]
-    udp_addr: String,
 
     /// Filename of initial device configuration in YAML format
     #[arg(long)]
@@ -259,8 +247,6 @@ struct FloCoordinator<'a> {
     audio_stream: Option<&'a rodio::OutputStreamHandle>,
     from_device_http_tx: watch::Sender<DeviceState>,
     broadway: flo_core::Broadway,
-    cam_session_main: Option<HttpSession>,
-    cam_session_secondary: Option<HttpSession>,
     cam_control_main: Option<mpsc::Sender<strand_cam_remote_control::CamArg>>,
     cam_control_secondary: Option<mpsc::Sender<strand_cam_remote_control::CamArg>>,
     cam_control_main_expected_fps: Option<f64>,
@@ -294,8 +280,6 @@ impl<'a> FloCoordinator<'a> {
         strand_cams: InitializedStrandCams,
     ) -> Self {
         let InitializedStrandCams {
-            main,
-            secondary,
             secondary_cam_name,
             embedded,
             ..
@@ -327,8 +311,6 @@ impl<'a> FloCoordinator<'a> {
             audio_stream,
             from_device_http_tx,
             broadway,
-            cam_session_main: main.map(|cam| cam.session),
-            cam_session_secondary: secondary.map(|cam| cam.session),
             cam_control_main: main_embedded.and_then(|camera| camera.control_tx.clone()),
             cam_control_secondary: secondary_embedded.and_then(|camera| camera.control_tx.clone()),
             cam_control_main_expected_fps: main_embedded.and_then(|camera| camera.expected_fps),
@@ -367,9 +349,7 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    /// Ingest a camera observation independently of the transport that
-    /// delivered it. UDP is retained as a legacy adapter in
-    /// [`Self::on_udp_message`].
+    /// Ingest one observation from the embedded camera host.
     fn on_image_centroid(&mut self, centroid: MomentCentroid) -> Result<()> {
         if centroid.schema_version != 2 {
             tracing::error!(
@@ -430,22 +410,6 @@ impl<'a> FloCoordinator<'a> {
         }
 
         Ok(())
-    }
-
-    /// Adapt a decoded legacy UDP datagram into transport-independent
-    /// coordinator input. This keeps standalone FLO and `floz-replay`
-    /// working while integrated camera code uses [`CentroidInputSender`].
-    fn on_udp_message(
-        &mut self,
-        udp_msg: std::result::Result<(UdpMsg, std::net::SocketAddr), udp_codec::Error>,
-    ) -> Result<()> {
-        match udp_msg {
-            Ok((UdpMsg::Centroid(centroid), _addr)) => self.on_image_centroid(centroid),
-            Err(e) => {
-                tracing::error!("Error deserializing UDP message: {e}");
-                Ok(())
-            }
-        }
     }
 
     fn on_fast_tick(&mut self, dt_secs: f64) -> Result<()> {
@@ -696,22 +660,13 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
-    /// Send a `CamArg` to every tracking camera control endpoint. An embedded
-    /// camera's in-process extension channel replaces its HTTP callback.
+    /// Send a `CamArg` to every embedded tracking camera.
     async fn send_cam_arg_to_all(&mut self, arg: strand_cam_remote_control::CamArg) {
-        for (sess, direct_tx) in [
-            (&mut self.cam_session_main, &self.cam_control_main),
-            (&mut self.cam_session_secondary, &self.cam_control_secondary),
-        ] {
-            match camera_command_route(sess.is_some(), direct_tx.is_some()) {
-                Some(CameraCommandRoute::InProcess) => {
-                    send_in_process_cam_arg(direct_tx.as_ref().unwrap(), arg.clone()).await;
-                }
-                Some(CameraCommandRoute::Http) => {
-                    post_cam_arg(sess.as_mut().unwrap(), arg.clone()).await;
-                }
-                None => {}
-            }
+        for tx in [&self.cam_control_main, &self.cam_control_secondary]
+            .into_iter()
+            .flatten()
+        {
+            send_in_process_cam_arg(tx, arg.clone()).await;
         }
     }
 
@@ -720,45 +675,21 @@ impl<'a> FloCoordinator<'a> {
     /// without a configured frame rate are skipped with a warning, since the
     /// seconds→frames conversion is impossible without it.
     async fn set_cam_precapture_buffer(&mut self, secs: f64) {
-        // Read frame rates up front so the camera config (immutable borrow) and
-        // the sessions (mutable borrow) are not borrowed simultaneously.
-        let main_fps = self.cam_control_main_expected_fps.or_else(|| {
-            self.device_config
-                .strand_cam_main
-                .as_ref()
-                .and_then(|c| c.expected_fps)
-        });
-        let secondary_fps = self.cam_control_secondary_expected_fps.or_else(|| {
-            self.device_config
-                .strand_cam_secondary
-                .as_ref()
-                .and_then(|c| c.expected_fps)
-        });
-
-        for (sess, direct_tx, fps) in [
-            (&mut self.cam_session_main, &self.cam_control_main, main_fps),
+        for (direct_tx, fps) in [
+            (&self.cam_control_main, self.cam_control_main_expected_fps),
             (
-                &mut self.cam_session_secondary,
                 &self.cam_control_secondary,
-                secondary_fps,
+                self.cam_control_secondary_expected_fps,
             ),
         ] {
-            if sess.is_none() && direct_tx.is_none() {
+            let Some(direct_tx) = direct_tx else {
                 continue;
-            }
+            };
             match fps {
                 Some(fps) if fps > 0.0 => {
                     let frames = (secs * fps).ceil().max(0.0) as usize;
                     let arg = strand_cam_remote_control::CamArg::SetPostTriggerBufferSize(frames);
-                    match camera_command_route(sess.is_some(), direct_tx.is_some()) {
-                        Some(CameraCommandRoute::InProcess) => {
-                            send_in_process_cam_arg(direct_tx.as_ref().unwrap(), arg).await;
-                        }
-                        Some(CameraCommandRoute::Http) => {
-                            post_cam_arg(sess.as_mut().unwrap(), arg).await;
-                        }
-                        None => {}
-                    }
+                    send_in_process_cam_arg(direct_tx, arg).await;
                 }
                 _ => {
                     tracing::warn!(
@@ -984,28 +915,6 @@ impl<'a> FloCoordinator<'a> {
     }
 }
 
-/// The command path for one tracking camera. Embedded camera control takes
-/// precedence over the legacy HTTP callback, even while its HTTP session is
-/// still retained for the browser proxy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CameraCommandRoute {
-    InProcess,
-    Http,
-}
-
-fn camera_command_route(
-    has_http_session: bool,
-    has_in_process_control: bool,
-) -> Option<CameraCommandRoute> {
-    if has_in_process_control {
-        Some(CameraCommandRoute::InProcess)
-    } else if has_http_session {
-        Some(CameraCommandRoute::Http)
-    } else {
-        None
-    }
-}
-
 fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
     if let Some(stamp) = stamp {
         stamp.elapsed() > std::time::Duration::from_secs(1)
@@ -1014,9 +923,7 @@ fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
     }
 }
 
-/// A secondary camera is expected whenever startup configuration assigned one,
-/// irrespective of whether it uses the legacy Strand Cam HTTP control path or
-/// an in-process extension.
+/// A secondary camera is expected whenever the embedded host registered one.
 fn secondary_camera_is_stale(
     secondary_cam_name: Option<&str>,
     stamp: Option<&std::time::Instant>,
@@ -1024,23 +931,9 @@ fn secondary_camera_is_stale(
     secondary_cam_name.is_some() && is_stale(stamp)
 }
 
-/// POST a single `CamArg` to a Strand Cam control session. Errors are logged
-/// and otherwise ignored, since the camera may be transiently unreachable.
-async fn post_cam_arg(sess: &mut HttpSession, arg: strand_cam_remote_control::CamArg) {
-    let body = axum::body::Body::new(http_body_util::Full::new(bytes::Bytes::from(
-        serde_json::to_vec(&strand_cam_storetype::CallbackType::ToCamera(arg)).unwrap(),
-    )));
-    match sess.post("callback", body).await {
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Ignoring error sending command to Strand Cam: {e}");
-        }
-    }
-}
-
 /// Send a camera command over an in-process extension channel. A closed
-/// receiver means the extension stopped unexpectedly; log it just as a legacy
-/// HTTP control failure is logged and let the controller continue shutting down.
+/// receiver means the extension stopped unexpectedly; log it and let the
+/// controller continue shutting down.
 async fn send_in_process_cam_arg(
     tx: &mpsc::Sender<strand_cam_remote_control::CamArg>,
     arg: strand_cam_remote_control::CamArg,
@@ -1050,142 +943,18 @@ async fn send_in_process_cam_arg(
     }
 }
 
-/// Open the HTTP control session for a camera and return it together with the
-/// name the camera reports.
-///
-/// Only called when the camera config has a `url`. The camera's own `/cam-name`
-/// response is the authoritative name.
-async fn initialize_strand_cam_session(
-    url: &str,
-    cfg: &StrandCamConfig,
-    jar: Arc<RwLock<cookie_store::CookieStore>>,
-) -> Result<(HttpSession, String)> {
-    let info = strand_bui_backend_session_types::BuiServerAddrInfo::parse_url_with_token(url)?;
-    let mut session = strand_bui_backend_session::create_session(&info, jar.clone())
-        .await
-        .with_context(|| format!("while opening HTTP connection to Strand Cam at {url}"))?;
-
-    {
-        // We have the cookie from Strand Cam now, so store it to disk.
-        let jar = jar.read().unwrap();
-        Preferences::save(&*jar, &flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY)?;
-        // The jar holds live session cookies; keep its file owner-only.
-        flo_webserver::harden_prefs_file(&flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY);
-        tracing::debug!("saved cookie store {STRAND_CAM_COOKIE_KEY}");
-    }
-
-    let cam_name = {
-        let name_response = session
-            .get("cam-name")
-            .await
-            .with_context(|| "Making request for camera name")?;
-
-        use http_body_util::BodyExt;
-        let body_bytes = name_response.collect().await?.to_bytes();
-        String::from_utf8(body_bytes.to_vec())?
-    };
-
-    tracing::info!("opened camera {cam_name} at {url}");
-
-    for cmd in cfg.on_attach_json_commands.iter() {
-        session
-            .post("callback", cmd.clone().into())
-            .await
-            .with_context(|| format!("Making callback to {cam_name}: {cmd}"))?;
-    }
-    Ok((session, cam_name))
-}
-
-/// Resolve a configured camera into an optional live HTTP control session and
-/// the camera's name.
-///
-/// * With a `url`: open the HTTP session, ask the camera its name (the
-///   authoritative source), run the `on_attach` commands, and — if `cam_name`
-///   is also set in config — check the two agree.
-/// * Without a `url`: open no session (e.g. hardware-free / simulation use,
-///   where centroids arrive over UDP). The name is taken from `cam_name`, which
-///   is then required.
-async fn resolve_strand_cam(
-    role: &str,
-    cfg: &StrandCamConfig,
-    jar: Arc<RwLock<cookie_store::CookieStore>>,
-) -> Result<(Option<HttpSession>, String)> {
-    match cfg.url.as_ref() {
-        Some(url) => {
-            let (session, cam_name) = initialize_strand_cam_session(url, cfg, jar).await?;
-            if let Some(configured) = cfg.cam_name.as_ref()
-                && configured != &cam_name
-            {
-                eyre::bail!(
-                    "{role} camera name in config (`cam_name: {configured}`) does not match \
-                     \"{cam_name}\" reported by the camera at {url}",
-                );
-            }
-            Ok((Some(session), cam_name))
-        }
-        None => {
-            let cam_name = cfg.cam_name.clone().ok_or_else(|| {
-                eyre::eyre!(
-                    "{role} `strand_cam` config has neither `url` nor `cam_name`; one is \
-                     required (set `cam_name` to identify the camera for hardware-free / \
-                     simulation use, where centroids are injected over UDP)"
-                )
-            })?;
-            tracing::info!(
-                "{role} camera {cam_name:?} configured without `url`: no HTTP session opened"
-            );
-            Ok((None, cam_name))
-        }
-    }
-}
-
-struct NamedStrandCamSession {
-    name: String,
-    session: HttpSession,
-}
-
 struct InitializedStrandCams {
-    main: Option<NamedStrandCamSession>,
-    secondary: Option<NamedStrandCamSession>,
     secondary_cam_name: Option<String>,
     embedded: Vec<CameraRegistration>,
     embedded_routers: flo_webserver::EmbeddedStrandCamRouters,
 }
 
 impl InitializedStrandCams {
-    fn proxy_sessions(&self) -> Result<flo_webserver::StrandCamSessions> {
-        let mut result = flo_webserver::StrandCamSessions::new();
-        for camera in [&self.main, &self.secondary].into_iter().flatten() {
-            if result
-                .insert(camera.name.clone(), camera.session.clone())
-                .is_some()
-            {
-                eyre::bail!(
-                    "multiple configured Strand Cameras reported the name {:?}",
-                    camera.name
-                );
-            }
-        }
-        Ok(result)
-    }
-
     fn proxy_info(&self) -> Vec<flo_core::StrandCamProxyInfo> {
-        [
-            (&self.main, flo_core::StrandCamRole::Main),
-            (&self.secondary, flo_core::StrandCamRole::Secondary),
-        ]
-        .into_iter()
-        .filter_map(|(camera, role)| {
-            camera
-                .as_ref()
-                .map(|camera| flo_core::StrandCamProxyInfo::new(role, camera.name.clone()))
-        })
-        .chain(
-            self.embedded
-                .iter()
-                .map(|camera| flo_core::StrandCamProxyInfo::new(camera.role, camera.name.clone())),
-        )
-        .collect()
+        self.embedded
+            .iter()
+            .map(|camera| flo_core::StrandCamProxyInfo::new(camera.role, camera.name.clone()))
+            .collect()
     }
 
     fn embedded_routers(&self) -> flo_webserver::EmbeddedStrandCamRouters {
@@ -1193,46 +962,11 @@ impl InitializedStrandCams {
     }
 }
 
-/// Validate in-process cameras against the legacy camera configuration and
-/// return the identity used by the coordinator for the secondary camera.
-fn merge_camera_registrations(
-    main_cam_name: Option<&str>,
-    secondary_cam_name: Option<String>,
-    embedded: &[CameraRegistration],
-) -> Result<Option<String>> {
-    let legacy = [
-        (StrandCamRole::Main, main_cam_name),
-        (StrandCamRole::Secondary, secondary_cam_name.as_deref()),
-    ];
-
+/// Validate embedded camera registrations and return the secondary identity.
+fn embedded_secondary_camera_name(embedded: &[CameraRegistration]) -> Result<Option<String>> {
     for (index, camera) in embedded.iter().enumerate() {
         if camera.name.is_empty() {
             eyre::bail!("embedded {:?} camera has an empty name", camera.role);
-        }
-
-        for (legacy_role, legacy_name) in legacy {
-            let Some(legacy_name) = legacy_name else {
-                continue;
-            };
-            if camera.role == legacy_role {
-                eyre::bail!(
-                    "embedded {:?} camera {:?} conflicts with the legacy {:?} camera {:?}; \
-                     configure each role through either an extension or `strand_cam_*`, not both",
-                    camera.role,
-                    camera.name,
-                    legacy_role,
-                    legacy_name,
-                );
-            }
-            if camera.name == legacy_name {
-                eyre::bail!(
-                    "embedded {:?} camera name {:?} conflicts with legacy {:?} camera; \
-                     camera names must identify exactly one role",
-                    camera.role,
-                    camera.name,
-                    legacy_role,
-                );
-            }
         }
 
         for other in &embedded[..index] {
@@ -1255,91 +989,14 @@ fn merge_camera_registrations(
         }
     }
 
-    Ok(secondary_cam_name.or_else(|| {
-        embedded
-            .iter()
-            .find(|camera| camera.role == StrandCamRole::Secondary)
-            .map(|camera| camera.name.clone())
-    }))
+    Ok(embedded
+        .iter()
+        .find(|camera| camera.role == StrandCamRole::Secondary)
+        .map(|camera| camera.name.clone()))
 }
 
-async fn init_strand_cams(
-    device_config: &FloControllerConfig,
-    mut embedded: Vec<CameraRegistration>,
-    _camera_host_task: Option<&mut JoinHandle<Result<()>>>,
-) -> Result<InitializedStrandCams> {
-    // Connect to strand-cam for main and secondary cameras.
-    let jar: cookie_store::CookieStore =
-        match Preferences::load(&flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY) {
-            Ok(jar) => {
-                tracing::debug!("loaded cookie store {STRAND_CAM_COOKIE_KEY}");
-                jar
-            }
-            Err(e) => {
-                tracing::debug!("cookie store {STRAND_CAM_COOKIE_KEY} not loaded: {e} {e:?}");
-                cookie_store::CookieStore::new(None)
-            }
-        };
-
-    let jar = Arc::new(RwLock::new(jar.clone()));
-
-    let main = futures::future::OptionFuture::from(
-        device_config
-            .strand_cam_main
-            .as_ref()
-            .map(|cfg| resolve_strand_cam("main", cfg, jar.clone())),
-    )
-    .await
-    .transpose()?;
-
-    let secondary = futures::future::OptionFuture::from(
-        device_config
-            .strand_cam_secondary
-            .as_ref()
-            .map(|cfg| resolve_strand_cam("secondary", cfg, jar.clone())),
-    )
-    .await
-    .transpose()?;
-
-    let main_cam_name = main.as_ref().map(|(_, name)| name.clone());
-    let main = main
-        .and_then(|(session, name)| session.map(|session| NamedStrandCamSession { name, session }));
-    let (secondary, mut secondary_cam_name) = match secondary {
-        Some((session, name)) => (
-            session.map(|session| NamedStrandCamSession {
-                name: name.clone(),
-                session,
-            }),
-            Some(name),
-        ),
-        None => (None, None),
-    };
-
-    // Backward compatibility for the deprecated top-level `secondary_cam_name`.
-    // Prefer `strand_cam_secondary.cam_name`; honor the old field with a warning
-    // so configs in the wild keep working while users migrate.
-    if let Some(deprecated) = device_config.secondary_cam_name.as_ref() {
-        tracing::warn!(
-            "config field `secondary_cam_name` is deprecated; \
-             set `strand_cam_secondary.cam_name` instead"
-        );
-        match secondary_cam_name.as_ref() {
-            Some(resolved) if resolved != deprecated => {
-                eyre::bail!(
-                    "deprecated `secondary_cam_name` ({deprecated:?}) does not match the \
-                     secondary camera name ({resolved:?}) resolved from `strand_cam_secondary`",
-                );
-            }
-            Some(_) => {} // agrees with the resolved name; nothing to do
-            None => {
-                // No `strand_cam_secondary` block: use the deprecated name on its own.
-                secondary_cam_name = Some(deprecated.clone());
-            }
-        }
-    }
-
-    let secondary_cam_name =
-        merge_camera_registrations(main_cam_name.as_deref(), secondary_cam_name, &embedded)?;
+async fn init_strand_cams(mut embedded: Vec<CameraRegistration>) -> Result<InitializedStrandCams> {
+    let secondary_cam_name = embedded_secondary_camera_name(&embedded)?;
 
     let mut embedded_routers = flo_webserver::EmbeddedStrandCamRouters::new();
     for camera in &mut embedded {
@@ -1364,8 +1021,6 @@ async fn init_strand_cams(
     }
 
     Ok(InitializedStrandCams {
-        main,
-        secondary,
         secondary_cam_name,
         embedded,
         embedded_routers,
@@ -1384,9 +1039,7 @@ impl BroadwaySend for mpsc::UnboundedSender<SaveToDiskMsg> {
     }
 }
 
-/// Options used to compose extra subsystems into the flo binary at link time.
-/// The default flo binary passes `AppOptions::default()`; downstream crates
-/// that need to add extensions construct their own `AppOptions`.
+/// Options used to compose extra subsystems into the FLO application.
 pub struct AppOptions {
     /// First-class in-process owner of camera acquisition. Unlike an
     /// [`Extension`], a camera host registers camera identities and receives
@@ -1398,9 +1051,6 @@ pub struct AppOptions {
     pub osd_overlays: Vec<Box<dyn OsdOverlay + Send + Sync>>,
     /// Capacity of the bounded in-process centroid input queue.
     pub centroid_input_capacity: usize,
-    /// Whether to bind the legacy UDP centroid listener. Integrated camera
-    /// applications should disable this and use [`CentroidInputSender`].
-    pub enable_udp_listener: bool,
 }
 
 impl Default for AppOptions {
@@ -1410,7 +1060,6 @@ impl Default for AppOptions {
             extensions: Vec::new(),
             osd_overlays: Vec::new(),
             centroid_input_capacity: DEFAULT_CENTROID_INPUT_CAPACITY,
-            enable_udp_listener: true,
         }
     }
 }
@@ -2003,15 +1652,6 @@ async fn app_main(
         };
     my_state.focusing = focusing;
 
-    // UDP remains available for standalone and replay use. Integrated camera
-    // applications use the in-process centroid channel and can leave no UDP
-    // port bound at all.
-    let mut udp_framed_recv = if options.enable_udp_listener {
-        Some(udp_handling::setup_udp(&cli.udp_addr).await?)
-    } else {
-        None
-    };
-
     if options.centroid_input_capacity == 0 {
         eyre::bail!("centroid_input_capacity must be greater than zero");
     }
@@ -2042,9 +1682,8 @@ async fn app_main(
     // here so it exists before the host is spawned below.
     let (display_source_tx, display_source_rx) = watch::channel(DisplaySource::default());
 
-    // Start the host before opening its local HTTP sessions below. A composed
-    // host such as flo-strand-cam owns the Strand Camera servers themselves;
-    // the proxy setup retries until each server has bound its listener.
+    // The composed host owns the embedded Strand Camera servers and provides
+    // their routers directly for FLO to mount under its authenticated UI.
     let mut camera_host_task = match camera_host {
         Some(host) => Some(
             host.spawn(CameraHostContext {
@@ -2059,16 +1698,7 @@ async fn app_main(
         None => None,
     };
 
-    // Open each configured Strand Camera session once. The controller keeps
-    // the original handles while the web server gets clones for its Braid-style
-    // reverse proxy; all clones share the same authenticated cookie jar.
-    let strand_cams = init_strand_cams(
-        &device_config,
-        embedded_camera_registrations,
-        camera_host_task.as_mut(),
-    )
-    .await?;
-    let strand_cam_proxy_sessions = strand_cams.proxy_sessions()?;
+    let strand_cams = init_strand_cams(embedded_camera_registrations).await?;
     let embedded_strand_cam_routers = strand_cams.embedded_routers();
     let strand_cam_proxy_info = strand_cams.proxy_info();
 
@@ -2098,7 +1728,6 @@ async fn app_main(
                 token_config,
                 persistent_secret,
                 trusted_networks,
-                strand_cam_proxy_sessions,
                 embedded_strand_cam_routers,
                 strand_cam_proxy_info,
                 from_device_http_rx,
@@ -2296,17 +1925,6 @@ async fn app_main(
                 camshow_result??;
                 break;
             }
-            udp_msg = async {
-                match udp_framed_recv.as_mut() {
-                    Some(udp_framed_recv) => udp_framed_recv.next().await,
-                    None => pending().await,
-                }
-            } => {
-                let udp_msg = udp_msg.ok_or_else(|| eyre::eyre!("UDP channel closed"))?;
-                coordinator.on_udp_message(udp_msg)?;
-                // TODO: we have fresh data. We should call
-                // `self.on_fast_tick(dt_secs)?;` here?
-            }
             centroid = centroid_rx.recv() => {
                 let centroid = centroid.ok_or_else(|| eyre::eyre!("centroid input channel closed"))?;
                 coordinator.on_image_centroid(centroid)?;
@@ -2427,10 +2045,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_cli_accepts_forwarded_composition_arguments() {
-        let cli = parse_cli(["flo", "--config", "sim.yaml", "--udp-addr", "127.0.0.1:0"]);
+    fn parse_cli_accepts_composition_arguments() {
+        let cli = parse_cli(["flo-strand-cam", "--config", "sim.yaml"]);
         assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
-        assert_eq!(cli.udp_addr, "127.0.0.1:0");
     }
 
     #[test]
@@ -2474,13 +2091,12 @@ mod tests {
     }
 
     #[test]
-    fn default_options_enable_legacy_udp_and_bound_centroid_queue() {
+    fn default_options_bound_centroid_queue() {
         let options = AppOptions::default();
         assert_eq!(
             options.centroid_input_capacity,
             DEFAULT_CENTROID_INPUT_CAPACITY
         );
-        assert!(options.enable_udp_listener);
     }
 
     #[test]
@@ -2512,11 +2128,10 @@ mod tests {
 
     #[test]
     fn embedded_main_only_needs_no_secondary_camera() {
-        let secondary = merge_camera_registrations(
-            None,
-            None,
-            &[embedded_camera(StrandCamRole::Main, "embedded-main")],
-        )
+        let secondary = embedded_secondary_camera_name(&[embedded_camera(
+            StrandCamRole::Main,
+            "embedded-main",
+        )])
         .unwrap();
 
         assert_eq!(secondary, None);
@@ -2525,14 +2140,10 @@ mod tests {
 
     #[test]
     fn embedded_secondary_is_the_coordinator_secondary_identity() {
-        let secondary = merge_camera_registrations(
-            None,
-            None,
-            &[
-                embedded_camera(StrandCamRole::Main, "embedded-main"),
-                embedded_camera(StrandCamRole::Secondary, "embedded-secondary"),
-            ],
-        )
+        let secondary = embedded_secondary_camera_name(&[
+            embedded_camera(StrandCamRole::Main, "embedded-main"),
+            embedded_camera(StrandCamRole::Secondary, "embedded-secondary"),
+        ])
         .unwrap();
 
         assert_eq!(secondary.as_deref(), Some("embedded-secondary"));
@@ -2540,29 +2151,29 @@ mod tests {
     }
 
     #[test]
-    fn embedded_camera_registrations_reject_role_and_name_conflicts() {
-        let role_conflict = merge_camera_registrations(
-            Some("legacy-main"),
-            None,
-            &[embedded_camera(StrandCamRole::Main, "embedded-main")],
-        )
+    fn embedded_camera_registrations_reject_duplicate_roles_and_names() {
+        let role_conflict = embedded_secondary_camera_name(&[
+            embedded_camera(StrandCamRole::Main, "main-a"),
+            embedded_camera(StrandCamRole::Main, "main-b"),
+        ])
         .unwrap_err();
-        assert!(role_conflict.to_string().contains("conflicts"));
+        assert!(
+            role_conflict
+                .to_string()
+                .contains("multiple embedded cameras")
+        );
 
-        let name_conflict = merge_camera_registrations(
-            Some("legacy-main"),
-            None,
-            &[embedded_camera(StrandCamRole::Secondary, "legacy-main")],
-        )
+        let name_conflict = embedded_secondary_camera_name(&[
+            embedded_camera(StrandCamRole::Main, "same"),
+            embedded_camera(StrandCamRole::Secondary, "same"),
+        ])
         .unwrap_err();
-        assert!(name_conflict.to_string().contains("conflicts"));
+        assert!(name_conflict.to_string().contains("both"));
     }
 
     #[test]
     fn embedded_cameras_claim_direct_router_routes() {
         let cameras = InitializedStrandCams {
-            main: None,
-            secondary: None,
             secondary_cam_name: Some("embedded-secondary".to_owned()),
             embedded: vec![
                 embedded_camera(StrandCamRole::Main, "embedded-main"),
@@ -2571,7 +2182,6 @@ mod tests {
             embedded_routers: flo_webserver::EmbeddedStrandCamRouters::new(),
         };
 
-        assert!(cameras.proxy_sessions().unwrap().is_empty());
         assert_eq!(cameras.proxy_info().len(), 2);
     }
 
@@ -2588,22 +2198,5 @@ mod tests {
             rx.recv().await,
             Some(strand_cam_remote_control::CamArg::SetIsRecordingMp4(true))
         ));
-    }
-
-    #[test]
-    fn embedded_camera_control_takes_precedence_over_http_session() {
-        assert_eq!(
-            camera_command_route(true, true),
-            Some(CameraCommandRoute::InProcess)
-        );
-        assert_eq!(
-            camera_command_route(true, false),
-            Some(CameraCommandRoute::Http)
-        );
-        assert_eq!(
-            camera_command_route(false, true),
-            Some(CameraCommandRoute::InProcess)
-        );
-        assert_eq!(camera_command_route(false, false), None);
     }
 }

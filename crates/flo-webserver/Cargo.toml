@@ -32,9 +32,6 @@ futures.workspace = true
 [build-dependencies]
 build-util.workspace = true
 
-[dev-dependencies]
-cookie_store = "0.21.0"
-
 [features]
 default = ["bundle_files"]
 

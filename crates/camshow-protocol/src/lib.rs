@@ -125,8 +125,7 @@ mod tests {
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert_eq!(
-            s,
-            r#"{"kind":"set_display_source","source":"strand_cam_main"}"#,
+            s, r#"{"kind":"set_display_source","source":"strand_cam_main"}"#,
             "got {s}"
         );
         assert!(matches!(

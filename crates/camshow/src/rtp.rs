@@ -152,7 +152,9 @@ impl FrameSink for RtpSink {
             (borrowed.width(), borrowed.height())
         };
         if Self::needs_restart(self.frame_size, size) {
-            let previous = self.frame_size.expect("needs_restart implies a previous size");
+            let previous = self
+                .frame_size
+                .expect("needs_restart implies a previous size");
             info!(
                 "displayed frame size changed from {}x{} to {}x{}; restarting the RTP stream \
                  (the receiver will resync)",
@@ -264,8 +266,8 @@ mod tests {
 
     fn frame(width: u32, height: u32) -> Frame {
         let stride = width as usize * 3;
-        let image =
-            OImage::<RGB8>::new(width, height, stride, vec![0u8; stride * height as usize]).unwrap();
+        let image = OImage::<RGB8>::new(width, height, stride, vec![0u8; stride * height as usize])
+            .unwrap();
         std::sync::Arc::new(strand_dynamic_frame::DynamicFrameOwned::from_static(image))
     }
 

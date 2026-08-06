@@ -416,8 +416,7 @@ fn build_distance_report(
         stereopsis_calib_present: config.is_some_and(|c| c.stereopsis_calib.is_some()),
         distance_kalman_params_present: config
             .is_some_and(|c| c.kalman_filter_dist_parameters.is_some()),
-        secondary_camera_configured: config
-            .is_some_and(|c| c.strand_cam_secondary.is_some() || c.secondary_cam_name.is_some()),
+        secondary_camera_configured: false,
     };
 
     let diagnosis = build_diagnosis(&est, &dist_obs, &config_summary, &cameras, &stereo_pairs);

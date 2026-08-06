@@ -10,10 +10,6 @@ authors = [
 description = "method for videography using a camera system that automatically moves to follow the subject"
 license = "MIT OR Apache-2.0"
 
-[[bin]]
-name = "flo"
-path = "src/main.rs"
-
 [dependencies]
 color-eyre.workspace = true
 thiserror.workspace = true
@@ -26,8 +22,6 @@ tokio = { workspace = true, features = ["macros", "net", "sync", "time"] }
 tokio-util = { workspace = true, features = ["net", "codec", "time"] }
 tokio-serial.workspace = true
 tokio-stream = { workspace = true, features = ["sync"] }
-preferences-serde1.workspace = true
-cookie_store = "0.21.0"
 clap = { workspace = true, features = ["derive"] }
 memchr = "2.5.0"
 sha2 = "0.10.6"
@@ -44,7 +38,6 @@ floz-writer.workspace = true
 hyper = "1.1"
 tempfile.workspace = true
 tracing.workspace = true
-serde_cbor.workspace = true
 packed_struct = "0.3" # required by multiwii_serial_protocol_v2 0.1.12
 glob = "0.3.1"
 regex = "1.10.5"
@@ -69,10 +62,7 @@ sbgc-gimbal = { path = "../sbgc-gimbal" }
 tilta-dongle-comms = { path = "../tilta-dongle-comms" }
 trinamic = { path = "../trinamic" }
 
-strand-bui-backend-session-types.workspace = true
-strand-bui-backend-session.workspace = true
 strand-cam-remote-control.workspace = true
-strand-cam-storetype.workspace = true
 
 [dev-dependencies]
 approx.workspace = true

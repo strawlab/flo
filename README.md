@@ -15,13 +15,9 @@ Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor V
 
 ## What is in this repository
 
-This repository contains two FLO application binaries. The standalone `flo`
-binary supports the legacy split-process deployment: it runs tracking and motor
-control, while Strand Camera must be launched separately to acquire and process
-images and send observations to `flo` over the network. The integrated
-`flo-strand-cam` binary is the preferred deployment for this repository. It
-brings the same FLO application together with Strand Camera acquisition and the
-experimental ImOps detector in one process, with image observations traveling
+The `flo-strand-cam` application is the FLO deployment in this repository. It
+combines FLO tracking and motor control with Strand Camera acquisition and the
+ImOps detector in one process. Images, detections, and camera controls travel
 through bounded Rust channels rather than a network socket.
 
 While FLO was originally designed as a generic camera tracking system for all
@@ -65,11 +61,11 @@ or SimpleBGC gimbal motors.
 
 ## Overview of top-level directories
 
-- `crates` Rust crates (libraries) used by `flo` and other software
+- `crates` Rust crates and application binaries, including `flo-strand-cam`
 - `firmware/beamdriver` Firmware for IR LED source
 - `firmware/flo-tilta-dongle` Firmware for USB dongle to control Tilta motors.
 - `firmware/rpipico-pantilt` Firmware for RPi Pico to control PWM servo motors.
-- `src` Rust source code for `flo`
+- `crates/flo` Rust source for the FLO controller
 
 ## Running with Strand Camera
 
@@ -85,7 +81,7 @@ open separate HTTP listeners.
 flo-strand-cam:
   main:
     backend: pylon
-    camera_name: Basler-40522040
+    camera_name: Basler-1234567
     expected_fps: 60.0
     mp4_max_framerate: Fps60
     imops:
@@ -95,7 +91,7 @@ flo-strand-cam:
       center_y: 600
   secondary: # omit for monocular tracking
     backend: pylon
-    camera_name: Basler-40522041
+    camera_name: Basler-40300216
     imops:
       enabled: true
       threshold: 200
@@ -109,82 +105,19 @@ Then run the composed executable:
 
 Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Camera
 observations and recording controls (including MP4 codec, frame-rate, and
-pre-trigger commands) use bounded in-process channels; the integrated binary
-does not use FLO's legacy UDP centroid listener. Do not configure the legacy
-`strand_cam_main` or `strand_cam_secondary` HTTP client sections in the same
-file. The optional `mp4_codec` accepts Strand Camera's `CodecSelection`; the
-simulated example includes its VAAPI `Ffmpeg` form. See [the crate
+pre-trigger commands) use bounded in-process channels. The optional `mp4_codec`
+accepts Strand Camera's `CodecSelection`; the simulated example includes its
+VAAPI `Ffmpeg` form. See [the crate
 README](crates/flo-strand-cam/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
 ## Running without hardware (simulation / testing)
 
-You can run the full `flo` controller — tracking, Kalman filter, distance
-estimation, recording, and web UI — with no camera or motor hardware attached.
-The `floz-replay` tool feeds centroid data to `flo` over FLO's legacy UDP
-channel, so the controller behaves as if a camera were present. This is useful
-for checking that new code runs, runs usefully, and that the UI works, before
-testing on real hardware.
-
-The legacy `floz-replay` CLI uses UDP and therefore involves **two processes**:
-start `flo` first so it is listening on its UDP port. If you start
-`floz-replay` with nothing listening, the send fails immediately with `Sending
-UDP packet: Connection refused` (the operating system reports the unreachable
-port).
-
-1. Start `flo` with a hardware-free config — one with no `strand_cam_*` blocks
-   (so nothing connects to Strand Camera) and no motor flags (so motor commands
-   are computed and harmlessly discarded). The bundled `config-sim-stereo.yaml`
-   is such a config, set up for stereo distance testing:
-
-   ```
-   flo --config config-sim-stereo.yaml
-   ```
-
-   By default `flo` listens for centroids on UDP `0.0.0.0:8080` and serves the
-   web UI on `--http-addr` (default port `2222`). Open the UI to watch tracking.
-
-2. In a second terminal, drive `flo` one of two ways. Both subcommands send to
-   `127.0.0.1:8080` by default, matching `flo`'s default UDP port; use
-   `--target <addr>` if you changed `flo`'s `--udp-addr`.
-
-   **Synthetic trajectory (`synth`)** generates centroids from a parametric
-   virtual-insect trajectory, projected through the config's calibration so the
-   angles and stereopsis distance the controller recovers match the requested
-   trajectory:
-
-   ```
-   cargo run -r -p floz-replay -- synth --config config-sim-stereo.yaml
-   ```
-
-   Pass `--config` the same file you gave `flo`, so the projection and the
-   controller agree. Useful options: `--distance <m>` and
-   `--distance-amplitude <m>` (target range and its sinusoidal variation, for
-   distance testing), `--azimuth-deg` / `--elevation-deg` / `--period` (the
-   angular sweep), `--rate <hz>`, `--duration <s>`, and `--loop`.
-   `config-sim-stereo.yaml` includes a `stereopsis_calib` and a secondary
-   camera, so distance tracking is exercised; pass `--no-stereo` (or use a
-   config without `stereopsis_calib`) to send only the primary camera.
-
-   **Replay a recording (`replay`)** re-emits the centroids saved in a `.floz`
-   file at their original cadence:
-
-   ```
-   cargo run -r -p floz-replay -- replay recording.floz
-   ```
-
-   Useful options: `--speed <x>`, `--loop`, `--start <s>`, `--duration <s>`, and
-   `--primary-cam` / `--secondary-cam` to relabel the recording's camera names
-   to the ones the controller expects (e.g. `synth-secondary` to match
-   `config-sim-stereo.yaml`).
-
-### In-process replay or synthesis (no UDP listener)
-
-`floz-replay-inprocess` composes the same source with FLO through
-`CentroidInputSender`; it deliberately disables the UDP listener. Source
-arguments come first and normal FLO arguments follow `--`. For now, `synth`
-still takes its calibration config explicitly, so pass the same config on both
-sides:
+You can run tracking, Kalman filtering, distance estimation, recording, and the
+web UI with no camera or motor hardware. `floz-replay-inprocess` embeds a
+synthetic or replay centroid source alongside the simulated camera host; source
+arguments come first and FLO arguments follow `--`. Pass the same configuration
+to the source and the host:
 
 ```
 cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
@@ -192,9 +125,10 @@ cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
   --config config-sim-stereo.yaml
 ```
 
-For a recording, replace the source portion with `replay recording.floz`.
-The original `floz-replay` commands remain available as compatibility UDP
-adapters while integrations migrate to the in-process input.
+`config-sim-stereo.yaml` supplies simulated primary and secondary cameras, so
+stereo distance tracking is exercised. For a recording, replace the source
+portion with `replay recording.floz`. Useful source options include
+`--distance`, `--distance-amplitude`, `--rate`, `--duration`, and `--loop`.
 
 ## `camshow` binary
 

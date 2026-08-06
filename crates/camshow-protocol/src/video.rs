@@ -320,15 +320,7 @@ mod tests {
     #[test]
     fn the_webcam_is_not_a_relayable_source() {
         assert_eq!(
-            VideoFrameHeader::new(
-                DisplaySource::Webcam,
-                WirePixelFormat::Mono8,
-                4,
-                4,
-                4,
-                0,
-                0
-            ),
+            VideoFrameHeader::new(DisplaySource::Webcam, WirePixelFormat::Mono8, 4, 4, 4, 0, 0),
             Err(VideoWireError::WebcamSource)
         );
 

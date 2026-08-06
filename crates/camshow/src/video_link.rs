@@ -129,7 +129,10 @@ pub(crate) async fn serve(listen_addr: String, latest: LatestRelayedFrame) -> Re
 /// A bad header is fatal for the connection: the framing is fixed-size, so
 /// there is no way to resynchronize mid-stream. Dropping the connection lets
 /// flo reconnect and start from a known position.
-async fn receive_frames(mut stream: tokio::net::TcpStream, latest: &LatestRelayedFrame) -> Result<()> {
+async fn receive_frames(
+    mut stream: tokio::net::TcpStream,
+    latest: &LatestRelayedFrame,
+) -> Result<()> {
     stream.set_nodelay(true).ok();
     let mut header_bytes = [0u8; VIDEO_HEADER_LEN];
     // Reused across frames: a steady stream of same-sized frames should not
@@ -201,7 +204,12 @@ mod tests {
 
     use super::*;
 
-    fn header(pixel_format: WirePixelFormat, width: u32, height: u32, stride: u32) -> VideoFrameHeader {
+    fn header(
+        pixel_format: WirePixelFormat,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> VideoFrameHeader {
         VideoFrameHeader::new(
             DisplaySource::StrandCamMain,
             pixel_format,
