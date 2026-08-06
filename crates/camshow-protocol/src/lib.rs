@@ -3,9 +3,10 @@
 //!
 //! `camshow` listens on a TCP port. `flo` connects (and reconnects after any
 //! disconnect) and pushes a stream of JSON-lines messages: OSD canvas updates
-//! plus recording start/stop commands. The link is one-way (flo → camshow).
-//! camshow keeps showing the camera regardless of whether flo is connected,
-//! so the link is best-effort.
+//! plus recording start/stop commands. `camshow` can send an operator's local
+//! display-selection request back on that same connection. camshow keeps
+//! showing the camera regardless of whether flo is connected, so the link is
+//! best-effort.
 //!
 //! Relayed camera frames travel on a second, separate connection with its own
 //! binary framing — see [`video`].
@@ -22,7 +23,8 @@ pub const DEFAULT_CAMSHOW_ADDR: &str = "127.0.0.1:2224";
 /// connections from flo if the version does not match.
 ///
 /// 2: added `SetDisplaySource`.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3: made the control link bidirectional for GUI display-selection requests.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Parameters for a recording-start: the codec config, the output
 /// directory, and the timestamp used to derive the file name. Defined as a
@@ -67,7 +69,20 @@ pub enum FloToCamshow {
     SetDisplaySource { source: flo_core::DisplaySource },
 }
 
-pub type CamshowFramedCodec = json_lines::codec::JsonLinesCodec<FloToCamshow, FloToCamshow>;
+/// Messages camshow sends back to FLO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CamshowToFlo {
+    /// Request that FLO select this source. FLO remains authoritative: it
+    /// republishes the resulting state to camshow after accepting the request.
+    SetDisplaySource { source: flo_core::DisplaySource },
+}
+
+/// Codec as used by FLO: decode requests from camshow and encode commands to it.
+pub type FloCamshowCodec = json_lines::codec::JsonLinesCodec<CamshowToFlo, FloToCamshow>;
+
+/// Codec as used by camshow: decode commands from FLO and encode requests to it.
+pub type CamshowFloCodec = json_lines::codec::JsonLinesCodec<FloToCamshow, CamshowToFlo>;
 
 #[cfg(test)]
 mod tests {
@@ -137,11 +152,34 @@ mod tests {
     }
 
     #[test]
+    fn gui_display_source_request_roundtrip() {
+        let msg = CamshowToFlo::SetDisplaySource {
+            source: flo_core::DisplaySource::StrandCamSecondary,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            s, r#"{"kind":"set_display_source","source":"strand_cam_secondary"}"#,
+            "got {s}"
+        );
+        assert!(matches!(
+            roundtrip_camshow_to_flo(&msg),
+            CamshowToFlo::SetDisplaySource {
+                source: flo_core::DisplaySource::StrandCamSecondary
+            }
+        ));
+    }
+
+    #[test]
     fn osd_roundtrip() {
         let canvas = OsdCache::new(30, 16);
         let msg = FloToCamshow::Osd(canvas);
         let s = serde_json::to_string(&msg).unwrap();
         assert!(s.contains(r#""kind":"osd""#), "got {s}");
         assert!(matches!(roundtrip(&msg), FloToCamshow::Osd(_)));
+    }
+
+    fn roundtrip_camshow_to_flo(msg: &CamshowToFlo) -> CamshowToFlo {
+        let s = serde_json::to_string(msg).expect("serialize");
+        serde_json::from_str(&s).expect("deserialize")
     }
 }

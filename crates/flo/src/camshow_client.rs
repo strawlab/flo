@@ -7,13 +7,15 @@
 //! is currently buffered. flo's main loop is unaffected by camshow being
 //! unavailable.
 
-use camshow_protocol::{CamshowFramedCodec, FloToCamshow, PROTOCOL_VERSION, RecordingStart};
+use camshow_protocol::{
+    CamshowToFlo, FloCamshowCodec, FloToCamshow, PROTOCOL_VERSION, RecordingStart,
+};
 use color_eyre::eyre::Result;
-use flo_core::DisplaySource;
-use futures::SinkExt;
+use flo_core::{CommandSource, DisplaySource, FloCommand, FloEvent};
+use futures::{SinkExt, StreamExt};
 use osd_utils::OsdCache;
 use tokio::{net::TcpStream, sync::mpsc, sync::watch};
-use tokio_util::codec::FramedWrite;
+use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, warn};
 
 /// Recording commands flo's coordinator sends to the camshow client.
@@ -30,6 +32,7 @@ pub(crate) async fn run(
     mut canvas_rx: watch::Receiver<OsdCache>,
     mut command_rx: mpsc::UnboundedReceiver<Command>,
     mut display_source_rx: watch::Receiver<DisplaySource>,
+    flo_events_tx: tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
     info!("camshow link target: {addr}");
     loop {
@@ -41,6 +44,7 @@ pub(crate) async fn run(
                     &mut canvas_rx,
                     &mut command_rx,
                     &mut display_source_rx,
+                    &flo_events_tx,
                 )
                 .await
                 {
@@ -62,9 +66,12 @@ async fn serve_connection(
     canvas_rx: &mut watch::Receiver<OsdCache>,
     command_rx: &mut mpsc::UnboundedReceiver<Command>,
     display_source_rx: &mut watch::Receiver<DisplaySource>,
+    flo_events_tx: &tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
-    let mut sink = FramedWrite::new(stream, CamshowFramedCodec::default());
+    let (read_half, write_half) = stream.into_split();
+    let mut requests = FramedRead::new(read_half, FloCamshowCodec::default());
+    let mut sink = FramedWrite::new(write_half, FloCamshowCodec::default());
     sink.send(FloToCamshow::Hello {
         protocol_version: PROTOCOL_VERSION,
     })
@@ -107,6 +114,19 @@ async fn serve_connection(
                 res?;
                 let canvas = canvas_rx.borrow_and_update().clone();
                 sink.send(FloToCamshow::Osd(canvas)).await?;
+            }
+            request = requests.next() => {
+                let Some(request) = request else {
+                    return Ok(());
+                };
+                match request? {
+                    CamshowToFlo::SetDisplaySource { source } => {
+                        let _ = flo_events_tx.send(FloEvent::Command(
+                            FloCommand::SetDisplaySource(source),
+                            CommandSource::Bui,
+                        ));
+                    }
+                }
             }
         }
     }

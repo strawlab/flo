@@ -4,12 +4,12 @@
 //! control link with a dead video link means the display falls back to the
 //! webcam, and vice versa.
 
-use camshow_protocol::{CamshowFramedCodec, FloToCamshow, PROTOCOL_VERSION};
+use camshow_protocol::{CamshowFloCodec, CamshowToFlo, FloToCamshow, PROTOCOL_VERSION};
 use eyre::{Result, WrapErr};
 use flo_core::DisplaySource;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpListener, sync::watch};
-use tokio_util::codec::FramedRead;
+use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -29,6 +29,10 @@ pub(crate) struct Server {
     /// What the capture loop should display. A watch rather than a queue: only
     /// the operator's latest choice matters.
     pub(crate) display_source_tx: watch::Sender<DisplaySource>,
+    /// Local GUI requests that need to be forwarded to FLO. The initial value
+    /// is marked seen by `main`, so FLO's selection is never overwritten when
+    /// a connection first opens.
+    pub(crate) gui_display_source_rx: watch::Receiver<DisplaySource>,
 }
 
 impl Server {
@@ -38,7 +42,7 @@ impl Server {
     /// the caller shuts the process down so a supervisor can restart it or the
     /// operator can fix the address. Accept and per-connection errors are
     /// retried inside each server.
-    pub(crate) async fn run(self) -> Result<()> {
+    pub(crate) async fn run(mut self) -> Result<()> {
         let video = crate::video_link::serve(self.video_listen_addr.clone(), self.relayed.clone());
         tokio::select! {
             result = self.serve_control() => result,
@@ -49,7 +53,7 @@ impl Server {
     /// Binds `listen_addr` and serves flo connections, forwarding OSD updates
     /// and recording commands to the channels, until a bind or accept error
     /// ends the loop.
-    async fn serve_control(&self) -> Result<()> {
+    async fn serve_control(&mut self) -> Result<()> {
         let listener = TcpListener::bind(&self.listen_addr)
             .await
             .with_context(|| format!("binding TCP listener at {}", self.listen_addr))?;
@@ -65,7 +69,20 @@ impl Server {
             };
             info!("flo connected from {peer}");
 
-            if let Err(e) = self.handle_client(stream).await {
+            let osd_tx = self.osd_tx.clone();
+            let recording_tx = self.recording_tx.clone();
+            let rtp_bitrate_tx = self.rtp_bitrate_tx.clone();
+            let display_source_tx = self.display_source_tx.clone();
+            if let Err(e) = Self::handle_client(
+                stream,
+                &mut self.gui_display_source_rx,
+                &osd_tx,
+                &recording_tx,
+                &rtp_bitrate_tx,
+                &display_source_tx,
+            )
+            .await
+            {
                 warn!("flo connection {peer} ended: {e}");
             } else {
                 info!("flo {peer} disconnected cleanly");
@@ -83,13 +100,35 @@ impl Server {
         }
     }
 
-    async fn handle_client(&self, stream: tokio::net::TcpStream) -> Result<()> {
+    async fn handle_client(
+        stream: tokio::net::TcpStream,
+        gui_display_source_rx: &mut watch::Receiver<DisplaySource>,
+        osd_tx: &watch::Sender<Option<OsdSnapshot>>,
+        recording_tx: &tokio::sync::mpsc::UnboundedSender<RecordingCommand>,
+        rtp_bitrate_tx: &tokio::sync::mpsc::UnboundedSender<Option<u32>>,
+        display_source_tx: &watch::Sender<DisplaySource>,
+    ) -> Result<()> {
         stream.set_nodelay(true).ok();
-        let mut frames = FramedRead::new(stream, CamshowFramedCodec::default());
+        let (read_half, write_half) = stream.into_split();
+        let mut frames = FramedRead::new(read_half, CamshowFloCodec::default());
+        let mut requests = FramedWrite::new(write_half, CamshowFloCodec::default());
 
         let mut handshake_done = false;
-        while let Some(msg) = frames.next().await {
-            let msg = msg?;
+        loop {
+            let msg = tokio::select! {
+                msg = frames.next() => match msg {
+                    Some(msg) => msg?,
+                    None => return Ok(()),
+                },
+                changed = gui_display_source_rx.changed() => {
+                    changed?;
+                    let source = *gui_display_source_rx.borrow_and_update();
+                    requests
+                        .send(CamshowToFlo::SetDisplaySource { source })
+                        .await?;
+                    continue;
+                }
+            };
             if !handshake_done {
                 match msg {
                     FloToCamshow::Hello { protocol_version } => {
@@ -108,27 +147,26 @@ impl Server {
             match msg {
                 FloToCamshow::Hello { .. } => debug!("repeated Hello; ignoring"),
                 FloToCamshow::Osd(canvas) => {
-                    let _ = self.osd_tx.send(Some(OsdSnapshot {
+                    let _ = osd_tx.send(Some(OsdSnapshot {
                         canvas,
                         received_at: std::time::Instant::now(),
                     }));
                 }
                 FloToCamshow::StartRecording(start) => {
-                    self.recording_tx.send(RecordingCommand::Start(start))?;
+                    recording_tx.send(RecordingCommand::Start(start))?;
                 }
                 FloToCamshow::StopRecording => {
-                    self.recording_tx.send(RecordingCommand::Stop)?;
+                    recording_tx.send(RecordingCommand::Stop)?;
                 }
                 FloToCamshow::SetRtpBitrateKbps(bitrate_kbps) => {
-                    self.rtp_bitrate_tx.send(bitrate_kbps)?;
+                    rtp_bitrate_tx.send(bitrate_kbps)?;
                 }
                 FloToCamshow::SetDisplaySource { source } => {
                     // An error here means the capture loop is gone, which the
                     // recording-command sends above already treat as fatal.
-                    self.display_source_tx.send(source)?;
+                    display_source_tx.send(source)?;
                 }
             }
         }
-        Ok(())
     }
 }

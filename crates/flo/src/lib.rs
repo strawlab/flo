@@ -1766,6 +1766,7 @@ async fn app_main(
             canvas_rx,
             rec_rx,
             display_source_rx,
+            broadway.flo_events.clone(),
         ));
         let task: Pin<Box<dyn Future<Output = _>>> = Box::pin(jh);
         (Some(canvas_tx), Some(rec_tx), task)
