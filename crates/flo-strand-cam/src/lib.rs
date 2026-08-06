@@ -492,6 +492,10 @@ struct CameraRuntime {
 }
 
 impl CameraRuntime {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "construction keeps each camera channel and frame path explicit"
+    )]
     fn new(
         config: CameraConfig,
         centroid_tx: flo::CentroidInputSender,

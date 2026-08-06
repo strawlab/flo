@@ -1,5 +1,6 @@
 use nalgebra as na;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::net::SocketAddr;
 
 pub mod math;
 pub use math::*;
@@ -28,6 +29,16 @@ pub const EVENTS_PATH: &str = "events";
 /// URL path under which FLO reverse-proxies its configured Strand Cameras.
 /// This matches Braid's camera proxy API.
 pub const CAM_PROXY_PATH: &str = "camera";
+
+/// Default bitrate offered when the operator adds an H.264/RTP stream.
+pub const DEFAULT_RTP_BITRATE_KBPS: u32 = 4000;
+
+/// One independently encoded H.264/RTP network stream.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+pub struct RtpTarget {
+    pub addr: SocketAddr,
+    pub bitrate_kbps: u32,
+}
 
 /// The role a connected Strand Camera has in FLO's tracking configuration.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
@@ -752,6 +763,12 @@ pub struct DeviceState {
     pub stereopsis_state: Option<StereopsisState>,
     /// Is data from cameras stale.
     pub cam_stale: CamStaleBitmask,
+    /// What camshow is currently displaying and sending over RTP.
+    #[serde(default)]
+    pub display_source: DisplaySource,
+    /// H.264/RTP streams camshow is currently configured to send.
+    #[serde(default)]
+    pub rtp_targets: Vec<RtpTarget>,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -1212,6 +1229,8 @@ impl DeviceState {
             precapture_buffered_secs: 0.0,
             stereopsis_state: Default::default(),
             cam_stale: Default::default(),
+            display_source: DisplaySource::default(),
+            rtp_targets: Vec::new(),
         }
     }
 }

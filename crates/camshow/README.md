@@ -14,9 +14,9 @@ One binary, no compile-time options: the displayed frames go to whichever
 outputs the CLI enables, and both can run at the same time.
 
 - `--gui` — local egui video display (fullscreen, or `--windowed`).
-- `--rtp-dest <HOST:PORT>` — H.264/RTP/UDP stream, e.g. to an OpenIPC-style
-  groundstation. `flo` can retarget the bitrate, or disable and re-enable the
-  stream, at runtime via `SetRtpBitrateKbps`.
+- `--rtp-dest <HOST:PORT>` — initial H.264/RTP/UDP stream, e.g. to an
+  OpenIPC-style groundstation. The flo-strand-cam BUI can add or remove streams
+  and change each stream's bitrate independently at runtime.
 
 In the GUI, press `0` or Space for the webcam, `1` for the main tracking camera,
 and `2` for the secondary tracking camera. These keys ask FLO to switch the

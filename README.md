@@ -173,8 +173,8 @@ Output options:
   nothing is streamed. Tuning (all optional, and only accepted alongside
   `--rtp-dest`): `--rtp-encoder <ffmpeg|openh264>`, `--rtp-bitrate-kbps`,
   `--rtp-fps`, `--rtp-mtu`, `--rtp-idr-interval`, `--rtp-dump-annexb <FILE>`.
-  `flo` can change the bitrate — or disable and re-enable the stream — while it
-  runs.
+  The flo-strand-cam BUI can add and remove destinations and change each
+  destination's bitrate independently while camshow runs.
 
 Other options:
 
@@ -232,9 +232,10 @@ into the recording directory selected by `flo`.
 
 ### Switching the display source
 
-While flying, the operator can switch what the local display and the RTP stream
-show between the FPV webcam and the main tracking (IR) camera. Configure an RC
-channel condition for it:
+The Cameras section of the flo-strand-cam BUI can switch what the local display
+and every RTP stream show between the FPV webcam and either configured tracking
+(IR) camera. An RC channel condition can also switch between the webcam and the
+main tracking camera:
 
 ```yaml
 mavlink_config:

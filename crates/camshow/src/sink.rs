@@ -7,7 +7,7 @@ use eyre::Result;
 
 use crate::{
     gui::{GuiSink, GuiSinkConfig},
-    rtp::{RtpSink, RtpSinkConfig},
+    rtp::{RtpSinkConfig, RtpSinks},
     state::{Frame, Timestamp},
 };
 
@@ -21,10 +21,9 @@ pub(crate) trait FrameSink: Send {
     /// entirely.
     fn on_frame(&mut self, frame: Frame, timestamp: Timestamp, recording: bool) -> ControlFlow<()>;
 
-    /// Called when flo requests a new RTP target bitrate (`Some(kbps)`) or
-    /// asks the RTP stream to be disabled (`None`). No-op by default, since
-    /// only the RTP sink streams; the display has nothing to do here.
-    fn set_rtp_bitrate_kbps(&mut self, _kbps: Option<u32>) {}
+    /// Replace the set of H.264/RTP stream configurations. No-op for non-RTP
+    /// outputs.
+    fn set_rtp_targets(&mut self, _targets: Vec<flo_core::RtpTarget>) {}
 
     /// Called once, after the capture loop exits, to flush/shut down.
     fn finish(&mut self);
@@ -56,7 +55,7 @@ impl Sinks {
             sinks.push(Box::new(gui));
         }
         if let Some(rtp_cfg) = cfg.rtp {
-            sinks.push(Box::new(RtpSink::build(rtp_cfg)));
+            sinks.push(Box::new(RtpSinks::build(rtp_cfg)));
         }
         Ok(Self { sinks, on_shutdown })
     }
@@ -87,9 +86,9 @@ impl FrameSink for Sinks {
         }
     }
 
-    fn set_rtp_bitrate_kbps(&mut self, kbps: Option<u32>) {
+    fn set_rtp_targets(&mut self, targets: Vec<flo_core::RtpTarget>) {
         for sink in self.sinks.iter_mut() {
-            sink.set_rtp_bitrate_kbps(kbps);
+            sink.set_rtp_targets(targets.clone());
         }
     }
 
@@ -112,7 +111,7 @@ mod tests {
     #[derive(Default)]
     struct Observed {
         frames: usize,
-        bitrates: Vec<Option<u32>>,
+        targets: Vec<Vec<flo_core::RtpTarget>>,
         finished: bool,
     }
 
@@ -146,8 +145,8 @@ mod tests {
             }
         }
 
-        fn set_rtp_bitrate_kbps(&mut self, kbps: Option<u32>) {
-            self.observed.lock().unwrap().bitrates.push(kbps);
+        fn set_rtp_targets(&mut self, targets: Vec<flo_core::RtpTarget>) {
+            self.observed.lock().unwrap().targets.push(targets);
         }
 
         fn finish(&mut self) {
@@ -168,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_bitrates_and_finish_reach_every_sink() {
+    fn frames_targets_and_finish_reach_every_sink() {
         let (a, a_seen) = TestSink::new(None);
         let (b, b_seen) = TestSink::new(None);
         let mut sinks = sinks_of(vec![Box::new(a), Box::new(b)]);
@@ -178,13 +177,17 @@ mod tests {
                 .on_frame(test_frame(), chrono::Local::now(), false)
                 .is_continue()
         );
-        sinks.set_rtp_bitrate_kbps(Some(1500));
+        let targets = vec![flo_core::RtpTarget {
+            addr: "127.0.0.1:5600".parse().unwrap(),
+            bitrate_kbps: 1500,
+        }];
+        sinks.set_rtp_targets(targets.clone());
         sinks.finish();
 
         for seen in [a_seen, b_seen] {
             let seen = seen.lock().unwrap();
             assert_eq!(seen.frames, 1);
-            assert_eq!(seen.bitrates, vec![Some(1500)]);
+            assert_eq!(seen.targets, vec![targets.clone()]);
             assert!(seen.finished);
         }
     }

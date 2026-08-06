@@ -24,7 +24,9 @@ pub const DEFAULT_CAMSHOW_ADDR: &str = "127.0.0.1:2224";
 ///
 /// 2: added `SetDisplaySource`.
 /// 3: made the control link bidirectional for GUI display-selection requests.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 4: added dynamic H.264/RTP destination management.
+/// 5: made the bitrate independently configurable for every RTP target.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Parameters for a recording-start: the codec config, the output
 /// directory, and the timestamp used to derive the file name. Defined as a
@@ -54,10 +56,8 @@ pub enum FloToCamshow {
     StartRecording(Box<RecordingStart>),
     /// Stop recording, finalize the file.
     StopRecording,
-    /// Set the bitrate of the encoder, in kilo bits per second. If `None`,
-    /// disable the RTP stream. Ignored unless camshow was started with an RTP
-    /// destination.
-    SetRtpBitrateKbps(Option<u32>),
+    /// Replace the complete set of independently configured H.264/RTP streams.
+    SetRtpTargets { targets: Vec<flo_core::RtpTarget> },
     /// Choose what the display and RTP stream show. A non-webcam source needs
     /// frames arriving on the video link (see [`video`]); without them camshow
     /// shows the webcam instead. Never affects the recording.
@@ -76,6 +76,8 @@ pub enum CamshowToFlo {
     /// Request that FLO select this source. FLO remains authoritative: it
     /// republishes the resulting state to camshow after accepting the request.
     SetDisplaySource { source: flo_core::DisplaySource },
+    /// The H.264/RTP destinations camshow is currently configured to send to.
+    RtpTargets { targets: Vec<flo_core::RtpTarget> },
 }
 
 /// Codec as used by FLO: decode requests from camshow and encode commands to it.
@@ -166,6 +168,27 @@ mod tests {
             CamshowToFlo::SetDisplaySource {
                 source: flo_core::DisplaySource::StrandCamSecondary
             }
+        ));
+    }
+
+    #[test]
+    fn rtp_targets_roundtrip_in_both_directions() {
+        let targets = vec![flo_core::RtpTarget {
+            addr: "192.168.1.20:5600".parse().unwrap(),
+            bitrate_kbps: 2500,
+        }];
+        let to_camshow = FloToCamshow::SetRtpTargets {
+            targets: targets.clone(),
+        };
+        assert!(matches!(
+            roundtrip(&to_camshow),
+            FloToCamshow::SetRtpTargets { targets: received } if received == targets
+        ));
+
+        let to_flo = CamshowToFlo::RtpTargets { targets };
+        assert!(matches!(
+            roundtrip_camshow_to_flo(&to_flo),
+            CamshowToFlo::RtpTargets { targets } if targets.len() == 1
         ));
     }
 

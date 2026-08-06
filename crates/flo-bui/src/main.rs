@@ -1,12 +1,12 @@
 use console_error_panic_hook::set_once as set_panic_hook;
 
-use std::fmt;
+use std::{fmt, net::SocketAddr};
 
 use gloo_events::EventListener;
 use gloo_timers::callback::Interval;
 use wasm_bindgen::{JsCast, JsValue, prelude::*};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Event, EventSource, Gamepad, GamepadEvent, MessageEvent};
+use web_sys::{Event, EventSource, Gamepad, GamepadEvent, HtmlInputElement, MessageEvent};
 
 use yew::prelude::*;
 
@@ -89,6 +89,17 @@ struct App {
     last_gamepad_timestamp: f64,
     /// Set once the server broadcasts that it is shutting down.
     server_quit: bool,
+    adding_rtp_target: bool,
+    new_rtp_target: String,
+    new_rtp_bitrate: String,
+    new_rtp_target_error: Option<String>,
+    /// The address field of the add-target modal. `autofocus` does nothing here
+    /// because Yew sets the attribute after the element is already in the
+    /// document, so the field is focused explicitly in `rendered`.
+    new_rtp_target_ref: NodeRef,
+    /// Set when the modal opens; cleared once its address field has the focus.
+    focus_new_rtp_target: bool,
+    rtp_target_pending_removal: Option<String>,
 }
 
 enum Msg {
@@ -106,6 +117,16 @@ enum Msg {
     SetPreCaptureSeconds,
     SetDistanceCorrection,
     AdjustFocus(i32),
+    SetDisplaySource(DisplaySource),
+    ShowAddRtpTarget,
+    CancelAddRtpTarget,
+    SetNewRtpTarget(String),
+    SetNewRtpBitrate(String),
+    AddRtpTarget,
+    SetRtpTargetBitrate(String, String),
+    ConfirmRemoveRtpTarget(String),
+    CancelRemoveRtpTarget,
+    RemoveRtpTarget,
     /// The server broadcast that it is shutting down.
     ServerQuit,
     RenderView,
@@ -235,6 +256,22 @@ impl Component for App {
             query_gamepad_interval: None,
             last_gamepad_timestamp: 0.0,
             server_quit: false,
+            adding_rtp_target: false,
+            new_rtp_target: String::new(),
+            new_rtp_bitrate: flo_core::DEFAULT_RTP_BITRATE_KBPS.to_string(),
+            new_rtp_target_error: None,
+            new_rtp_target_ref: NodeRef::default(),
+            focus_new_rtp_target: false,
+            rtp_target_pending_removal: None,
+        }
+    }
+
+    fn rendered(&mut self, _ctx: &Context<Self>, _first_render: bool) {
+        if self.focus_new_rtp_target
+            && let Some(input) = self.new_rtp_target_ref.cast::<HtmlInputElement>()
+        {
+            let _ = input.focus();
+            self.focus_new_rtp_target = false;
         }
     }
 
@@ -305,6 +342,74 @@ impl Component for App {
             Msg::AdjustFocus(change) => {
                 let msg = flo_core::FloCommand::AdjustFocus(change);
                 self.send_message(msg, ctx);
+            }
+            Msg::SetDisplaySource(source) => {
+                self.send_message(flo_core::FloCommand::SetDisplaySource(source), ctx);
+                return false;
+            }
+            Msg::ShowAddRtpTarget => {
+                self.adding_rtp_target = true;
+                self.focus_new_rtp_target = true;
+            }
+            Msg::CancelAddRtpTarget => {
+                self.adding_rtp_target = false;
+                self.focus_new_rtp_target = false;
+                self.new_rtp_target.clear();
+                self.new_rtp_bitrate = flo_core::DEFAULT_RTP_BITRATE_KBPS.to_string();
+                self.new_rtp_target_error = None;
+            }
+            Msg::SetNewRtpTarget(target) => {
+                self.new_rtp_target = target;
+                self.new_rtp_target_error = None;
+            }
+            Msg::SetNewRtpBitrate(bitrate) => {
+                self.new_rtp_bitrate = bitrate;
+                self.new_rtp_target_error = None;
+            }
+            Msg::AddRtpTarget => {
+                match parse_new_rtp_target(&self.new_rtp_target, &self.new_rtp_bitrate) {
+                    Ok((target, bitrate_kbps)) => {
+                        self.send_message(
+                            flo_core::FloCommand::AddRtpTarget {
+                                target,
+                                bitrate_kbps,
+                            },
+                            ctx,
+                        );
+                        self.adding_rtp_target = false;
+                        self.focus_new_rtp_target = false;
+                        self.new_rtp_target.clear();
+                        self.new_rtp_bitrate = flo_core::DEFAULT_RTP_BITRATE_KBPS.to_string();
+                        self.new_rtp_target_error = None;
+                    }
+                    Err(error) => {
+                        self.new_rtp_target_error = Some(error);
+                    }
+                }
+            }
+            Msg::SetRtpTargetBitrate(target, bitrate) => {
+                if let Ok(bitrate_kbps) = bitrate.parse::<u32>()
+                    && bitrate_kbps > 0
+                {
+                    self.send_message(
+                        flo_core::FloCommand::SetRtpTargetBitrate {
+                            target,
+                            bitrate_kbps,
+                        },
+                        ctx,
+                    );
+                }
+            }
+            Msg::ConfirmRemoveRtpTarget(target) => {
+                self.rtp_target_pending_removal = Some(target);
+            }
+            Msg::CancelRemoveRtpTarget => {
+                self.rtp_target_pending_removal = None;
+            }
+            Msg::RemoveRtpTarget => {
+                if let Some(target) = self.rtp_target_pending_removal.take() {
+                    self.send_message(flo_core::FloCommand::RemoveRtpTarget(target), ctx);
+                }
             }
 
             Msg::SetHomePosition => {
@@ -406,7 +511,14 @@ impl Component for App {
                 <div class="border-1px">
                     <h2>{"Cameras"}</h2>
                     { self.camera_links() }
+                    { self.camshow_display_view(ctx) }
                 </div>
+                <div class="border-1px">
+                    <h2>{"H.264 RTP Targets"}</h2>
+                    { self.rtp_targets_view(ctx) }
+                </div>
+                { self.add_rtp_target_dialog(ctx) }
+                { self.remove_rtp_target_dialog(ctx) }
                 <div class="border-1px">
                     <h2>{"Home Position"}</h2>
                     <div class="my-padding">
@@ -493,6 +605,170 @@ impl Component for App {
 }
 
 impl App {
+    fn camshow_display_view(&self, ctx: &Context<Self>) -> Html {
+        let selected = self
+            .last_state
+            .as_ref()
+            .map(|state| state.display_source)
+            .unwrap_or_default();
+        let has_main = self
+            .strand_cameras
+            .iter()
+            .any(|camera| camera.role == StrandCamRole::Main);
+        let has_secondary = self
+            .strand_cameras
+            .iter()
+            .any(|camera| camera.role == StrandCamRole::Secondary);
+
+        let choice = |label: &'static str, source: DisplaySource, enabled: bool| {
+            html! {
+                <label class="camshow-source-choice">
+                    <input
+                        type="radio"
+                        name="camshow-display-source"
+                        checked={selected == source}
+                        disabled={!enabled}
+                        onchange={ctx.link().callback(move |_| Msg::SetDisplaySource(source))}
+                        />
+                    {label}
+                </label>
+            }
+        };
+
+        html! {
+            <div class="my-padding">
+                <h3>{"Camshow display"}</h3>
+                <div class="camshow-source-choices">
+                    {choice("FPV webcam", DisplaySource::Webcam, true)}
+                    {choice("Main tracking camera", DisplaySource::StrandCamMain, has_main)}
+                    {choice(
+                        "Secondary tracking camera",
+                        DisplaySource::StrandCamSecondary,
+                        has_secondary,
+                    )}
+                </div>
+            </div>
+        }
+    }
+
+    fn rtp_targets_view(&self, ctx: &Context<Self>) -> Html {
+        let targets = self
+            .last_state
+            .as_ref()
+            .map(|state| &state.rtp_targets)
+            .cloned()
+            .unwrap_or_default();
+        html! {
+            <div class="my-padding">
+                if targets.is_empty() {
+                    <p>{"camshow is not currently streaming H.264 to any targets."}</p>
+                } else {
+                    <ul class="rtp-target-list">
+                        { for targets.into_iter().map(|target| {
+                            let addr = target.addr.to_string();
+                            let addr_for_bitrate = addr.clone();
+                            let addr_for_delete = addr.clone();
+                            html! {
+                                <li key={addr.clone()}>
+                                    <code>{addr}</code>
+                                    <label class="rtp-target-bitrate">
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            value={target.bitrate_kbps.to_string()}
+                                            onchange={ctx.link().callback(move |event: Event| {
+                                                Msg::SetRtpTargetBitrate(
+                                                    addr_for_bitrate.clone(),
+                                                    event.target_unchecked_into::<HtmlInputElement>().value(),
+                                                )
+                                            })}
+                                            />
+                                        {" kbps"}
+                                    </label>
+                                    <button
+                                        class="btn rtp-target-delete"
+                                        onclick={ctx.link().callback(move |_| Msg::ConfirmRemoveRtpTarget(addr_for_delete.clone()))}
+                                        >{"Delete"}</button>
+                                </li>
+                            }
+                        }) }
+                    </ul>
+                }
+                <button class="btn" onclick={ctx.link().callback(|_| Msg::ShowAddRtpTarget)}>
+                    {"Add target"}
+                </button>
+            </div>
+        }
+    }
+
+    fn add_rtp_target_dialog(&self, ctx: &Context<Self>) -> Html {
+        if !self.adding_rtp_target {
+            return html! {};
+        }
+        // Enter accepts, Escape dismisses. The modal has no <form>, so without
+        // this the only way out is the mouse.
+        let onkeydown =
+            ctx.link()
+                .batch_callback(|event: KeyboardEvent| match event.key().as_str() {
+                    "Enter" => Some(Msg::AddRtpTarget),
+                    "Escape" => Some(Msg::CancelAddRtpTarget),
+                    _ => None,
+                });
+        html! {
+            <div class="modal-container rtp-target-modal" onkeydown={onkeydown}>
+                <h2>{"Add H.264 RTP target"}</h2>
+                <p>{"Enter the destination as host:port (for example, 192.168.1.20:5600)."}</p>
+                <label class="rtp-target-address">
+                    {"Destination"}
+                    <input
+                        type="text"
+                        ref={self.new_rtp_target_ref.clone()}
+                        placeholder={"192.168.1.20:5600"}
+                        value={self.new_rtp_target.clone()}
+                        oninput={ctx.link().callback(|event: InputEvent| {
+                            Msg::SetNewRtpTarget(event.target_unchecked_into::<HtmlInputElement>().value())
+                        })}
+                        />
+                </label>
+                <label class="rtp-target-bitrate">
+                    {"Bitrate "}
+                    <input
+                        type="number"
+                        min="1"
+                        value={self.new_rtp_bitrate.clone()}
+                        oninput={ctx.link().callback(|event: InputEvent| {
+                            Msg::SetNewRtpBitrate(event.target_unchecked_into::<HtmlInputElement>().value())
+                        })}
+                        />
+                    {" kbps"}
+                </label>
+                if let Some(error) = &self.new_rtp_target_error {
+                    <p class="rtp-target-error">{error}</p>
+                }
+                <div class="button-holder">
+                    <button class="btn" onclick={ctx.link().callback(|_| Msg::AddRtpTarget)}>{"Add"}</button>
+                    <button class="btn" onclick={ctx.link().callback(|_| Msg::CancelAddRtpTarget)}>{"Cancel"}</button>
+                </div>
+            </div>
+        }
+    }
+
+    fn remove_rtp_target_dialog(&self, ctx: &Context<Self>) -> Html {
+        let Some(target) = self.rtp_target_pending_removal.as_deref() else {
+            return html! {};
+        };
+        html! {
+            <div class="modal-container rtp-target-modal">
+                <h2>{"Remove H.264 RTP target?"}</h2>
+                <p>{format!("Stop streaming H.264 to {target}?")}</p>
+                <div class="button-holder">
+                    <button class="btn" onclick={ctx.link().callback(|_| Msg::RemoveRtpTarget)}>{"Remove"}</button>
+                    <button class="btn" onclick={ctx.link().callback(|_| Msg::CancelRemoveRtpTarget)}>{"Cancel"}</button>
+                </div>
+            </div>
+        }
+    }
+
     fn camera_links(&self) -> Html {
         if self.strand_cameras.is_empty() {
             return html! { <p>{"No cameras configured."}</p> };
@@ -837,6 +1113,29 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 
 // -----------------------------------------------------------------------------
 
+/// Validate the add-target modal's two fields.
+///
+/// On success the trimmed destination and its bitrate are returned; on failure
+/// the message to show in the modal. The destination must be a numeric address
+/// and port because nothing in the browser can resolve a name for `camshow`.
+fn parse_new_rtp_target(target: &str, bitrate: &str) -> Result<(String, u32), String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("Enter a destination, such as 192.168.1.20:5600.".to_owned());
+    }
+    if target.parse::<SocketAddr>().is_err() {
+        return Err(format!(
+            "\"{target}\" is not a numeric address and port, such as 192.168.1.20:5600."
+        ));
+    }
+    match bitrate.trim().parse::<u32>() {
+        Ok(bitrate_kbps) if bitrate_kbps > 0 => Ok((target.to_owned(), bitrate_kbps)),
+        _ => Err("The bitrate must be a whole number of kbps greater than zero.".to_owned()),
+    }
+}
+
+// -----------------------------------------------------------------------------
+
 pub fn main() {
     set_panic_hook();
     wasm_logger::init(wasm_logger::Config::default());
@@ -859,5 +1158,42 @@ impl From<u16> for ReadyState {
             2 => ReadyState::Closed,
             other => panic!("unknown ReadyState: {other}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_new_rtp_target;
+
+    #[test]
+    fn accepts_a_numeric_address_and_port() {
+        assert_eq!(
+            parse_new_rtp_target(" 192.168.1.20:5600 ", "4000"),
+            Ok(("192.168.1.20:5600".to_owned(), 4000))
+        );
+    }
+
+    #[test]
+    fn accepts_a_bracketed_ipv6_address() {
+        assert_eq!(
+            parse_new_rtp_target("[::1]:5600", "1"),
+            Ok(("[::1]:5600".to_owned(), 1))
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_or_unresolvable_destination() {
+        assert!(parse_new_rtp_target("  ", "4000").is_err());
+        // A name cannot be resolved in the browser, so it is rejected here
+        // rather than silently dropped by the controller.
+        assert!(parse_new_rtp_target("groundstation:5600", "4000").is_err());
+        assert!(parse_new_rtp_target("192.168.1.20", "4000").is_err());
+    }
+
+    #[test]
+    fn rejects_a_zero_or_unparseable_bitrate() {
+        assert!(parse_new_rtp_target("192.168.1.20:5600", "0").is_err());
+        assert!(parse_new_rtp_target("192.168.1.20:5600", "").is_err());
+        assert!(parse_new_rtp_target("192.168.1.20:5600", "fast").is_err());
     }
 }

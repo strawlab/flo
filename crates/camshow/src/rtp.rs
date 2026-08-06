@@ -1,8 +1,9 @@
 //! The `--rtp-dest` output: an H.264/RTP/UDP stream of whatever the capture
 //! loop selected for display, for an OpenIPC-style groundstation link.
 
-use std::{net::SocketAddr, ops::ControlFlow, path::PathBuf};
+use std::{collections::BTreeMap, net::SocketAddr, ops::ControlFlow, path::PathBuf};
 
+use flo_core::RtpTarget;
 use rtp_h264_streamer::{
     EncoderKind, FfmpegEncoderConfig, OpenH264EncoderConfig, RtpH264Streamer, RtpSessionConfig,
     StreamConfig,
@@ -28,6 +29,7 @@ pub(crate) enum EncoderChoice {
 /// [`RtpH264Streamer::set_bitrate_kbps`] instead, which respawns just the
 /// encoder and leaves the RTP session (and thus the receiver's synced state)
 /// alone.
+#[derive(Clone)]
 pub(crate) struct RtpStreamParams {
     pub(crate) dest: SocketAddr,
     pub(crate) encoder: EncoderChoice,
@@ -68,35 +70,89 @@ impl RtpStreamParams {
 /// Everything needed to start the RTP output.
 pub(crate) struct RtpSinkConfig {
     pub(crate) params: RtpStreamParams,
-    pub(crate) initial_bitrate_kbps: u32,
+    pub(crate) initial_targets: Vec<RtpTarget>,
 }
 
 pub(crate) struct RtpSink {
     params: RtpStreamParams,
     streamer: Option<RtpH264Streamer>,
-    /// The bitrate the stream should be running at, or `None` once flo disabled
-    /// it. Kept so the stream can be rebuilt — see [`RtpSink::on_frame`] — with
-    /// the right bitrate and without forgetting that it is meant to be off.
-    bitrate_kbps: Option<u32>,
+    /// The bitrate the stream should be running at. Kept so the encoder can be
+    /// rebuilt after a frame-size change.
+    bitrate_kbps: u32,
     /// Geometry of the last frame handed to the encoder, so a change can be
     /// noticed.
     frame_size: Option<(u32, u32)>,
+}
+
+/// A set of independently encoded RTP streams, all receiving the displayed
+/// frame. Each target needs its own RTP session and encoder, so a target is
+/// added or removed as a whole stream rather than as another socket on one
+/// session.
+pub(crate) struct RtpSinks {
+    params: RtpStreamParams,
+    sinks: BTreeMap<SocketAddr, RtpSink>,
+}
+
+impl RtpSinks {
+    pub(crate) fn build(cfg: RtpSinkConfig) -> Self {
+        let RtpSinkConfig {
+            params,
+            initial_targets,
+        } = cfg;
+        let mut sinks = BTreeMap::new();
+        for target in initial_targets {
+            let mut target_params = params.clone();
+            target_params.dest = target.addr;
+            sinks.insert(
+                target.addr,
+                RtpSink::build(target_params, target.bitrate_kbps),
+            );
+        }
+        Self { params, sinks }
+    }
+
+    fn set_targets(&mut self, targets: Vec<RtpTarget>) {
+        let targets: BTreeMap<_, _> = targets
+            .into_iter()
+            .map(|target| (target.addr, target.bitrate_kbps))
+            .collect();
+        self.sinks.retain(|target, sink| {
+            if targets.contains_key(target) {
+                true
+            } else {
+                sink.finish();
+                false
+            }
+        });
+        for (target, bitrate_kbps) in targets {
+            let sink = self.sinks.entry(target).or_insert_with(|| {
+                let mut params = self.params.clone();
+                params.dest = target;
+                // One Annex-B dump cannot safely be shared by multiple
+                // encoders. Preserve it for the initial CLI target only.
+                params.dump_annexb = None;
+                RtpSink::build(params, bitrate_kbps)
+            });
+            if sink.bitrate_kbps != bitrate_kbps {
+                sink.set_rtp_bitrate_kbps(bitrate_kbps);
+            }
+        }
+    }
 }
 
 impl RtpSink {
     /// Starts the stream at the CLI-requested bitrate. A failure here is
     /// logged and leaves the stream off rather than taking the process down:
     /// recording and the local display must survive a bad network or a
-    /// missing encoder, and flo can turn the stream on later with
-    /// `SetRtpBitrateKbps`.
-    pub(crate) fn build(cfg: RtpSinkConfig) -> Self {
+    /// missing encoder, and flo can update the target configuration later.
+    fn build(params: RtpStreamParams, bitrate_kbps: u32) -> Self {
         let mut sink = Self {
-            params: cfg.params,
+            params,
             streamer: None,
-            bitrate_kbps: Some(cfg.initial_bitrate_kbps),
+            bitrate_kbps,
             frame_size: None,
         };
-        sink.start(cfg.initial_bitrate_kbps);
+        sink.start(bitrate_kbps);
         sink
     }
 
@@ -120,17 +176,33 @@ impl RtpSink {
         matches!(previous, Some(previous) if previous != size)
     }
 
-    /// Tears the stream down and, unless flo has disabled it, brings a fresh
-    /// one up at the same bitrate.
+    /// Tears the stream down and brings a fresh one up at the same bitrate.
     fn restart(&mut self) {
         if let Some(mut s) = self.streamer.take()
             && let Err(e) = s.finish()
         {
             error!("error finishing RTP streamer before restart: {e:?}");
         }
-        if let Some(kbps) = self.bitrate_kbps {
-            self.start(kbps);
+        self.start(self.bitrate_kbps);
+    }
+
+    fn set_rtp_bitrate_kbps(&mut self, kbps: u32) {
+        self.bitrate_kbps = kbps;
+        if let Some(s) = self.streamer.as_mut() {
+            match s.set_bitrate_kbps(kbps) {
+                Ok(()) => {
+                    info!("RTP bitrate set to {kbps} kbps");
+                    return;
+                }
+                Err(e) => error!("failed to change RTP bitrate, restarting stream: {e:?}"),
+            }
+            // The streamer's worker thread is gone; fall through and start a
+            // fresh one rather than leaving the stream stuck at the last
+            // bitrate it was able to apply.
+            self.streamer = None;
         }
+
+        self.start(kbps);
     }
 }
 
@@ -177,40 +249,37 @@ impl FrameSink for RtpSink {
         ControlFlow::Continue(())
     }
 
-    fn set_rtp_bitrate_kbps(&mut self, kbps: Option<u32>) {
-        self.bitrate_kbps = kbps;
-        let Some(kbps) = kbps else {
-            if let Some(mut s) = self.streamer.take()
-                && let Err(e) = s.finish()
-            {
-                error!("error finishing RTP streamer: {e:?}");
-            }
-            info!("RTP stream disabled");
-            return;
-        };
-
-        if let Some(s) = self.streamer.as_mut() {
-            match s.set_bitrate_kbps(kbps) {
-                Ok(()) => {
-                    info!("RTP bitrate set to {kbps} kbps");
-                    return;
-                }
-                Err(e) => error!("failed to change RTP bitrate, restarting stream: {e:?}"),
-            }
-            // The streamer's worker thread is gone; fall through and start a
-            // fresh one rather than leaving the stream stuck at the last
-            // bitrate it was able to apply.
-            self.streamer = None;
-        }
-
-        self.start(kbps);
-    }
-
     fn finish(&mut self) {
         if let Some(mut s) = self.streamer.take()
             && let Err(e) = s.finish()
         {
             error!("error finishing RTP streamer: {e:?}");
+        }
+    }
+}
+
+impl FrameSink for RtpSinks {
+    fn on_frame(&mut self, frame: Frame, timestamp: Timestamp, recording: bool) -> ControlFlow<()> {
+        let mut stop = false;
+        for sink in self.sinks.values_mut() {
+            stop |= sink
+                .on_frame(frame.clone(), timestamp, recording)
+                .is_break();
+        }
+        if stop {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn set_rtp_targets(&mut self, targets: Vec<RtpTarget>) {
+        self.set_targets(targets);
+    }
+
+    fn finish(&mut self) {
+        for sink in self.sinks.values_mut() {
+            sink.finish();
         }
     }
 }
@@ -240,25 +309,20 @@ mod tests {
         }
     }
 
+    fn target(addr: SocketAddr, bitrate_kbps: u32) -> RtpTarget {
+        RtpTarget { addr, bitrate_kbps }
+    }
+
     #[test]
-    fn set_rtp_bitrate_kbps_changes_disables_and_restarts_the_stream() {
-        let mut sink = RtpSink::build(RtpSinkConfig {
-            params: params(),
-            initial_bitrate_kbps: 4000,
-        });
+    fn set_rtp_bitrate_kbps_changes_the_selected_stream() {
+        let mut sink = RtpSink::build(params(), 4000);
         assert!(sink.streamer.is_some(), "starts with a streamer running");
 
-        // Some(kbps) on an already-running stream goes through
-        // `RtpH264Streamer::set_bitrate_kbps`, not a rebuild; it should still
-        // be the same running stream afterward.
-        sink.set_rtp_bitrate_kbps(Some(2000));
+        // An already-running stream goes through
+        // `RtpH264Streamer::set_bitrate_kbps`, not a rebuild.
+        sink.set_rtp_bitrate_kbps(2000);
         assert!(sink.streamer.is_some(), "changing bitrate keeps it running");
-
-        sink.set_rtp_bitrate_kbps(None);
-        assert!(sink.streamer.is_none(), "None disables the stream");
-
-        sink.set_rtp_bitrate_kbps(Some(2000));
-        assert!(sink.streamer.is_some(), "Some restarts a disabled stream");
+        assert_eq!(sink.bitrate_kbps, 2000);
 
         sink.finish();
         assert!(sink.streamer.is_none(), "finish tears the stream down");
@@ -294,10 +358,7 @@ mod tests {
 
     #[test]
     fn a_frame_size_change_leaves_the_stream_running() {
-        let mut sink = RtpSink::build(RtpSinkConfig {
-            params: params(),
-            initial_bitrate_kbps: 4000,
-        });
+        let mut sink = RtpSink::build(params(), 4000);
 
         let _ = sink.on_frame(frame(64, 48), chrono::Local::now(), false);
         assert_eq!(sink.frame_size, Some((64, 48)));
@@ -313,18 +374,28 @@ mod tests {
     }
 
     #[test]
-    fn a_size_change_does_not_resurrect_a_disabled_stream() {
-        let mut sink = RtpSink::build(RtpSinkConfig {
+    fn target_set_adds_and_removes_independent_streams() {
+        let first = unused_dest();
+        let second = unused_dest();
+        let mut sinks = RtpSinks::build(RtpSinkConfig {
             params: params(),
-            initial_bitrate_kbps: 4000,
+            initial_targets: Vec::new(),
         });
-        let _ = sink.on_frame(frame(64, 48), chrono::Local::now(), false);
-        sink.set_rtp_bitrate_kbps(None);
+        assert!(sinks.sinks.is_empty());
 
-        let _ = sink.on_frame(frame(1440, 1080), chrono::Local::now(), false);
-        assert!(
-            sink.streamer.is_none(),
-            "flo asked for the stream to be off; a resolution switch must not turn it back on"
-        );
+        sinks.set_targets(vec![target(first, 4000), target(second, 2500)]);
+        assert_eq!(sinks.sinks.len(), 2);
+        assert!(sinks.sinks.contains_key(&second));
+        assert_eq!(sinks.sinks[&first].bitrate_kbps, 4000);
+        assert_eq!(sinks.sinks[&second].bitrate_kbps, 2500);
+
+        sinks.set_targets(vec![target(first, 1200), target(second, 2500)]);
+        assert_eq!(sinks.sinks[&first].bitrate_kbps, 1200);
+        assert_eq!(sinks.sinks[&second].bitrate_kbps, 2500);
+
+        sinks.set_targets(vec![target(second, 2500)]);
+        assert_eq!(sinks.sinks.len(), 1);
+        assert!(sinks.sinks.contains_key(&second));
+        sinks.finish();
     }
 }

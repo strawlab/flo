@@ -11,7 +11,7 @@ use camshow_protocol::{
     CamshowToFlo, FloCamshowCodec, FloToCamshow, PROTOCOL_VERSION, RecordingStart,
 };
 use color_eyre::eyre::Result;
-use flo_core::{CommandSource, DisplaySource, FloCommand, FloEvent};
+use flo_core::{CommandSource, DisplaySource, FloCommand, FloEvent, RtpTarget};
 use futures::{SinkExt, StreamExt};
 use osd_utils::OsdCache;
 use tokio::{net::TcpStream, sync::mpsc, sync::watch};
@@ -32,6 +32,7 @@ pub(crate) async fn run(
     mut canvas_rx: watch::Receiver<OsdCache>,
     mut command_rx: mpsc::UnboundedReceiver<Command>,
     mut display_source_rx: watch::Receiver<DisplaySource>,
+    mut rtp_targets_rx: watch::Receiver<Vec<RtpTarget>>,
     flo_events_tx: tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
     info!("camshow link target: {addr}");
@@ -44,6 +45,7 @@ pub(crate) async fn run(
                     &mut canvas_rx,
                     &mut command_rx,
                     &mut display_source_rx,
+                    &mut rtp_targets_rx,
                     &flo_events_tx,
                 )
                 .await
@@ -66,6 +68,7 @@ async fn serve_connection(
     canvas_rx: &mut watch::Receiver<OsdCache>,
     command_rx: &mut mpsc::UnboundedReceiver<Command>,
     display_source_rx: &mut watch::Receiver<DisplaySource>,
+    rtp_targets_rx: &mut watch::Receiver<Vec<RtpTarget>>,
     flo_events_tx: &tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
@@ -110,6 +113,11 @@ async fn serve_connection(
                 let source = *display_source_rx.borrow_and_update();
                 sink.send(FloToCamshow::SetDisplaySource { source }).await?;
             }
+            res = rtp_targets_rx.changed() => {
+                res?;
+                let targets = rtp_targets_rx.borrow_and_update().clone();
+                sink.send(FloToCamshow::SetRtpTargets { targets }).await?;
+            }
             res = canvas_rx.changed() => {
                 res?;
                 let canvas = canvas_rx.borrow_and_update().clone();
@@ -124,6 +132,12 @@ async fn serve_connection(
                         let _ = flo_events_tx.send(FloEvent::Command(
                             FloCommand::SetDisplaySource(source),
                             CommandSource::Bui,
+                        ));
+                    }
+                    CamshowToFlo::RtpTargets { targets } => {
+                        let _ = flo_events_tx.send(FloEvent::Command(
+                            FloCommand::SetRtpTargets(targets),
+                            CommandSource::Camshow,
                         ));
                     }
                 }

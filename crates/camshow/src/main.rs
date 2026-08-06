@@ -30,7 +30,7 @@ use std::net::SocketAddr;
 
 use clap::Parser;
 use color_eyre::eyre::Result;
-use flo_core::DisplaySource;
+use flo_core::{DisplaySource, RtpTarget};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
@@ -128,7 +128,11 @@ struct Cli {
     rtp_encoder: EncoderChoice,
 
     /// Initial target bitrate for the RTP stream, in kbps.
-    #[arg(long, default_value_t = 4000, requires = "rtp_dest")]
+    #[arg(
+        long,
+        default_value_t = flo_core::DEFAULT_RTP_BITRATE_KBPS,
+        requires = "rtp_dest"
+    )]
     rtp_bitrate_kbps: u32,
 
     /// Nominal frame rate, used by the ffmpeg backend's timestamp/VBV
@@ -172,7 +176,6 @@ fn main() -> Result<()> {
 
     let (osd_tx, osd_rx) = watch::channel::<Option<OsdSnapshot>>(None);
     let (recording_tx, recording_rx) = mpsc::unbounded_channel();
-    let (rtp_bitrate_tx, rtp_bitrate_rx) = mpsc::unbounded_channel();
     // An unbounded channel rather than a oneshot because shutdown can be
     // requested from more than one place: the signal handler in the tokio
     // runtime below, and (in GUI mode) this thread once eframe returns. The
@@ -180,9 +183,23 @@ fn main() -> Result<()> {
     // down".
     let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel::<()>();
 
-    let rtp_sink_cfg = cli.rtp_dest.map(|dest| RtpSinkConfig {
+    let initial_rtp_targets: Vec<_> = cli
+        .rtp_dest
+        .into_iter()
+        .map(|addr| RtpTarget {
+            addr,
+            bitrate_kbps: cli.rtp_bitrate_kbps,
+        })
+        .collect();
+    let rtp_sink_cfg = RtpSinkConfig {
         params: RtpStreamParams {
-            dest,
+            // This placeholder is replaced before a stream starts. It lets
+            // FLO add the first RTP target at runtime even when camshow was
+            // launched without `--rtp-dest`.
+            dest: initial_rtp_targets
+                .first()
+                .map(|target| target.addr)
+                .unwrap_or_else(|| "0.0.0.0:0".parse().expect("valid placeholder socket")),
             encoder: cli.rtp_encoder,
             fps: cli.rtp_fps,
             idr_interval_frames: cli.rtp_idr_interval,
@@ -190,8 +207,8 @@ fn main() -> Result<()> {
             queue_size: RTP_QUEUE_SIZE,
             dump_annexb: cli.rtp_dump_annexb.clone(),
         },
-        initial_bitrate_kbps: cli.rtp_bitrate_kbps,
-    });
+        initial_targets: initial_rtp_targets.clone(),
+    };
 
     let listen_addr = cli.listen.clone();
     let video_listen_addr = cli.video_listen.clone();
@@ -207,6 +224,7 @@ fn main() -> Result<()> {
     // The CLI value is the starting point; flo overrides it whenever the
     // operator switches.
     let (display_source_tx, display_source_rx) = watch::channel(display_source);
+    let (rtp_targets_tx, rtp_targets_rx) = watch::channel(initial_rtp_targets);
     // This carries local GUI requests back to FLO. It is separate from
     // `display_source_tx`, which carries FLO's authoritative state to the
     // camera thread.
@@ -228,11 +246,11 @@ fn main() -> Result<()> {
                 test_pattern,
                 sinks: SinkConfig {
                     gui: gui_sink_cfg,
-                    rtp: rtp_sink_cfg,
+                    rtp: Some(rtp_sink_cfg),
                 },
                 osd_rx,
                 recording_rx,
-                rtp_bitrate_rx,
+                rtp_targets_rx,
                 display_source_rx,
                 relayed: relayed_for_camera,
                 shutdown_rx,
@@ -245,7 +263,7 @@ fn main() -> Result<()> {
         relayed,
         osd_tx,
         recording_tx,
-        rtp_bitrate_tx,
+        rtp_targets_tx,
         display_source_tx,
         gui_display_source_rx,
     };

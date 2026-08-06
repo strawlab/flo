@@ -222,6 +222,20 @@ fn get_device_id() -> Result<flo_core::DeviceId> {
     Ok(device_id)
 }
 
+fn canonical_rtp_targets(targets: Vec<flo_core::RtpTarget>) -> Vec<flo_core::RtpTarget> {
+    let mut unique = Vec::with_capacity(targets.len());
+    for target in targets {
+        if target.bitrate_kbps > 0
+            && !unique
+                .iter()
+                .any(|existing: &flo_core::RtpTarget| existing.addr == target.addr)
+        {
+            unique.push(target);
+        }
+    }
+    unique
+}
+
 struct FloCoordinator<'a> {
     data_dir: &'a camino::Utf8Path,
     device_config: &'a mut FloControllerConfig,
@@ -255,6 +269,8 @@ struct FloCoordinator<'a> {
     /// The operator's live-view selection. Read by the camshow link and by the
     /// camera host's frame relay; this is the only writer.
     display_source_tx: watch::Sender<DisplaySource>,
+    /// H.264/RTP destinations selected in the BUI, forwarded to camshow.
+    rtp_targets_tx: watch::Sender<Vec<flo_core::RtpTarget>>,
     highmag_visible_recorder: Option<h264_recorder::H264Recorder>,
     /// Seconds of data currently held in the writer's pre-capture buffer.
     precapture_buffered_rx: watch::Receiver<f64>,
@@ -275,6 +291,7 @@ impl<'a> FloCoordinator<'a> {
         broadway: Broadway,
         camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
         display_source_tx: watch::Sender<DisplaySource>,
+        rtp_targets_tx: watch::Sender<Vec<flo_core::RtpTarget>>,
         data_dir: &'a camino::Utf8Path,
         precapture_buffered_rx: watch::Receiver<f64>,
         strand_cams: InitializedStrandCams,
@@ -318,6 +335,7 @@ impl<'a> FloCoordinator<'a> {
                 .and_then(|camera| camera.expected_fps),
             camshow_recording_tx,
             display_source_tx,
+            rtp_targets_tx,
             highmag_visible_recorder: None,
             precapture_buffered_rx,
         }
@@ -793,11 +811,86 @@ impl<'a> FloCoordinator<'a> {
                 // starts or stops sending that camera's frames. The recording is
                 // untouched by design — it is always the clean webcam.
                 tracing::info!("{src:?} selected display source {source:?}");
+                self.my_state.display_source = source;
                 if self.display_source_tx.send(source).is_err() {
                     tracing::warn!(
                         "nothing is listening for the display source; is camshow configured?"
                     );
                 }
+                self.from_device_http_tx.send(self.my_state.clone())?;
+            }
+            FloCommand::AddRtpTarget {
+                target,
+                bitrate_kbps,
+            } => {
+                let addr = match target.parse() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(%target, "ignoring invalid RTP target: {e}");
+                        return Ok(());
+                    }
+                };
+                if bitrate_kbps == 0 {
+                    tracing::warn!(%target, "ignoring zero RTP bitrate");
+                    return Ok(());
+                }
+                if !self
+                    .my_state
+                    .rtp_targets
+                    .iter()
+                    .any(|target| target.addr == addr)
+                {
+                    self.my_state
+                        .rtp_targets
+                        .push(flo_core::RtpTarget { addr, bitrate_kbps });
+                    self.publish_rtp_targets()?;
+                }
+            }
+            FloCommand::SetRtpTargetBitrate {
+                target,
+                bitrate_kbps,
+            } => {
+                let addr = match target.parse() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(%target, "ignoring invalid RTP target: {e}");
+                        return Ok(());
+                    }
+                };
+                if bitrate_kbps == 0 {
+                    tracing::warn!(%target, "ignoring zero RTP bitrate");
+                    return Ok(());
+                }
+                if let Some(target) = self
+                    .my_state
+                    .rtp_targets
+                    .iter_mut()
+                    .find(|target| target.addr == addr)
+                    && target.bitrate_kbps != bitrate_kbps
+                {
+                    target.bitrate_kbps = bitrate_kbps;
+                    self.publish_rtp_targets()?;
+                }
+            }
+            FloCommand::RemoveRtpTarget(target) => {
+                let target = match target.parse() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(%target, "ignoring invalid RTP target: {e}");
+                        return Ok(());
+                    }
+                };
+                let old_len = self.my_state.rtp_targets.len();
+                self.my_state
+                    .rtp_targets
+                    .retain(|candidate| candidate.addr != target);
+                if self.my_state.rtp_targets.len() != old_len {
+                    self.publish_rtp_targets()?;
+                }
+            }
+            FloCommand::SetRtpTargets(targets) => {
+                self.my_state.rtp_targets = canonical_rtp_targets(targets);
+                self.from_device_http_tx.send(self.my_state.clone())?;
             }
             FloCommand::SetRecordingState(enable) => {
                 if enable {
@@ -837,6 +930,13 @@ impl<'a> FloCoordinator<'a> {
                 self.set_cam_precapture_buffer(secs).await;
             }
         };
+        Ok(())
+    }
+
+    fn publish_rtp_targets(&self) -> Result<()> {
+        let targets = canonical_rtp_targets(self.my_state.rtp_targets.clone());
+        self.rtp_targets_tx.send(targets)?;
+        self.from_device_http_tx.send(self.my_state.clone())?;
         Ok(())
     }
 
@@ -1695,6 +1795,9 @@ async fn app_main(
     // the camera host, which only relays frames for the selected camera. Created
     // here so it exists before the host is spawned below.
     let (display_source_tx, display_source_rx) = watch::channel(DisplaySource::default());
+    // camshow reports its initial CLI destinations through the control link;
+    // after that, this channel carries BUI edits back to camshow.
+    let (rtp_targets_tx, rtp_targets_rx) = watch::channel(Vec::new());
 
     // The composed host owns the embedded Strand Camera servers and provides
     // their routers directly for FLO to mount under its authenticated UI.
@@ -1781,6 +1884,7 @@ async fn app_main(
             canvas_rx,
             rec_rx,
             display_source_rx,
+            rtp_targets_rx,
             broadway.flo_events.clone(),
         ));
         let task: Pin<Box<dyn Future<Output = _>>> = Box::pin(jh);
@@ -1867,6 +1971,7 @@ async fn app_main(
         broadway,
         camshow_recording_tx,
         display_source_tx,
+        rtp_targets_tx,
         data_dir,
         precapture_buffered_rx,
         strand_cams,
@@ -2064,6 +2169,26 @@ mod tests {
     fn parse_cli_accepts_composition_arguments() {
         let cli = parse_cli(["flo-strand-cam", "--config", "sim.yaml"]);
         assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
+    }
+
+    #[test]
+    fn rtp_targets_keep_the_first_occurrence_of_each_address() {
+        let first = flo_core::RtpTarget {
+            addr: "127.0.0.1:5600".parse().unwrap(),
+            bitrate_kbps: 4000,
+        };
+        let duplicate = flo_core::RtpTarget {
+            bitrate_kbps: 2000,
+            ..first
+        };
+        let second = flo_core::RtpTarget {
+            addr: "127.0.0.1:5601".parse().unwrap(),
+            bitrate_kbps: 2500,
+        };
+        assert_eq!(
+            canonical_rtp_targets(vec![first, second, duplicate]),
+            vec![first, second]
+        );
     }
 
     #[test]
