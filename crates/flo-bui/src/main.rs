@@ -1246,6 +1246,41 @@ fn gps_origin_div(status: &GpsOriginStatus) -> Html {
             if !note.is_empty() {
                 <div class={class}>{ note }</div>
             }
+            if let Some(origin) = status.reported {
+                { map_links(origin.latitude_deg(), origin.longitude_deg()) }
+            }
+        </div>
+    }
+}
+
+/// Zoom for the OpenStreetMap link: close enough to tell individual buildings
+/// apart, wide enough to place the origin in its surroundings.
+const MAP_ZOOM: u32 = 17;
+
+/// The two map URLs for `lat`/`lon`.
+///
+/// Seven decimals is the resolution `GPS_GLOBAL_ORIGIN` carries, so the link
+/// points at the same place the readout above it shows.
+fn map_urls(lat: FloatType, lon: FloatType) -> (String, String) {
+    let lat = format!("{lat:.7}");
+    let lon = format!("{lon:.7}");
+    (
+        format!("https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map={MAP_ZOOM}/{lat}/{lon}"),
+        format!("https://www.google.com/maps/search/?api=1&query={lat},{lon}"),
+    )
+}
+
+/// Show the origin on a map, so it can be checked against where FLO actually
+/// stands instead of being read as bare degrees.
+///
+/// Both open in a new tab: following a link in this one would tear down the
+/// event stream and the UI along with it, possibly mid-flight.
+fn map_links(lat: FloatType, lon: FloatType) -> Html {
+    let (osm, google) = map_urls(lat, lon);
+    html! {
+        <div class="map-links">
+            <a href={osm} target="_blank" rel="noopener">{"OSM"}</a>
+            <a href={google} target="_blank" rel="noopener">{"Google"}</a>
         </div>
     }
 }
@@ -1300,7 +1335,34 @@ impl From<u16> for ReadyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kbps, parse_new_rtp_target};
+    use super::{Kbps, map_urls, parse_new_rtp_target};
+
+    #[test]
+    fn builds_both_map_urls_for_an_origin() {
+        // OpenStreetMap needs the position twice: `mlat`/`mlon` drop the marker
+        // and the fragment sets what the map is looking at. Without the
+        // fragment it opens at the last place that browser was looking.
+        let (osm, google) = map_urls(48.0021341, 7.8341234);
+        assert_eq!(
+            osm,
+            "https://www.openstreetmap.org/?mlat=48.0021341&mlon=7.8341234\
+             #map=17/48.0021341/7.8341234"
+        );
+        assert_eq!(
+            google,
+            "https://www.google.com/maps/search/?api=1&query=48.0021341,7.8341234"
+        );
+    }
+
+    #[test]
+    fn a_southwestern_origin_keeps_its_sign() {
+        // Negative degrees are what a west-of-Greenwich or southern-hemisphere
+        // origin looks like; both services take them as-is, so nothing here may
+        // drop the minus.
+        let (osm, google) = map_urls(-33.8688, -151.2093);
+        assert!(osm.contains("mlat=-33.8688000&mlon=-151.2093000"));
+        assert!(google.ends_with("query=-33.8688000,-151.2093000"));
+    }
 
     #[test]
     fn parses_a_bitrate_and_rejects_zero() {

@@ -253,6 +253,19 @@ input[type="radio"] {
     color: #f66;
 }
 
+// The map links sit under the origin readout, at body size rather than the
+// bold, enlarged size of the value itself, and tall enough to tap.
+.map-links {
+    display: flex;
+    gap: 1em;
+    font-size: 0.9rem;
+}
+
+.map-links a {
+    display: inline-block;
+    padding: 0.3em 0;
+}
+
 .gps-origin-ok {
     color: #2a2;
 }
