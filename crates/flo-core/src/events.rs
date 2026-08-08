@@ -62,6 +62,10 @@ pub enum FloCommand {
     SetHomePosition((Option<Angle>, Option<Angle>, Option<RadialDistance>)),
     SetHomePositionFromCurrent,
     SetRecordingState(bool),
+    /// Tie the tracking cameras' MP4 recordings to the `.floz` recording, or
+    /// untie them. Changing this does not start or stop anything by itself; it
+    /// takes effect at the next recording start or stop.
+    SetRecordTrackingCamMp4(bool),
     /// Start a recording that also includes the buffered pre-capture window
     /// (the "post-trigger" button). Stopping uses `SetRecordingState(false)`.
     StartPreCaptureRecording,

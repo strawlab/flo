@@ -399,6 +399,14 @@ fn is_false(val: &bool) -> bool {
     !val
 }
 
+fn is_true(val: &bool) -> bool {
+    *val
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Current config schema version, written into [`FloControllerConfig::config_version`].
 ///
 /// Bump this only when the *meaning* of an existing field changes, so that an
@@ -606,6 +614,24 @@ pub struct FloControllerConfig {
     #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub highmag_visible_recorder: Option<HighmagVisbileRecorderConfig>,
 
+    /// Pre-capture ("post-trigger") window in seconds that FLO starts with.
+    ///
+    /// Zero, the default, means no buffering: the post-trigger button then has
+    /// nothing to flush and records from now, exactly like the normal record
+    /// button. Set this so the buffer is armed from launch rather than only
+    /// after an operator types a window into the BUI — an event worth
+    /// capturing may well happen before anyone has touched the browser.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub precapture_window_secs: FloatType,
+
+    /// Start and stop the tracking cameras' MP4 recordings together with the
+    /// `.floz` recording, so that every source is saved for exactly the span
+    /// the operator asked for. This is what arming over MAVLink already does;
+    /// with this set, the BUI record button and the post-trigger button do the
+    /// same. The BUI can turn it on and off while running.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub record_tracking_cam_mp4_with_floz: bool,
+
     #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub rc_config: Option<RcConfig>,
 
@@ -769,6 +795,11 @@ pub struct DeviceState {
     /// H.264/RTP streams camshow is currently configured to send.
     #[serde(default)]
     pub rtp_targets: Vec<RtpTarget>,
+    /// Whether starting a `.floz` recording also starts the tracking cameras'
+    /// MP4 recordings. Initialized from
+    /// [`FloControllerConfig::record_tracking_cam_mp4_with_floz`].
+    #[serde(default)]
+    pub record_tracking_cam_mp4: bool,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -1205,6 +1236,8 @@ impl Default for FloControllerConfig {
             sounds_filenames: Default::default(),
             osd_config: None,
             highmag_visible_recorder: Default::default(),
+            precapture_window_secs: 0.0,
+            record_tracking_cam_mp4_with_floz: default_true(),
             rc_config: None,
             mavlink_config: None,
             extensions: serde_yaml::Mapping::new(),
@@ -1231,6 +1264,7 @@ impl DeviceState {
             cam_stale: Default::default(),
             display_source: DisplaySource::default(),
             rtp_targets: Vec::new(),
+            record_tracking_cam_mp4: default_true(),
         }
     }
 }

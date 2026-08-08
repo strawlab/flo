@@ -113,6 +113,7 @@ enum Msg {
     GamepadInterval,
     SendMessageFetchState(FetchState),
     DoRecordMotorPositionsFloz(bool),
+    SetRecordTrackingCamMp4(bool),
     DoPreCaptureRecord,
     SetPreCaptureSeconds,
     SetDistanceCorrection,
@@ -320,6 +321,11 @@ impl Component for App {
             //     self.set_device_mode(flo_core::DeviceMode::VoltageFollower13, ctx);
             //     return false;
             // }
+            Msg::SetRecordTrackingCamMp4(val) => {
+                let msg = flo_core::FloCommand::SetRecordTrackingCamMp4(val);
+                self.send_message(msg, ctx);
+                return false; // Don't update DOM; wait for backend state.
+            }
             Msg::DoPreCaptureRecord => {
                 let msg = flo_core::FloCommand::StartPreCaptureRecording;
                 self.send_message(msg, ctx);
@@ -577,11 +583,12 @@ impl Component for App {
                     // </div>
                     <div>
                         <RecordingPathWidget
-                        label="Record motor positions .floz file"
+                        label="Record .floz file"
                         value={self.floz_recording_path.clone()}
                         ontoggle={ctx.link().callback(|checked| {Msg::DoRecordMotorPositionsFloz(checked)})}
                         />
                     </div>
+                    { self.tracking_cam_mp4_view(ctx) }
                     { self.precapture_view(ctx) }
                     <div class="button-holder">
                         <Button title="Set Home" onsignal={ctx.link().callback(|_| Msg::SetHomePositionFromCurrent)}/>
@@ -794,6 +801,30 @@ impl App {
         }
     }
 
+    /// Whether the tracking cameras' MP4 recordings follow the `.floz`
+    /// recording. With this on, one record command — the button above, the
+    /// post-trigger button, or arming over MAVLink — saves every source for
+    /// the same span.
+    fn tracking_cam_mp4_view(&self, ctx: &Context<Self>) -> Html {
+        let checked = self
+            .last_state
+            .as_ref()
+            .map(|state| state.record_tracking_cam_mp4)
+            .unwrap_or_default();
+        html! {
+            <div class="my-padding">
+                <label>
+                    <input
+                        type="checkbox"
+                        checked={checked}
+                        onchange={ctx.link().callback(move |_| Msg::SetRecordTrackingCamMp4(!checked))}
+                        />
+                    {" Also record tracking camera .mp4 files with the .floz"}
+                </label>
+            </div>
+        }
+    }
+
     /// Pre-capture ("post-trigger") controls. Setting the window above zero
     /// makes the writer continuously buffer recent data in RAM. The separate
     /// "Post-trigger record" button starts a recording that begins with that
@@ -811,11 +842,18 @@ impl App {
             .as_ref()
             .map(|s| s.precapture_window_secs)
             .unwrap_or(0.0);
-        let status = if window > 0.0 {
-            format!("buffered: {buffered:.1} s ready")
-        } else {
+        let recording = self.floz_recording_path.is_some();
+        let status = if window <= 0.0 {
             "disabled".to_string()
+        } else if recording {
+            "recording".to_string()
+        } else {
+            format!("buffered: {buffered:.1} s ready")
         };
+        // With no window there is nothing to flush, so the button would just
+        // duplicate the record toggle above while looking like it captured the
+        // past. Say so rather than let it silently do the wrong thing.
+        let disabled = window <= 0.0 || recording;
         html! {
             <div class="my-padding">
                 <label>{"Pre-capture buffer (seconds, 0 disables) "}
@@ -829,6 +867,7 @@ impl App {
                 <div class="button-holder">
                     <Button
                         title="Post-trigger record"
+                        disabled={disabled}
                         onsignal={ctx.link().callback(|_| Msg::DoPreCaptureRecord)}
                         />
                 </div>

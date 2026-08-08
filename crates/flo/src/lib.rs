@@ -586,7 +586,11 @@ impl<'a> FloCoordinator<'a> {
     /// When `include_precapture` is true, the writer flushes its pre-capture
     /// buffer into the new recording so it begins with the buffered window
     /// (the "post-trigger" behavior). A normal recording passes false.
-    fn start_recording(&mut self, include_precapture: bool) -> Result<()> {
+    ///
+    /// When [`DeviceState::record_tracking_cam_mp4`] is set, the tracking
+    /// cameras' MP4 recordings start here too, so one operator action saves
+    /// every source — the same thing arming over MAVLink does.
+    async fn start_recording(&mut self, include_precapture: bool) -> Result<()> {
         let creation_time = chrono::Local::now();
         let floz_dirname = creation_time.format(FLO_DIRNAME_TEMPLATE).to_string();
         if !FLO_DIRNAME_RE.is_match(&floz_dirname) {
@@ -650,11 +654,28 @@ impl<'a> FloCoordinator<'a> {
             // commands and forwards on reconnect.
             let _ = tx.send(camshow_cmd);
         }
+
+        if self.my_state.record_tracking_cam_mp4 {
+            // `PostTrigger` starts the MP4 with the camera's own buffered
+            // frames prepended, so the video begins in the past like the
+            // `.floz` does; a normal start just begins from now.
+            let arg = if include_precapture {
+                strand_cam_remote_control::CamArg::PostTrigger
+            } else {
+                strand_cam_remote_control::CamArg::SetIsRecordingMp4(true)
+            };
+            self.send_cam_arg_to_all(arg).await;
+        }
         Ok(())
     }
 
     /// Stop saving the current recording, finalizing all outputs.
-    fn stop_recording(&mut self) -> Result<()> {
+    ///
+    /// The tracking cameras are told to stop unconditionally, not only when
+    /// [`DeviceState::record_tracking_cam_mp4`] is set: whatever started those
+    /// MP4s — this coordinator, a post-trigger, or arming — leaving them
+    /// running writes an unbounded file that is never finalized.
+    async fn stop_recording(&mut self) -> Result<()> {
         self.my_state.floz_recording_path = None;
         self.my_state.webcam_recording_path = None;
 
@@ -675,6 +696,8 @@ impl<'a> FloCoordinator<'a> {
         if let Some(tx) = self.camshow_recording_tx.as_ref() {
             let _ = tx.send(camshow_client::Command::Stop);
         }
+        self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(false))
+            .await;
         Ok(())
     }
 
@@ -693,9 +716,14 @@ impl<'a> FloCoordinator<'a> {
     /// without a configured frame rate are skipped with a warning, since the
     /// seconds→frames conversion is impossible without it.
     async fn set_cam_precapture_buffer(&mut self, secs: f64) {
-        for (direct_tx, fps) in [
-            (&self.cam_control_main, self.cam_control_main_expected_fps),
+        for (role, direct_tx, fps) in [
             (
+                StrandCamRole::Main,
+                &self.cam_control_main,
+                self.cam_control_main_expected_fps,
+            ),
+            (
+                StrandCamRole::Secondary,
                 &self.cam_control_secondary,
                 self.cam_control_secondary_expected_fps,
             ),
@@ -710,9 +738,14 @@ impl<'a> FloCoordinator<'a> {
                     send_in_process_cam_arg(direct_tx, arg).await;
                 }
                 _ => {
+                    // Without a frame rate there is no seconds→frames
+                    // conversion, so this camera keeps a zero-length buffer and
+                    // its post-trigger video silently starts from now while the
+                    // `.floz` starts in the past.
                     tracing::warn!(
-                        "Cannot size Strand Cam pre-capture buffer: no `expected_fps` \
-                         configured for this camera"
+                        "The {role:?} tracking camera has no `expected_fps` in its \
+                         `flo-strand-cam` config, so its pre-capture buffer cannot be \
+                         sized: post-trigger will record no video from before the trigger."
                     );
                 }
             }
@@ -896,21 +929,21 @@ impl<'a> FloCoordinator<'a> {
                 if enable {
                     // Normal recording: start from now, ignoring the
                     // pre-capture buffer.
-                    self.start_recording(false)?;
+                    self.start_recording(false).await?;
                 } else {
-                    self.stop_recording()?;
+                    self.stop_recording().await?;
                 }
+            }
+            FloCommand::SetRecordTrackingCamMp4(enable) => {
+                self.my_state.record_tracking_cam_mp4 = enable;
+                self.from_device_http_tx.send(self.my_state.clone())?;
             }
             FloCommand::StartPreCaptureRecording => {
                 // Post-trigger: start a recording that also includes the
-                // buffered pre-capture window. Stopping uses the normal
+                // buffered pre-capture window, on the `.floz` and (if tied)
+                // on the tracking cameras' MP4s. Stopping uses the normal
                 // SetRecordingState(false) path.
-                self.start_recording(true)?;
-                // Have the tracking cameras flush their own post-trigger
-                // buffers into their MP4s too, so the recorded video also
-                // begins in the past.
-                self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::PostTrigger)
-                    .await;
+                self.start_recording(true).await?;
             }
             FloCommand::SetPreCaptureSeconds(secs) => {
                 let secs = secs.max(0.0);
@@ -953,11 +986,16 @@ impl<'a> FloCoordinator<'a> {
                     ))?;
                 }
 
-                // start/stop saving .mp4 file on tracking cameras
-                self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(
-                    want_recording,
-                ))
-                .await;
+                // Start/stop saving the .mp4 files on the tracking cameras.
+                // When they are tied to the `.floz`, the recording command
+                // above already owns them — and does it better, since a
+                // pre-capture window then starts the video in the past too.
+                if !self.my_state.record_tracking_cam_mp4 {
+                    self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(
+                        want_recording,
+                    ))
+                    .await;
+                }
             }
             _ => {}
         };
@@ -1316,6 +1354,10 @@ where
     for note in flo_core::migrate_config(&mut device_config)? {
         tracing::warn!("migrating config: {note}");
     }
+
+    // The operator can retie or untie the tracking cameras' MP4 recordings in
+    // the BUI; the config supplies only the value FLO starts with.
+    my_state.record_tracking_cam_mp4 = device_config.record_tracking_cam_mp4_with_floz;
 
     // Set the initial home from the motor neutral positions. The home
     // position can be updated by the operator.
@@ -1958,6 +2000,9 @@ async fn app_main(
     let mut slow_tick = tokio::time::interval(std::time::Duration::from_millis(1000));
     slow_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Read before `device_config` is borrowed by the coordinator below.
+    let configured_precapture_window_secs = device_config.precapture_window_secs;
+
     let mut coordinator = FloCoordinator::new(
         &mut device_config,
         flo_saver_tx.clone(),
@@ -1976,6 +2021,17 @@ async fn app_main(
         precapture_buffered_rx,
         strand_cams,
     );
+
+    // Arm the pre-capture buffer from the config before anything else runs, so
+    // a post-trigger works on a FLO nobody has opened a browser on yet.
+    if configured_precapture_window_secs > 0.0 {
+        coordinator
+            .handle_command(
+                FloCommand::SetPreCaptureSeconds(configured_precapture_window_secs),
+                CommandSource::Automation,
+            )
+            .await?;
+    }
 
     // No motor backend is spawned until after the coordinator exists. The
     // coordinator select loop below is the consumer of motor_position_rx.

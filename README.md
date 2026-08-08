@@ -103,6 +103,15 @@ Then run the composed executable:
 
     flo-strand-cam --config config-mini.yaml --pwm-serial /dev/ttyACM0
 
+By default, starting a `.floz` recording — from the BUI record button, the
+post-trigger button, or arming over MAVLink — also starts each tracking
+camera's MP4, and stopping the recording stops them. The BUI has a checkbox to
+untie them while running, and the config file sets what FLO starts with:
+
+```yaml
+record_tracking_cam_mp4_with_floz: false   # default: true
+```
+
 Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Camera
 observations and recording controls (including MP4 codec, frame-rate, and
 pre-trigger commands) use bounded in-process channels. The optional `mp4_codec`
@@ -110,6 +119,26 @@ accepts Strand Camera's `CodecSelection`; the simulated example includes its
 VAAPI `Ffmpeg` form. See [the crate
 README](crates/flo-strand-cam/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
+
+## Post-trigger ("pre-capture") recording
+
+FLO can hold recent data in RAM so that a recording started *after* something
+interesting happens still contains it. Set the window in the config, so the
+buffer is armed from launch:
+
+```yaml
+precapture_window_secs: 20.0   # 0, the default, disables buffering
+```
+
+The BUI can change the window while running, and its "Post-trigger record"
+button starts a recording that begins with the buffered window. It is disabled
+when the window is zero, since there would be nothing to flush.
+
+Each tracking camera needs `expected_fps` in its `flo-strand-cam` section for
+its video to be pre-captured too: that is the only way seconds can be converted
+to the frame count Strand Camera's own post-trigger buffer takes. A camera
+without it logs a warning and records video only from the trigger onward, even
+though the `.floz` still begins in the past.
 
 ## Running without hardware (simulation / testing)
 
