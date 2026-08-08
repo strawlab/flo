@@ -22,7 +22,7 @@
 //! so the controller's pairing (constant frame offset, <5 ms timestamp skew)
 //! locks immediately.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::Args;
@@ -90,19 +90,60 @@ pub struct SynthArgs {
     #[arg(long, default_value_t = 1000.0)]
     mass: f64,
 
-    /// Primary (main) camera name. Should match the controller's main camera.
-    #[arg(long, default_value = "synth-primary")]
-    primary_cam: String,
+    /// Primary (main) camera name. Defaults to the `flo-strand-cam.main`
+    /// camera name in `--config`, so the synthesized observations are
+    /// attributed to the camera the controller registered.
+    #[arg(long)]
+    primary_cam: Option<String>,
 
-    /// Secondary (stereo) camera name. Should match the controller's
-    /// embedded secondary camera name.
-    #[arg(long, default_value = "synth-secondary")]
-    secondary_cam: String,
+    /// Secondary (stereo) camera name. Defaults to the
+    /// `flo-strand-cam.secondary` camera name in `--config`.
+    #[arg(long)]
+    secondary_cam: Option<String>,
 
     /// Generate only the primary camera (no stereo / no distance), even if the
     /// config has a `stereopsis_calib`.
     #[arg(long)]
     no_stereo: bool,
+}
+
+/// Camera names to fall back on when neither the command line nor a
+/// configuration supplies them. Only reachable from the standalone CLI, where
+/// there is no embedded camera host to take names from.
+const DEFAULT_PRIMARY_CAM: &str = "synth-primary";
+const DEFAULT_SECONDARY_CAM: &str = "synth-secondary";
+
+impl SynthArgs {
+    /// The FLO configuration these centroids are projected through.
+    pub fn config_path(&self) -> &Path {
+        &self.config
+    }
+
+    /// Whether stereo observations will be generated for `cfg`.
+    pub fn is_stereo(&self, cfg: &FloControllerConfig) -> bool {
+        !self.no_stereo && cfg.stereopsis_calib.is_some()
+    }
+
+    /// Adopt the embedded camera host's names for any not given on the command
+    /// line. An explicit `--primary-cam`/`--secondary-cam` always wins.
+    pub fn adopt_camera_names(&mut self, names: &flo_strand_cam::CameraNames) {
+        if self.primary_cam.is_none() {
+            self.primary_cam = Some(names.main.clone());
+        }
+        if self.secondary_cam.is_none() {
+            self.secondary_cam.clone_from(&names.secondary);
+        }
+    }
+
+    fn primary_cam(&self) -> &str {
+        self.primary_cam.as_deref().unwrap_or(DEFAULT_PRIMARY_CAM)
+    }
+
+    fn secondary_cam(&self) -> &str {
+        self.secondary_cam
+            .as_deref()
+            .unwrap_or(DEFAULT_SECONDARY_CAM)
+    }
 }
 
 /// Inverse of [`flo_core::StereopsisCalibration`] in pixel units.
@@ -191,7 +232,7 @@ fn project(
 
     let primary = moment_centroid(
         opt,
-        &opt.primary_cam,
+        opt.primary_cam(),
         framenumber,
         timestamp,
         x_main,
@@ -206,7 +247,7 @@ fn project(
             let x_stereo = x_main - inv.disparity_px(r);
             Some(moment_centroid(
                 opt,
-                &opt.secondary_cam,
+                opt.secondary_cam(),
                 framenumber,
                 timestamp,
                 x_stereo,
@@ -268,8 +309,8 @@ pub fn run_with_sink(
     if stereo.is_some() {
         tracing::info!(
             "Stereo enabled: sending primary {:?} + secondary {:?} (distance tracking)",
-            opt.primary_cam,
-            opt.secondary_cam,
+            opt.primary_cam(),
+            opt.secondary_cam(),
         );
     } else if opt.no_stereo {
         tracing::info!("Stereo disabled by --no-stereo: sending primary only");
@@ -340,8 +381,8 @@ mod tests {
             center_x: 0,
             center_y: 0,
             mass: 1.0,
-            primary_cam: "primary".into(),
-            secondary_cam: "secondary".into(),
+            primary_cam: Some("primary".into()),
+            secondary_cam: Some("secondary".into()),
             no_stereo: true,
         };
 

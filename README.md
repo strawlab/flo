@@ -168,10 +168,19 @@ arguments come first and FLO arguments follow `--`. Pass the same configuration
 to the source and the host:
 
 ```
-cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
+STRAND_CAM_SIM_SPEC=sim-cameras.toml \
+  cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
   synth --config config-sim-stereo.yaml --duration 30 -- \
   --config config-sim-stereo.yaml
 ```
+
+The `sim` camera backend renders synthetic images from a scenario file and will
+not start without `STRAND_CAM_SIM_SPEC` naming one; `sim-cameras.toml` is a
+two-camera scenario matching the configs below. That backend names its cameras
+`simcam0`, `simcam1`, ..., which is what a `sim` config's `camera_name` fields
+have to be; `floz-replay-inprocess` reads them from the config and attributes
+its synthetic centroids to the same cameras, so `--primary-cam` and
+`--secondary-cam` are only needed to override that.
 
 `config-sim-stereo.yaml` supplies simulated primary and secondary cameras, so
 stereo distance tracking is exercised. For a recording, replace the source
