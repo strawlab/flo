@@ -99,6 +99,13 @@ flo-strand-cam:
       center_y: 600
 ```
 
+The `imops` block is the only control over the detection that feeds FLO, and it
+is read at startup, so turning detection off means `enabled: false` and a
+restart. The embedded camera BUI's own **ImOps Detection** panel does not touch
+it — that panel belongs to Strand Camera's standalone UDP detector, which FLO
+does not consume, and its checkbox reads unchecked even while FLO is tracking.
+See [the crate README](crates/flo-app/README.md) for what that panel does do.
+
 Then run the composed executable:
 
     flo --config config-mini.yaml --pwm-serial /dev/ttyACM0
