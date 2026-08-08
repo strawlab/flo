@@ -139,6 +139,35 @@ input[type="checkbox"] {
     margin-bottom: 2px;
 }
 
+// The title, the connection indicator and the connect-a-device button share a
+// single compact row so that the controls below start near the top of the page.
+.app-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+    padding: 0.35em 0.2em;
+}
+
+// Without this the button carries `.btn`'s padding and margin, which is most of
+// what made it dominate the top of the page.
+.app-header .btn {
+    padding: 0.35em 0.6em;
+    margin: 0;
+}
+
+.app-header h1 {
+    font-size: 1.35em;
+    margin: 0;
+}
+
+.app-header-status {
+    white-space: nowrap;
+}
+
+.app-header-connect {
+    margin-left: auto;
+}
+
 .modal-container {
     z-index: 100;
     position: fixed;

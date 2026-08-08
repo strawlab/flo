@@ -506,10 +506,12 @@ impl Component for App {
         }
         html! {
             <div>
-                <h1>{"FLO"}</h1>
                 {self.disconnected_dialog()}
-                <div style="text-align: center;"><ConnectDevice /></div>
-                { self.browser_info() }
+                <header class="app-header">
+                    <h1>{"FLO"}</h1>
+                    { self.browser_info() }
+                    <span class="app-header-connect"><ConnectDevice /></span>
+                </header>
                 <div class="border-1px">
                     <h2>{"Info"}</h2>
                     { self.info_div() }
@@ -1038,9 +1040,9 @@ impl App {
             ReadyState::Connecting => "Connection: ⋯",
         };
         html! {
-            <div>
+            <span class="app-header-status">
                 { ready_state }{ gamepad }
-            </div>
+            </span>
         }
     }
 
