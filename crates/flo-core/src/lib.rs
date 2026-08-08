@@ -37,10 +37,41 @@ pub const CAM_PROXY_PATH: &str = "camera";
 pub const DEFAULT_RTP_BITRATE_KBPS: u32 = 4000;
 
 /// One independently encoded H.264/RTP network stream.
+///
+/// This is what camshow is told to send. Whether the operator currently wants it
+/// sent is [`RtpTargetConfig::enabled`], which is FLO's business: camshow is
+/// given the streams it should be sending and nothing it has to ignore.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
 pub struct RtpTarget {
     pub addr: SocketAddr,
     pub bitrate_kbps: u32,
+}
+
+/// One H.264/RTP destination as FLO holds it: the stream, plus whether it is
+/// being sent.
+///
+/// A disabled destination keeps its address and bitrate so that it can be
+/// switched back on without being retyped.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+pub struct RtpTargetConfig {
+    // Flattened so that a destination reads as one flat object, and so that
+    // anything recorded before this flag existed still deserializes — as
+    // enabled, which is what it was doing.
+    #[serde(flatten)]
+    pub target: RtpTarget,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl RtpTargetConfig {
+    /// A newly added destination, which is sent to immediately: adding one is a
+    /// request to send.
+    pub fn new(target: RtpTarget) -> Self {
+        Self {
+            target,
+            enabled: true,
+        }
+    }
 }
 
 /// The role a connected Strand Camera has in FLO's tracking configuration.
@@ -795,18 +826,18 @@ pub struct DeviceState {
     /// What camshow is currently displaying and sending over RTP.
     #[serde(default)]
     pub display_source: DisplaySource,
-    /// H.264/RTP streams camshow is configured to send.
+    /// Every H.264/RTP destination FLO knows about, enabled or not.
     ///
-    /// The list is kept whether or not sending is enabled, so switching
-    /// [`Self::rtp_send_enabled`] back on restores exactly these streams.
+    /// Disabled ones are kept here so they can be switched back on without
+    /// being retyped; only the enabled ones are given to camshow.
     #[serde(default)]
-    pub rtp_targets: Vec<RtpTarget>,
-    /// Whether camshow is sending to the targets at all.
+    pub rtp_targets: Vec<RtpTargetConfig>,
+    /// The master switch over all of the destinations above.
     ///
-    /// One switch for every stream: with this off, camshow is told to send to
-    /// nothing, which frees the encoders and the uplink without the operator
-    /// having to delete destinations they will want back. Adding a target turns
-    /// it on, since adding one is a request to send.
+    /// With this off camshow is told to send to nothing, freeing the encoders
+    /// and the uplink in one tap while each destination keeps its own
+    /// [`RtpTargetConfig::enabled`] setting for when sending resumes. Adding a
+    /// destination turns it on, since adding one is a request to send.
     #[serde(default = "default_true")]
     pub rtp_send_enabled: bool,
     /// Whether starting a `.floz` recording also starts the tracking cameras'

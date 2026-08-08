@@ -258,6 +258,31 @@ input[type="radio"] {
     color: #c80;
 }
 
+// The master switch, set apart from the per-destination switches below it so the
+// two cannot be read as the same kind of row.
+.rtp-send-all {
+    font-weight: bold;
+}
+
+.rtp-send-all + p,
+.rtp-send-all + .rtp-target-list,
+.rtp-send-off + .rtp-target-list {
+    margin-left: 1.2em;
+}
+
+.rtp-target-enable {
+    display: flex;
+    align-items: center;
+    padding: 0.2em;
+}
+
+// A destination that is switched off stays legible but stops competing with the
+// ones that are actually streaming.
+.rtp-target-off {
+    opacity: 0.55;
+    text-decoration: line-through;
+}
+
 // The map links sit under the origin readout, at body size rather than the
 // bold, enlarged size of the value itself, and tall enough to tap.
 .map-links {

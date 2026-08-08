@@ -167,6 +167,7 @@ enum Msg {
     SetNewRtpBitrate(String),
     AddRtpTarget,
     SetRtpTargetBitrate(SocketAddr, Kbps),
+    SetRtpTargetEnabled(SocketAddr, bool),
     SetRtpSendEnabled(bool),
     ConfirmRemoveRtpTarget(String),
     CancelRemoveRtpTarget,
@@ -447,6 +448,16 @@ impl Component for App {
                 );
                 return false; // Don't update DOM; wait for backend state.
             }
+            Msg::SetRtpTargetEnabled(target, enabled) => {
+                self.send_message(
+                    flo_core::FloCommand::SetRtpTargetEnabled {
+                        target: target.to_string(),
+                        enabled,
+                    },
+                    ctx,
+                );
+                return false; // Don't update DOM; wait for backend state.
+            }
             Msg::SetRtpSendEnabled(enable) => {
                 self.send_message(flo_core::FloCommand::SetRtpSendEnabled(enable), ctx);
                 return false; // Don't update DOM; wait for backend state.
@@ -522,17 +533,19 @@ impl Component for App {
                                 // and add one for any target that is new, so
                                 // the map always mirrors the target list.
                                 self.rtp_bitrates.retain(|addr, _| {
-                                    new_state.rtp_targets.iter().any(|t| &t.addr == addr)
+                                    new_state
+                                        .rtp_targets
+                                        .iter()
+                                        .any(|config| &config.target.addr == addr)
                                 });
-                                for target in &new_state.rtp_targets {
+                                for config in &new_state.rtp_targets {
+                                    let bitrate = Kbps(config.target.bitrate_kbps);
                                     self.rtp_bitrates
-                                        .entry(target.addr)
+                                        .entry(config.target.addr)
                                         .or_insert_with(|| {
-                                            TypedInputStorage::from_initial(Kbps(
-                                                target.bitrate_kbps,
-                                            ))
+                                            TypedInputStorage::from_initial(bitrate.clone())
                                         })
-                                        .set_if_not_focused(Kbps(target.bitrate_kbps));
+                                        .set_if_not_focused(bitrate);
                                 }
 
                                 self.last_state = Some(new_state);
@@ -713,6 +726,21 @@ impl App {
     /// bitrate is sent when the field loses the focus or on Enter, which is
     /// what makes a typed value stick across the state broadcasts that arrive
     /// while it is being typed.
+    /// Whether one destination is switched on. Unknown addresses read as on,
+    /// which is what a destination is when it is added.
+    fn rtp_target_enabled(&self, addr: &SocketAddr) -> bool {
+        self.last_state
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .rtp_targets
+                    .iter()
+                    .find(|config| &config.target.addr == addr)
+            })
+            .map(|config| config.enabled)
+            .unwrap_or(true)
+    }
+
     fn rtp_targets_view(&self, ctx: &Context<Self>) -> Html {
         // Defaults to on: without state from the server yet, the switch shows
         // what a running FLO does, rather than reading as "off" for a moment.
@@ -723,7 +751,7 @@ impl App {
             .unwrap_or(true);
         html! {
             <div class="my-padding">
-                <label class="check-row">
+                <label class="check-row rtp-send-all">
                     <input
                         type="checkbox"
                         checked={send_enabled}
@@ -735,18 +763,31 @@ impl App {
                     <p>{"camshow is not currently streaming H.264 to any targets."}</p>
                 } else {
                     if !send_enabled {
-                        <p class="rtp-send-off">{"Sending is off. The targets below are kept, \
-                                                  and streaming resumes when this is switched \
-                                                  back on."}</p>
+                        <p class="rtp-send-off">{"Sending is off. Every target below is kept, \
+                                                  with its own setting, and streaming resumes \
+                                                  when this is switched back on."}</p>
                     }
                     <ul class="rtp-target-list">
                         { for self.rtp_bitrates.iter().map(|(addr, bitrate)| {
                             let addr_string = addr.to_string();
                             let addr_for_bitrate = *addr;
+                            let addr_for_enable = *addr;
                             let addr_for_delete = addr_string.clone();
+                            // Each destination carries its own switch; the one
+                            // above is the master over all of them.
+                            let enabled = self.rtp_target_enabled(addr);
                             html! {
                                 <li key={addr_string.clone()} class="rtp-target-item">
-                                    <code class="rtp-target-addr">{addr_string}</code>
+                                    <label class="rtp-target-enable">
+                                        <input
+                                            type="checkbox"
+                                            checked={enabled}
+                                            onchange={ctx.link().callback(move |_| {
+                                                Msg::SetRtpTargetEnabled(addr_for_enable, !enabled)
+                                            })}
+                                            />
+                                    </label>
+                                    <code class={classes!("rtp-target-addr", (!enabled).then_some("rtp-target-off"))}>{addr_string}</code>
                                     // The bitrate and Delete stay together as
                                     // one group, so on a narrow screen they
                                     // wrap below the address as a unit.
