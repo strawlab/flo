@@ -124,6 +124,16 @@ struct App {
     last_gamepad_timestamp: f64,
     /// Set once the server broadcasts that it is shutting down.
     server_quit: bool,
+    /// How many events have arrived. Only its parity is used, to restart the
+    /// indicator's animation on each one.
+    data_events: u64,
+    /// When the last event arrived, from `Date::now()` in milliseconds.
+    last_data_ms: Option<f64>,
+    /// Redraws the liveness indicator once a second.
+    ///
+    /// Nothing else would: when the server goes quiet there are no events to
+    /// re-render on, which is exactly when the indicator has something to say.
+    _liveness_interval: Interval,
     /// One editable bitrate per current RTP target, keyed by destination.
     ///
     /// The state broadcast arrives several times a second, so the field cannot
@@ -301,6 +311,12 @@ impl Component for App {
             query_gamepad_interval: None,
             last_gamepad_timestamp: 0.0,
             server_quit: false,
+            data_events: 0,
+            last_data_ms: None,
+            _liveness_interval: {
+                let link = ctx.link().clone();
+                Interval::new(1_000, move || link.send_message(Msg::RenderView))
+            },
             rtp_bitrates: BTreeMap::new(),
             adding_rtp_target: false,
             new_rtp_target: String::new(),
@@ -508,6 +524,10 @@ impl Component for App {
                 let response = *response; // unbox
                 match response {
                     Ok(bui_event_data) => {
+                        // Any event means the link is carrying data, whichever
+                        // kind it is.
+                        self.data_events = self.data_events.wrapping_add(1);
+                        self.last_data_ms = Some(js_sys::Date::now());
                         match bui_event_data {
                             BuiEventData::DeviceState(from_device) => {
                                 let new_state: DeviceState = from_device;
@@ -589,7 +609,9 @@ impl Component for App {
                     <span class="app-header-connect"><ConnectDevice /></span>
                 </header>
                 <div class="border-1px">
-                    <h2>{"Info"}</h2>
+                    // The indicator belongs to the whole panel: without fresh
+                    // data every readout below is a stale one.
+                    <h2 class="panel-heading">{"Info"}{ self.liveness_indicator() }</h2>
                     { self.info_div() }
                 </div>
                 <div class="border-1px">
@@ -1159,27 +1181,67 @@ impl App {
         }
     }
 
-    fn info_div(&self) -> Html {
-        if let Some(ref state) = self.last_state {
-            let (distance, disparity) = match state.stereopsis_state.as_ref() {
-                Some(ss) => (format!("{:.2}m", ss.dist), format!("{:.2}px", ss.dx)),
-                None => ("\u{200b}".to_string(), "\u{200b}".to_string()), // unicode zero width space character
+    /// A pulse for every event that arrives, and how long it has been since the
+    /// last one once they stop.
+    ///
+    /// The dot restarts its animation on each event, so a working link ticks
+    /// visibly. This says something the header's indicator cannot: that
+    /// indicator reports whether the event stream is *open*, which it remains
+    /// when the server has stopped sending — a stalled FLO behind a healthy
+    /// connection would otherwise leave every readout below frozen at its last
+    /// value with nothing to say so.
+    fn liveness_indicator(&self) -> Html {
+        let Some(last_data_ms) = self.last_data_ms else {
+            return html! {
+                <span class="live">
+                    <span class="live-dot live-dot-idle"></span>{"waiting for data"}
+                </span>
             };
-            let pan_deg = format!("{:.1}°", state.cached_motors.pan.degrees());
-            let tilt_deg = format!("{:.1}°", state.cached_motors.tilt.degrees());
-            let cam_state = state.cam_stale.as_msg();
-            html! {
-                <div class="qqgrid">
-                    { qqblock("Mode", state.mode.to_string()) }
-                    { qqblock("Current Cam Data?", cam_state.to_string()) }
-                    { qqblock("Distance", distance) }
-                    { qqblock("Disparity", disparity) }
-                    { qqblock("Pan", pan_deg) }
-                    { qqblock("Tilt", tilt_deg) }
-                </div>
-            }
+        };
+        let age_secs = (js_sys::Date::now() - last_data_ms) / 1000.0;
+        // FLO echoes its state once a second, so three missed ticks is a
+        // silence rather than a slow tick.
+        if age_secs > STALE_DATA_SECS {
+            return html! {
+                <span class="live live-stale">
+                    <span class="live-dot live-dot-stale"></span>
+                    {format!("no data for {age_secs:.0} s")}
+                </span>
+            };
+        }
+        // Two animations, alternated, because restarting one means handing the
+        // element a different animation to run.
+        let pulse = if self.data_events.is_multiple_of(2) {
+            "live-pulse-a"
         } else {
-            html! {}
+            "live-pulse-b"
+        };
+        html! {
+            <span class="live">
+                <span class={classes!("live-dot", pulse)}></span>{"live"}
+            </span>
+        }
+    }
+
+    fn info_div(&self) -> Html {
+        let Some(state) = self.last_state.as_ref() else {
+            return html! {};
+        };
+        let (distance, disparity) = match state.stereopsis_state.as_ref() {
+            Some(ss) => (format!("{:.2}m", ss.dist), format!("{:.2}px", ss.dx)),
+            None => ("\u{200b}".to_string(), "\u{200b}".to_string()), // unicode zero width space character
+        };
+        let pan_deg = format!("{:.1}°", state.cached_motors.pan.degrees());
+        let tilt_deg = format!("{:.1}°", state.cached_motors.tilt.degrees());
+        html! {
+            <div class="qqgrid">
+                { qqblock("Mode", state.mode.to_string()) }
+                { qqblock("Current Cam Data?", state.cam_stale.as_msg().to_string()) }
+                { qqblock("Distance", distance) }
+                { qqblock("Disparity", disparity) }
+                { qqblock("Pan", pan_deg) }
+                { qqblock("Tilt", tilt_deg) }
+            </div>
         }
     }
 
@@ -1317,19 +1379,23 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 /// Shown in place of a value the flight controller has not reported yet.
 const NO_DATA: &str = "—";
 
+/// How long without an event counts as the data having stopped.
+const STALE_DATA_SECS: f64 = 3.0;
+
 /// One key-and-value readout, as the Info and MAVLINK sections are built from.
 fn qqblock(key: &str, value: String) -> Html {
-    qqblock_classed(classes!("qqblock"), key, value)
+    html! {
+        <div class="qqblock">
+            <div class="qqkey">{ key }</div>
+            <div class="qqvalue">{ value }</div>
+        </div>
+    }
 }
 
 /// A readout whose value is too long to share a row with another.
 fn qqblock_wide(key: &str, value: String) -> Html {
-    qqblock_classed(classes!("qqblock", "qqblock-wide"), key, value)
-}
-
-fn qqblock_classed(class: Classes, key: &str, value: String) -> Html {
     html! {
-        <div class={class}>
+        <div class="qqblock qqblock-wide">
             <div class="qqkey">{ key }</div>
             <div class="qqvalue">{ value }</div>
         </div>

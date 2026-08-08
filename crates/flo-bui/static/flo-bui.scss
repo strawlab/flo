@@ -253,6 +253,70 @@ input[type="radio"] {
     color: #f66;
 }
 
+// A dot that ticks once per arriving event, so a link that is carrying data
+// looks like it. Two animations with identical frames, alternated on each event,
+// because restarting an animation means handing the element a different one.
+@mixin live-pulse-frames($name) {
+    @keyframes #{$name} {
+        from {
+            transform: scale(1.7);
+            opacity: 1;
+        }
+
+        to {
+            transform: scale(1);
+            opacity: 0.5;
+        }
+    }
+}
+
+@include live-pulse-frames(live-pulse-a);
+@include live-pulse-frames(live-pulse-b);
+
+// A heading that carries a status indicator beside its title.
+.panel-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6em;
+}
+
+.live {
+    font-size: 0.85rem;
+    font-weight: normal;
+    white-space: nowrap;
+}
+
+.live-dot {
+    display: inline-block;
+    width: 0.55em;
+    height: 0.55em;
+    border-radius: 50%;
+    margin-right: 0.45em;
+    vertical-align: middle;
+    background: #2a2;
+}
+
+.live-pulse-a {
+    animation: live-pulse-a 1s ease-out;
+}
+
+.live-pulse-b {
+    animation: live-pulse-b 1s ease-out;
+}
+
+// Nothing has arrived yet, so neither green nor alarming.
+.live-dot-idle {
+    background: #888;
+}
+
+.live-dot-stale {
+    background: #f66;
+}
+
+.live-stale {
+    color: #f66;
+}
+
 // Says why a listed target is not being streamed to.
 .rtp-send-off {
     color: #c80;
