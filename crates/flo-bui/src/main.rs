@@ -596,6 +596,7 @@ impl Component for App {
                     { self.camera_links() }
                     { self.camshow_display_view(ctx) }
                 </div>
+                { self.mavlink_view() }
                 <div class="border-1px">
                     <h2>{"H.264 RTP Targets"}</h2>
                     { self.rtp_targets_view(ctx) }
@@ -1103,38 +1104,78 @@ impl App {
             let cam_state = state.cam_stale.as_msg();
             html! {
                 <div class="qqgrid">
-                    <div class="qqblock">
-                       <div class="qqkey">{ "Mode" }</div>
-                       <div class="qqvalue"> {format!("{}", state.mode) } </div>
-                    </div>
-                    <div class="qqblock">
-                        <div class="qqkey">{ "Current Cam Data?" }</div>
-                        <div class="qqvalue"> {cam_state} </div>
-                    </div>
-                    <div class="qqblock">
-                        <div class="qqkey">{ "Distance" }</div>
-                        <div class="qqvalue"> {distance} </div>
-                    </div>
-                    <div class="qqblock">
-                        <div class="qqkey">{ "Disparity" }</div>
-                        <div class="qqvalue"> {disparity} </div>
-                    </div>
-
-                    <div class="qqblock">
-                        <div class="qqkey">{ "Pan" }</div>
-                        <div class="qqvalue"> {pan_deg} </div>
-                    </div>
-
-                    <div class="qqblock">
-                        <div class="qqkey">{ "Tilt" }</div>
-                        <div class="qqvalue"> {tilt_deg} </div>
-                    </div>
-
-                    { gps_origin_div(&state.gps_origin) }
+                    { qqblock("Mode", state.mode.to_string()) }
+                    { qqblock("Current Cam Data?", cam_state.to_string()) }
+                    { qqblock("Distance", distance) }
+                    { qqblock("Disparity", disparity) }
+                    { qqblock("Pan", pan_deg) }
+                    { qqblock("Tilt", tilt_deg) }
                 </div>
             }
         } else {
             html! {}
+        }
+    }
+
+    /// The MAVLINK section: what the flight controller reports, laid out like
+    /// the Info section above it.
+    ///
+    /// Nothing is rendered when there is no flight controller, which is also
+    /// when the server sends no MAVLink state at all.
+    fn mavlink_view(&self) -> Html {
+        let Some(mavlink) = self
+            .last_state
+            .as_ref()
+            .and_then(|state| state.mavlink.as_ref())
+        else {
+            return html! {};
+        };
+
+        let flight_mode = match mavlink.custom_mode {
+            Some(custom_mode) => flight_mode_label(custom_mode),
+            None => NO_DATA.to_string(),
+        };
+        let rtk = match &mavlink.gnss_rtk_mode {
+            Some(mode) => mode.label().to_string(),
+            None => NO_DATA.to_string(),
+        };
+        // Each triple is shown as one readout: all three numbers come from the
+        // same message, so they are present or absent together, and keeping them
+        // on one line is both how they are read and one row instead of two on a
+        // phone.
+        let offset = match mavlink.local_position {
+            Some(position) => position.horizontal_offset_str(),
+            None => NO_DATA.to_string(),
+        };
+        let position = match mavlink.local_position {
+            Some(position) => format!(
+                "{:.1}, {:.1}, {:.1} m",
+                position.north_m, position.east_m, position.down_m
+            ),
+            None => NO_DATA.to_string(),
+        };
+        let attitude = match mavlink.attitude {
+            Some(attitude) => format!(
+                "{:.1}°, {:.1}°, {:.1}°",
+                attitude.yaw_heading_deg(),
+                attitude.pitch_deg(),
+                attitude.roll_deg()
+            ),
+            None => NO_DATA.to_string(),
+        };
+
+        html! {
+            <div class="border-1px">
+                <h2>{"MAVLINK"}</h2>
+                <div class="qqgrid">
+                    { qqblock("Flight mode", flight_mode) }
+                    { qqblock("RTK", rtk) }
+                    { qqblock("Horizontal offset", offset) }
+                    { qqblock_wide("Local position (N, E, D)", position) }
+                    { qqblock_wide("Attitude (yaw, pitch, roll)", attitude) }
+                    { gps_origin_div(&mavlink.gps_origin) }
+                </div>
+            </div>
         }
     }
 
@@ -1206,6 +1247,28 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 }
 
 // -----------------------------------------------------------------------------
+
+/// Shown in place of a value the flight controller has not reported yet.
+const NO_DATA: &str = "—";
+
+/// One key-and-value readout, as the Info and MAVLINK sections are built from.
+fn qqblock(key: &str, value: String) -> Html {
+    qqblock_classed(classes!("qqblock"), key, value)
+}
+
+/// A readout whose value is too long to share a row with another.
+fn qqblock_wide(key: &str, value: String) -> Html {
+    qqblock_classed(classes!("qqblock", "qqblock-wide"), key, value)
+}
+
+fn qqblock_classed(class: Classes, key: &str, value: String) -> Html {
+    html! {
+        <div class={class}>
+            <div class="qqkey">{ key }</div>
+            <div class="qqvalue">{ value }</div>
+        </div>
+    }
+}
 
 /// The flight controller's local-position origin: what FLO asked for, what the
 /// flight controller reports, and whether they agree.

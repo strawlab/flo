@@ -119,11 +119,24 @@ accepts Strand Camera's `CodecSelection`; the simulated example includes its
 VAAPI `Ffmpeg` form. See [the crate README](crates/flo-app/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
+## MAVLINK block
+
+When a flight controller is configured, the BUI grows a **MAVLINK** block
+showing what that controller reports: flight mode, GNSS/RTK fix, attitude, the
+drone's position in the local NED frame, and how far and which way that is from
+the origin (`SW 200 m`). Without a flight controller none of this is sent and
+the block does not appear.
+
+The block updates once a second, with the rest of the state event. It is a
+readout for checking that the controller is saying what it should, not an
+instrument to fly by.
+
 ## GPS origin
 
 Everything FLO computes from `LOCAL_POSITION_NED` is relative to the flight
-controller's local-position origin. The BUI's Info block shows the origin the
-flight controller reports, alongside the one the config asks for:
+controller's local-position origin, which the MAVLINK block shows — the one the
+flight controller reports, alongside the one the config asks for, with links
+opening it on a map:
 
 ```yaml
 mavlink:

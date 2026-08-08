@@ -567,9 +567,10 @@ impl<'a> FloCoordinator<'a> {
         self.my_state.mode = self.tracking_state.mode; //my_state.mode is just a mirror of tracking_state.mode, make sure it's up to date
         // Reflect the writer's current pre-capture buffer fill.
         self.my_state.precapture_buffered_secs = *self.precapture_buffered_rx.borrow();
-        // Mirror the flight controller's local-position origin so the BUI can
-        // show it. flo-mavlink is the only writer.
-        self.my_state.gps_origin = self.local_flo_state.read().unwrap().gps_origin;
+        // Mirror what the flight controller has reported so the BUI can show
+        // it. flo-mavlink is the only writer, and leaves this `None` when there
+        // is no flight controller.
+        self.my_state.mavlink = self.local_flo_state.read().unwrap().mavlink.clone();
         // relay to HTTP server
         self.from_device_http_tx.send(self.my_state.clone())?;
         self.my_state.stereopsis_state = None; //a hack to skip failed stereopsis detections because of centroid packets not arriving promptly, as there are many

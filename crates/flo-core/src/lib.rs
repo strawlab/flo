@@ -10,7 +10,8 @@ pub use events::*;
 
 pub mod drone_structs;
 pub use drone_structs::{
-    DroneChannelData, GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus, RcConfig,
+    Attitude, DroneChannelData, GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus,
+    LocalPositionNed, MavlinkState, RcConfig, flight_mode_label,
 };
 
 mod eucm_camera;
@@ -802,11 +803,11 @@ pub struct DeviceState {
     /// [`FloControllerConfig::record_tracking_cam_mp4_with_floz`].
     #[serde(default)]
     pub record_tracking_cam_mp4: bool,
-    /// The flight controller's local-position origin, as requested by FLO and
-    /// as reported back. Everything FLO derives from `LOCAL_POSITION_NED`
-    /// refers to this point, so the operator needs to see it.
-    #[serde(default)]
-    pub gps_origin: GpsOriginStatus,
+    /// What the flight controller has told FLO, or `None` when there is no
+    /// flight controller — in which case the BUI has no MAVLink section to
+    /// show, and the field is left out of the state event entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mavlink: Option<MavlinkState>,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -815,16 +816,36 @@ pub struct DeviceState {
 /// truth.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct LocalFloStateInner {
-    /// The current GNSS RTK mode, if known.
-    pub gnss_rtk_mode: GnssRtkMode,
+    /// What the flight controller has told FLO, mirrored into
+    /// [`DeviceState::mavlink`] each slow tick so the BUI can show it.
+    ///
+    /// `None` means there is no flight controller: only flo-mavlink fills this
+    /// in, and that task runs only when one is configured.
+    #[serde(default)]
+    pub mavlink: Option<MavlinkState>,
     /// True when LOCAL_POSITION_NED is >=10km from global origin.
     #[serde(default)]
     pub local_position_out_of_bounds: bool,
-    /// The local-position origin FLO asked for and the one the flight
-    /// controller reports. Mirrored into [`DeviceState::gps_origin`] each slow
-    /// tick so the BUI can show it.
-    #[serde(default)]
-    pub gps_origin: GpsOriginStatus,
+}
+
+impl LocalFloStateInner {
+    /// The MAVLink state, created on first use.
+    ///
+    /// Reaching for this is what marks a flight controller as present, so it is
+    /// for flo-mavlink only — anything else would make [`Self::mavlink`] claim
+    /// a controller that is not there.
+    pub fn mavlink_mut(&mut self) -> &mut MavlinkState {
+        self.mavlink.get_or_insert_with(Default::default)
+    }
+
+    /// The GNSS mode the flight controller last reported, defaulting to
+    /// [`GnssRtkMode::NoGps`] when there is no controller or it has not said.
+    pub fn gnss_rtk_mode(&self) -> GnssRtkMode {
+        self.mavlink
+            .as_ref()
+            .and_then(|mavlink| mavlink.gnss_rtk_mode.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// FLO state which is not shared with the BUI.
@@ -1277,7 +1298,7 @@ impl DeviceState {
             display_source: DisplaySource::default(),
             rtp_targets: Vec::new(),
             record_tracking_cam_mp4: default_true(),
-            gps_origin: GpsOriginStatus::default(),
+            mavlink: None,
         }
     }
 }
