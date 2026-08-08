@@ -7,5 +7,5 @@ fn main() -> color_eyre::eyre::Result<()> {
         // threads have started.
         unsafe { std::env::set_var("RUST_LOG", "info") };
     }
-    flo_strand_cam::run(flo::AppOptions::default())
+    flo_app::run(flo::AppOptions::default())
 }

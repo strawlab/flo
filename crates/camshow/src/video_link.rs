@@ -1,7 +1,7 @@
-//! The receiving end of the video link: frames relayed from `flo-strand-cam`.
+//! The receiving end of the video link: frames relayed from `flo`.
 //!
 //! A second TCP listener, separate from the control link in [`crate::server`].
-//! `flo-strand-cam` connects to it and pushes tracking-camera frames so the
+//! `flo` connects to it and pushes tracking-camera frames so the
 //! operator can switch the live view away from the FPV webcam mid-flight.
 //!
 //! Two properties of this module matter more than anything else it does:

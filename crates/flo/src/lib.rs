@@ -2226,7 +2226,7 @@ mod tests {
 
     #[test]
     fn parse_cli_accepts_composition_arguments() {
-        let cli = parse_cli(["flo-strand-cam", "--config", "sim.yaml"]);
+        let cli = parse_cli(["flo", "--config", "sim.yaml"]);
         assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
     }
 

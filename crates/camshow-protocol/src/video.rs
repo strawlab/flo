@@ -1,4 +1,4 @@
-//! The video link: raw frames relayed from `flo-strand-cam` to `camshow`.
+//! The video link: raw frames relayed from `flo` to `camshow`.
 //!
 //! This is a *second*, separate TCP connection from the JSON-lines control
 //! link in the parent module. Multi-megabyte frames have no business being

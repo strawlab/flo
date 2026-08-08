@@ -37,7 +37,7 @@ impl Extension for InProcessCentroidExtension {
         // Take the names from the same config file the camera host reads
         // rather than making the operator repeat them.
         if let Self::Synth(args) = self.as_mut() {
-            let names = flo_strand_cam::configured_camera_names(args.config_path())?;
+            let names = flo_app::configured_camera_names(args.config_path())?;
             if args.is_stereo(&config) && names.secondary.is_none() {
                 eyre::bail!(
                     "config has a `stereopsis_calib` but no `flo-strand-cam.secondary` camera, \

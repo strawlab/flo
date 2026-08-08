@@ -4,13 +4,13 @@ members = [
   "crates/burn-osd",
   "crates/camshow",
   "crates/camshow-protocol",
+  "crates/flo-app",
   "crates/flo-bui",
   "crates/flo-core",
   "crates/flo-imops",
   "crates/flo",
   "crates/flo-mavlink",
   "crates/flo-mavlink/mavlink-dump",
-  "crates/flo-strand-cam",
   "crates/flo-tracing",
   "crates/flo-webserver",
   "crates/floz-cli",
@@ -103,9 +103,9 @@ y4m = { git = "https://github.com/astraw/y4m", rev = "6992473b73838c84cb659387b2
 
 camshow-protocol = { path = "crates/camshow-protocol" }
 flo = { path = "crates/flo", default-features = false }
+flo-app = { path = "crates/flo-app" }
 flo-core = { path = "crates/flo-core", default-features = false }
 flo-imops = { path = "crates/flo-imops" }
-flo-strand-cam = { path = "crates/flo-strand-cam" }
 flo-tracing = { path = "crates/flo-tracing" }
 osd-overlay = { path = "crates/osd-overlay" }
 flo-mavlink = { path = "crates/flo-mavlink" }

@@ -1,7 +1,7 @@
 # flo-imops
 
 `flo-imops` performs FLO's experimental Mono8 threshold-and-moment detection.
-It receives frames from the embedded Strand Camera host, while `flo-strand-cam`
+It receives frames from the embedded Strand Camera host, while `flo`
 owns delivery of resulting centroids to the FLO controller and preview
 annotations.
 

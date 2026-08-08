@@ -1,11 +1,12 @@
-# flo-strand-cam
+# flo-app
 
-`flo-strand-cam` composes FLO with one or two Strand Camera instances in a
-single process and Tokio runtime. `main` is required for monocular tracking;
-`secondary` is optional and provides the second view required for FLO's stereo
-depth estimation when a stereo calibration is configured. Each camera's
-experimental ImOps detector delivers typed results directly to FLO; the
-application does not bind or use FLO's legacy UDP centroid listener.
+`flo-app` builds the `flo` executable, which composes FLO with one or two Strand
+Camera instances in a single process and Tokio runtime. `main` is required for
+monocular tracking; `secondary` is optional and provides the second view
+required for FLO's stereo depth estimation when a stereo calibration is
+configured. Each camera's experimental ImOps detector delivers typed results
+directly to FLO; the application does not bind or use FLO's legacy UDP centroid
+listener.
 
 This integrated binary owns the cameras directly. Its configuration must omit
 the legacy `strand_cam_main` and `strand_cam_secondary` blocks, which are for
@@ -56,7 +57,7 @@ codec form.
 Run with the usual FLO options, for example:
 
 ```text
-flo-strand-cam --config config-mini.yaml
+flo --config config-mini.yaml
 ```
 
 Downstream binaries can add optional FLO extensions while retaining this
@@ -64,14 +65,14 @@ crate's first-class camera host:
 
 ```rust
 fn main() -> color_eyre::eyre::Result<()> {
-    flo_strand_cam::run(flo::AppOptions {
+    flo_app::run(flo::AppOptions {
         extensions: vec![Box::new(mymodule::MyExtension::new())],
         ..Default::default()
     })
 }
 ```
 
-Depend on the `flo-strand-cam` package (imported in Rust as
-`flo_strand_cam`) as well as `flo`. The composed crate owns
+Depend on the `flo-app` package (imported in Rust as `flo_app`) as well as
+`flo`. The composed crate owns
 `AppOptions.camera_host` and disables the legacy UDP listener; caller-supplied
 extensions and OSD overlays are preserved.

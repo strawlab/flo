@@ -126,7 +126,7 @@ impl SynthArgs {
 
     /// Adopt the embedded camera host's names for any not given on the command
     /// line. An explicit `--primary-cam`/`--secondary-cam` always wins.
-    pub fn adopt_camera_names(&mut self, names: &flo_strand_cam::CameraNames) {
+    pub fn adopt_camera_names(&mut self, names: &flo_app::CameraNames) {
         if self.primary_cam.is_none() {
             self.primary_cam = Some(names.main.clone());
         }

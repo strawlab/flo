@@ -4,7 +4,7 @@
 # from a `braid-sim` scenario, and it will not start without one: point
 # `STRAND_CAM_SIM_SPEC` at this file.
 #
-#     STRAND_CAM_SIM_SPEC=sim-cameras.toml flo-strand-cam --config config-sim-stereo.yaml
+#     STRAND_CAM_SIM_SPEC=sim-cameras.toml flo --config config-sim-stereo.yaml
 #
 # The backend names its cameras `simcam0`, `simcam1`, ... in order, and those
 # are the names a `flo-strand-cam` config's `camera_name` fields must use. Two

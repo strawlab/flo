@@ -1,5 +1,5 @@
 [package]
-name = "flo-strand-cam"
+name = "flo-app"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -8,8 +8,11 @@ description = "In-process FLO and Strand Camera application"
 [lib]
 path = "src/lib.rs"
 
+# The executable is `flo`, not `flo-app`: this is the sole FLO application now
+# that the standalone `flo` binary is gone, and earlier releases installed it
+# under that name. `crates/flo` is a library, so the name does not collide.
 [[bin]]
-name = "flo-strand-cam"
+name = "flo"
 path = "src/main.rs"
 
 [dependencies]

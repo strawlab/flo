@@ -15,9 +15,9 @@ Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor V
 
 ## What is in this repository
 
-The `flo-strand-cam` application is the FLO deployment in this repository. It
-combines FLO tracking and motor control with Strand Camera acquisition and the
-ImOps detector in one process. Images, detections, and camera controls travel
+The `flo` application is the FLO deployment in this repository. It combines FLO
+tracking and motor control with Strand Camera acquisition and the ImOps detector
+in one process. Images, detections, and camera controls travel
 through bounded Rust channels rather than a network socket.
 
 While FLO was originally designed as a generic camera tracking system for all
@@ -47,7 +47,7 @@ or SimpleBGC gimbal motors.
 
 ```
 +-------------+      HTTP      +----------------------+     USB     +-----------------+
-| FLO UI      |<-------------->| flo-strand-cam       |<---------->| rpipico-pantilt |
+| FLO UI      |<-------------->| flo                  |<---------->| rpipico-pantilt |
 | (browser)   |                 |                      |            | (RP Pico)       |
 +-------------+                 | camera + ImOps + FLO |            +--------+--------+
                                 | (one process)        |                     |
@@ -61,7 +61,7 @@ or SimpleBGC gimbal motors.
 
 ## Overview of top-level directories
 
-- `crates` Rust crates and application binaries, including `flo-strand-cam`
+- `crates` Rust crates and application binaries, including `flo`
 - `firmware/beamdriver` Firmware for IR LED source
 - `firmware/flo-tilta-dongle` Firmware for USB dongle to control Tilta motors.
 - `firmware/rpipico-pantilt` Firmware for RPi Pico to control PWM servo motors.
@@ -101,7 +101,7 @@ flo-strand-cam:
 
 Then run the composed executable:
 
-    flo-strand-cam --config config-mini.yaml --pwm-serial /dev/ttyACM0
+    flo --config config-mini.yaml --pwm-serial /dev/ttyACM0
 
 By default, starting a `.floz` recording — from the BUI record button, the
 post-trigger button, or arming over MAVLink — also starts each tracking
@@ -116,8 +116,7 @@ Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Camera
 observations and recording controls (including MP4 codec, frame-rate, and
 pre-trigger commands) use bounded in-process channels. The optional `mp4_codec`
 accepts Strand Camera's `CodecSelection`; the simulated example includes its
-VAAPI `Ffmpeg` form. See [the crate
-README](crates/flo-strand-cam/README.md) and
+VAAPI `Ffmpeg` form. See [the crate README](crates/flo-app/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
 ## GPS origin
@@ -200,7 +199,7 @@ the clean (no-OSD) webcam video to disk on `flo`'s command happens regardless of
 which outputs are on.
 
 What is *displayed* is also selectable at runtime: the FPV webcam with its OSD,
-or a tracking camera relayed from `flo-strand-cam`. See [Switching the display
+or a tracking camera relayed from `flo`. See [Switching the display
 source](#switching-the-display-source).
 
 ### Build and run
@@ -230,7 +229,7 @@ Output options:
   nothing is streamed. Tuning (all optional, and only accepted alongside
   `--rtp-dest`): `--rtp-encoder <ffmpeg|openh264>`, `--rtp-bitrate-kbps`,
   `--rtp-fps`, `--rtp-mtu`, `--rtp-idr-interval`, `--rtp-dump-annexb <FILE>`.
-  The flo-strand-cam BUI can add and remove destinations and change each
+  The flo BUI can add and remove destinations and change each
   destination's bitrate independently while camshow runs.
 
 Other options:
@@ -238,7 +237,7 @@ Other options:
 - `--listen <ADDR>` TCP listen address for `flo` connections.
   Default: `127.0.0.1:2224`.
 - `--video-listen <ADDR>` TCP listen address for the video link, over which
-  `flo-strand-cam` relays tracking-camera frames. Default: `127.0.0.1:2225`.
+  `flo` relays tracking-camera frames. Default: `127.0.0.1:2225`.
 - `--display-source <webcam|strand-cam-main|strand-cam-secondary>` What to
   display and stream at startup. Default: `webcam`. `flo` overrides this
   whenever the operator switches; mainly useful for bench testing.
@@ -289,7 +288,7 @@ into the recording directory selected by `flo`.
 
 ### Switching the display source
 
-The Cameras section of the flo-strand-cam BUI can switch what the local display
+The Cameras section of the flo BUI can switch what the local display
 and every RTP stream show between the FPV webcam and either configured tracking
 (IR) camera. An RC channel condition can also switch between the webcam and the
 main tracking camera:
@@ -310,7 +309,7 @@ trigger: while the condition holds, the tracking camera is displayed; leave it
 and the view returns to the webcam. Losing the RC link also returns it to the
 webcam.
 
-The frames come from `flo-strand-cam`, which relays them to `camshow` over the
+The frames come from `flo`, which relays them to `camshow` over the
 video link. This is on by default and needs no configuration; the section exists
 to change it:
 

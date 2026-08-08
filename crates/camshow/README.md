@@ -15,7 +15,7 @@ outputs the CLI enables, and both can run at the same time.
 
 - `--gui` — local egui video display (fullscreen, or `--windowed`).
 - `--rtp-dest <HOST:PORT>` — initial H.264/RTP/UDP stream, e.g. to an
-  OpenIPC-style groundstation. The flo-strand-cam BUI can add or remove streams
+  OpenIPC-style groundstation. The `flo` BUI can add or remove streams
   and change each stream's bitrate independently at runtime.
 
 In the GUI, press `0` or Space for the webcam, `1` for the main tracking camera,
@@ -31,7 +31,7 @@ it just displays and streams nothing.
 
 - `webcam` (the default) — the FPV webcam, with the OSD stamped on it.
 - `strand-cam-main` / `strand-cam-secondary` — frames from a tracking camera,
-  relayed by `flo-strand-cam` over the **video link** (a second TCP connection,
+  relayed by `flo` over the **video link** (a second TCP connection,
   `--video-listen`, with its own binary framing; see `camshow-protocol::video`).
 
 No OSD is drawn on a relayed frame: the canvas is calibrated for the FPV

@@ -24,7 +24,13 @@ use tokio::sync::{mpsc, oneshot, watch};
 mod video_relay;
 use video_relay::{VideoRelay, VideoRelayConfig};
 
-const APP_NAME: &str = "flo-strand-cam";
+const APP_NAME: &str = "flo";
+/// The YAML section holding this application's camera-host settings. This is
+/// deliberately *not* `APP_NAME`: the executable was renamed back to `flo` for
+/// continuity with earlier releases, but renaming the config key would break
+/// every deployed configuration file for no gain. Keep in sync with the
+/// `#[serde(rename = ...)]` attributes that deserialize the section.
+const CONFIG_SECTION: &str = "flo-strand-cam";
 /// Cargo package version and the source revision that produced this binary.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (git ", env!("GIT_HASH"), ")");
 /// The lossless Strand Camera-to-FLO queue only absorbs scheduling jitter. A
@@ -983,7 +989,7 @@ fn config_path_from_args(args: &[OsString]) -> Result<PathBuf> {
         if arg == "--config" {
             let path = args
                 .next()
-                .ok_or_else(|| eyre!("`flo-strand-cam` requires a path after `--config`"))?;
+                .ok_or_else(|| eyre!("`flo` requires a path after `--config`"))?;
             return Ok(PathBuf::from(path));
         }
         if let Some(path) = arg.to_str().and_then(|arg| arg.strip_prefix("--config=")) {
@@ -991,7 +997,7 @@ fn config_path_from_args(args: &[OsString]) -> Result<PathBuf> {
         }
     }
     Err(eyre!(
-        "`flo-strand-cam` requires `--config <path>` so it can configure its embedded camera host"
+        "`flo` requires `--config <path>` so it can configure its embedded camera host"
     ))
 }
 
@@ -1012,6 +1018,7 @@ pub struct CameraNames {
 pub fn configured_camera_names(path: &Path) -> Result<CameraNames> {
     #[derive(Deserialize)]
     struct CameraSection {
+        // Must match `CONFIG_SECTION`; `serde(rename)` requires a literal.
         #[serde(rename = "flo-strand-cam")]
         camera_host: RawCameraHostConfig,
     }
@@ -1040,6 +1047,7 @@ fn load_composed_config(
 fn parse_composed_config(yaml: &str) -> Result<(CameraHostConfig, flo_core::FloControllerConfig)> {
     #[derive(Deserialize)]
     struct CameraSection {
+        // Must match `CONFIG_SECTION`; `serde(rename)` requires a literal.
         #[serde(rename = "flo-strand-cam")]
         camera_host: RawCameraHostConfig,
     }
@@ -1054,7 +1062,7 @@ fn parse_composed_config(yaml: &str) -> Result<(CameraHostConfig, flo_core::FloC
     let mut flo_config: flo_core::FloControllerConfig = serde_yaml::from_str(yaml)?;
     flo_config
         .extensions
-        .remove(serde_yaml::Value::String(APP_NAME.to_owned()));
+        .remove(serde_yaml::Value::String(CONFIG_SECTION.to_owned()));
     Ok((camera_host, flo_config))
 }
 
@@ -1098,7 +1106,7 @@ fn compose_options(
 ) -> Result<flo::AppOptions> {
     if options.camera_host.is_some() {
         return Err(eyre!(
-            "flo-strand-cam owns the first-class camera host; caller AppOptions.camera_host must be None"
+            "flo owns the first-class camera host; caller AppOptions.camera_host must be None"
         ));
     }
     options.camera_host = Some(Box::new(StrandCamHost {
@@ -1141,14 +1149,14 @@ mod tests {
     #[test]
     fn version_arguments_do_not_require_a_configuration_file() {
         assert!(is_version_request(&[
-            OsString::from("flo-strand-cam"),
+            OsString::from("flo"),
             OsString::from("--version"),
         ]));
         assert!(is_version_request(&[
-            OsString::from("flo-strand-cam"),
+            OsString::from("flo"),
             OsString::from("-V"),
         ]));
-        assert!(!is_version_request(&[OsString::from("flo-strand-cam")]));
+        assert!(!is_version_request(&[OsString::from("flo")]));
     }
 
     #[test]
@@ -1336,7 +1344,7 @@ mod tests {
         assert!(
             !flo_config
                 .extensions
-                .contains_key(serde_yaml::Value::String(APP_NAME.to_owned()))
+                .contains_key(serde_yaml::Value::String(CONFIG_SECTION.to_owned()))
         );
     }
 
@@ -1360,10 +1368,10 @@ mod tests {
 
     #[test]
     fn config_path_is_required_and_accepts_both_clap_forms() {
-        assert!(config_path_from_args(&[OsString::from("flo-strand-cam")]).is_err());
+        assert!(config_path_from_args(&[OsString::from("flo")]).is_err());
         assert_eq!(
             config_path_from_args(&[
-                OsString::from("flo-strand-cam"),
+                OsString::from("flo"),
                 OsString::from("--config"),
                 OsString::from("config.yaml"),
             ])
@@ -1372,7 +1380,7 @@ mod tests {
         );
         assert_eq!(
             config_path_from_args(&[
-                OsString::from("flo-strand-cam"),
+                OsString::from("flo"),
                 OsString::from("--config=config.yaml"),
             ])
             .unwrap(),

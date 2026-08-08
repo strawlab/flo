@@ -17,7 +17,7 @@ tokio.workspace = true
 floz-parser.workspace = true
 flo-core.workspace = true
 flo.workspace = true
-flo-strand-cam.workspace = true
+flo-app.workspace = true
 
 [features]
 default = ["bundle_files"]
