@@ -186,6 +186,19 @@ input[type="checkbox"] {
     color: #f66;
 }
 
+.gps-origin-ok {
+    color: #2a2;
+}
+
+.gps-origin-warn {
+    color: #c80;
+}
+
+.gps-origin-error {
+    color: #f66;
+    font-weight: bold;
+}
+
 .camshow-source-choices {
     display: flex;
     flex-wrap: wrap;

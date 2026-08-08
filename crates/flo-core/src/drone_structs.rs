@@ -28,6 +28,117 @@ pub enum GnssRtkMode {
     Ppp,
 }
 
+/// A flight controller's local-position origin, in MAVLink's own units.
+///
+/// Both `SET_GPS_GLOBAL_ORIGIN` and `GPS_GLOBAL_ORIGIN` carry these integers,
+/// so keeping them lets a request be compared against what the flight
+/// controller reports without a round trip through floating point.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+pub struct GpsGlobalOrigin {
+    /// Latitude in units of 1e-7 degrees (WGS84).
+    pub latitude_e7: i32,
+    /// Longitude in units of 1e-7 degrees (WGS84).
+    pub longitude_e7: i32,
+    /// Altitude above mean sea level, in millimeters.
+    pub altitude_mm: i32,
+}
+
+/// One unit of latitude is about 1.11 cm, so this is about a meter.
+const ORIGIN_TOLERANCE_E7: i32 = 90;
+/// A meter, in the units above. Altitude may legitimately be adjusted a little
+/// by the flight controller's own geoid model.
+const ORIGIN_TOLERANCE_MM: i32 = 1_000;
+
+impl GpsGlobalOrigin {
+    /// Build from the degrees/degrees/meters triple a config file carries.
+    pub fn from_degrees_and_meters(
+        lat_deg: FloatType,
+        lon_deg: FloatType,
+        alt_m: FloatType,
+    ) -> Self {
+        Self {
+            latitude_e7: (lat_deg * 1e7) as i32,
+            longitude_e7: (lon_deg * 1e7) as i32,
+            altitude_mm: (alt_m * 1e3) as i32,
+        }
+    }
+
+    pub fn latitude_deg(&self) -> FloatType {
+        self.latitude_e7 as FloatType / 1e7
+    }
+
+    pub fn longitude_deg(&self) -> FloatType {
+        self.longitude_e7 as FloatType / 1e7
+    }
+
+    pub fn altitude_m(&self) -> FloatType {
+        self.altitude_mm as FloatType / 1e3
+    }
+
+    /// Whether `self` is the same place as `other`, within about a meter.
+    ///
+    /// An origin that did not take hold is wrong by kilometers, not
+    /// centimeters, so this is loose enough that rounding in the flight
+    /// controller never raises a false alarm.
+    pub fn matches(&self, other: &Self) -> bool {
+        (self.latitude_e7 - other.latitude_e7).abs() <= ORIGIN_TOLERANCE_E7
+            && (self.longitude_e7 - other.longitude_e7).abs() <= ORIGIN_TOLERANCE_E7
+            && (self.altitude_mm - other.altitude_mm).abs() <= ORIGIN_TOLERANCE_MM
+    }
+}
+
+impl std::fmt::Display for GpsGlobalOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:.7}, {:.7}, {:.3} m",
+            self.latitude_deg(),
+            self.longitude_deg(),
+            self.altitude_m()
+        )
+    }
+}
+
+/// Whether the local-position origin FLO asked the flight controller to use is
+/// the one the flight controller is actually using.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Default)]
+pub enum GpsOriginCheck {
+    /// The config has no `set_gps_global_origin`, so FLO never asked.
+    #[default]
+    NotRequested,
+    /// FLO asked, but the flight controller has not reported an origin yet.
+    Awaiting,
+    /// The flight controller reports the origin FLO asked for.
+    Confirmed,
+    /// The flight controller reports a different origin. Local positions —
+    /// and therefore everything FLO computes from them — refer to the wrong
+    /// place.
+    Mismatched,
+}
+
+/// The local-position origin as requested and as reported, plus the verdict.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Default)]
+pub struct GpsOriginStatus {
+    /// What FLO asked for, from `mavlink.set_gps_global_origin`.
+    pub requested: Option<GpsGlobalOrigin>,
+    /// The most recent `GPS_GLOBAL_ORIGIN` from the flight controller.
+    pub reported: Option<GpsGlobalOrigin>,
+    pub check: GpsOriginCheck,
+}
+
+impl GpsOriginStatus {
+    /// Fold in a freshly received `GPS_GLOBAL_ORIGIN` and return the verdict.
+    pub fn on_reported(&mut self, reported: GpsGlobalOrigin) -> GpsOriginCheck {
+        self.reported = Some(reported);
+        self.check = match &self.requested {
+            None => GpsOriginCheck::NotRequested,
+            Some(requested) if requested.matches(&reported) => GpsOriginCheck::Confirmed,
+            Some(_) => GpsOriginCheck::Mismatched,
+        };
+        self.check
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum DroneRealtimeEvent {
     RcChannels(DroneChannelData),
@@ -95,6 +206,15 @@ pub struct MavlinkConfig {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub ntrip_url: Option<String>,
+}
+
+impl MavlinkConfig {
+    /// The local-position origin this config asks the flight controller to
+    /// use, if any.
+    pub fn requested_gps_global_origin(&self) -> Option<GpsGlobalOrigin> {
+        self.set_gps_global_origin
+            .map(|[lat, lon, alt]| GpsGlobalOrigin::from_degrees_and_meters(lat, lon, alt))
+    }
 }
 
 fn default_mavlink_system_id() -> u8 {
@@ -306,5 +426,78 @@ impl FlightMode {
             let sub_mode = (fm >> 24) & 0xFF;
             Some((fm, main_mode as f32, sub_mode as f32))
         }
+    }
+}
+
+#[cfg(test)]
+mod gps_origin_tests {
+    use super::{GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus};
+
+    fn freiburg() -> GpsGlobalOrigin {
+        GpsGlobalOrigin::from_degrees_and_meters(48.0038, 7.8449, 278.0)
+    }
+
+    #[test]
+    fn a_config_triple_round_trips_through_mavlink_units() {
+        let origin = freiburg();
+        assert_eq!(origin.latitude_e7, 480_038_000);
+        assert_eq!(origin.longitude_e7, 78_449_000);
+        assert_eq!(origin.altitude_mm, 278_000);
+        assert!((origin.latitude_deg() - 48.0038).abs() < 1e-9);
+        assert!((origin.altitude_m() - 278.0).abs() < 1e-9);
+    }
+
+    /// The flight controller may round or apply its own geoid model, so a
+    /// sub-meter difference is the same place.
+    #[test]
+    fn sub_meter_differences_still_match() {
+        let requested = freiburg();
+        let reported = GpsGlobalOrigin {
+            latitude_e7: requested.latitude_e7 + 50,
+            longitude_e7: requested.longitude_e7 - 50,
+            altitude_mm: requested.altitude_mm + 400,
+        };
+        assert!(requested.matches(&reported));
+    }
+
+    #[test]
+    fn an_origin_that_did_not_take_hold_does_not_match() {
+        let requested = freiburg();
+        // A whole degree away: what it looks like when the request is ignored
+        // and the flight controller uses its own first fix.
+        let reported = GpsGlobalOrigin {
+            latitude_e7: requested.latitude_e7 + 10_000_000,
+            ..requested
+        };
+        assert!(!requested.matches(&reported));
+        // As does an altitude that is off by more than a meter.
+        let reported = GpsGlobalOrigin {
+            altitude_mm: requested.altitude_mm + 1_001,
+            ..requested
+        };
+        assert!(!requested.matches(&reported));
+    }
+
+    #[test]
+    fn the_verdict_follows_what_the_flight_controller_reports() {
+        let mut status = GpsOriginStatus {
+            requested: Some(freiburg()),
+            reported: None,
+            check: GpsOriginCheck::Awaiting,
+        };
+        assert_eq!(status.on_reported(freiburg()), GpsOriginCheck::Confirmed);
+
+        let elsewhere = GpsGlobalOrigin::from_degrees_and_meters(0.0, 0.0, 0.0);
+        assert_eq!(status.on_reported(elsewhere), GpsOriginCheck::Mismatched);
+        assert_eq!(status.reported, Some(elsewhere));
+    }
+
+    /// Without a request there is nothing to check, so whatever the flight
+    /// controller reports is simply recorded.
+    #[test]
+    fn nothing_is_checked_when_nothing_was_requested() {
+        let mut status = GpsOriginStatus::default();
+        assert_eq!(status.on_reported(freiburg()), GpsOriginCheck::NotRequested);
+        assert_eq!(status.reported, Some(freiburg()));
     }
 }

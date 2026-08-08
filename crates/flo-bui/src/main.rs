@@ -1088,7 +1088,7 @@ impl App {
                         <div class="qqvalue"> {tilt_deg} </div>
                     </div>
 
-
+                    { gps_origin_div(&state.gps_origin) }
                 </div>
             }
         } else {
@@ -1151,6 +1151,49 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 }
 
 // -----------------------------------------------------------------------------
+
+/// The flight controller's local-position origin: what FLO asked for, what the
+/// flight controller reports, and whether they agree.
+///
+/// Everything FLO derives from `LOCAL_POSITION_NED` is relative to this point,
+/// so an origin that did not take hold has to be visible rather than buried in
+/// a log file.
+fn gps_origin_div(status: &GpsOriginStatus) -> Html {
+    if status.check == GpsOriginCheck::NotRequested && status.reported.is_none() {
+        // No flight controller, or no origin configured and none reported.
+        return html! {};
+    }
+    let value = match status.reported {
+        Some(origin) => origin.to_string(),
+        None => "waiting for flight controller".to_string(),
+    };
+    let (note, class) = match status.check {
+        GpsOriginCheck::NotRequested => (String::new(), "gps-origin-ok"),
+        GpsOriginCheck::Awaiting => (
+            "not yet confirmed by the flight controller".to_string(),
+            "gps-origin-warn",
+        ),
+        GpsOriginCheck::Confirmed => ("✓ confirmed".to_string(), "gps-origin-ok"),
+        GpsOriginCheck::Mismatched => (
+            match status.requested {
+                Some(requested) => {
+                    format!("⚠ DID NOT STICK — configured origin is {requested}")
+                }
+                None => "⚠ did not stick".to_string(),
+            },
+            "gps-origin-error",
+        ),
+    };
+    html! {
+        <div class="qqblock">
+            <div class="qqkey">{ "GPS origin (lat, lon, alt)" }</div>
+            <div class="qqvalue">{ value }</div>
+            if !note.is_empty() {
+                <div class={class}>{ note }</div>
+            }
+        </div>
+    }
+}
 
 /// Validate the add-target modal's two fields.
 ///

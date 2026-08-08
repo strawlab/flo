@@ -120,6 +120,25 @@ VAAPI `Ffmpeg` form. See [the crate
 README](crates/flo-strand-cam/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
+## GPS origin
+
+Everything FLO computes from `LOCAL_POSITION_NED` is relative to the flight
+controller's local-position origin. The BUI's Info block shows the origin the
+flight controller reports, alongside the one the config asks for:
+
+```yaml
+mavlink:
+  set_gps_global_origin: [48.0038, 7.8449, 278.0]   # lat °, lon °, alt m
+```
+
+A `SET_GPS_GLOBAL_ORIGIN` can be ignored — the flight controller may refuse it,
+or may already have an origin from its own first fix — so FLO checks that the
+request actually took hold. If the reported origin differs from the configured
+one by more than about a meter, FLO re-sends the request up to five times and
+then leaves an error in the log and a **DID NOT STICK** warning in the BUI. A
+flight controller that never reports an origin at all is logged as an error
+after ten seconds.
+
 ## Post-trigger ("pre-capture") recording
 
 FLO can hold recent data in RAM so that a recording started *after* something

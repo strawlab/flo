@@ -9,7 +9,9 @@ pub mod events;
 pub use events::*;
 
 pub mod drone_structs;
-pub use drone_structs::{DroneChannelData, GnssRtkMode, RcConfig};
+pub use drone_structs::{
+    DroneChannelData, GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus, RcConfig,
+};
 
 mod eucm_camera;
 
@@ -800,6 +802,11 @@ pub struct DeviceState {
     /// [`FloControllerConfig::record_tracking_cam_mp4_with_floz`].
     #[serde(default)]
     pub record_tracking_cam_mp4: bool,
+    /// The flight controller's local-position origin, as requested by FLO and
+    /// as reported back. Everything FLO derives from `LOCAL_POSITION_NED`
+    /// refers to this point, so the operator needs to see it.
+    #[serde(default)]
+    pub gps_origin: GpsOriginStatus,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -813,6 +820,11 @@ pub struct LocalFloStateInner {
     /// True when LOCAL_POSITION_NED is >=10km from global origin.
     #[serde(default)]
     pub local_position_out_of_bounds: bool,
+    /// The local-position origin FLO asked for and the one the flight
+    /// controller reports. Mirrored into [`DeviceState::gps_origin`] each slow
+    /// tick so the BUI can show it.
+    #[serde(default)]
+    pub gps_origin: GpsOriginStatus,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -1265,6 +1277,7 @@ impl DeviceState {
             display_source: DisplaySource::default(),
             rtp_targets: Vec::new(),
             record_tracking_cam_mp4: default_true(),
+            gps_origin: GpsOriginStatus::default(),
         }
     }
 }

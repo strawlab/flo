@@ -255,7 +255,7 @@ struct FloCoordinator<'a> {
     flo_saver_tx: mpsc::UnboundedSender<SaveToDiskMsg>,
     osd_tx: Option<watch::Sender<OsdState>>,
     my_state: flo_core::DeviceState,
-    _local_flo_state: flo_core::LocalFloState,
+    local_flo_state: flo_core::LocalFloState,
     motors_tx: watch::Sender<MotorValueCache>,
     processing_feedback_tx: watch::Sender<ProcessingFeedback>,
     audio_stream: Option<&'a rodio::OutputStreamHandle>,
@@ -283,7 +283,7 @@ impl<'a> FloCoordinator<'a> {
         flo_saver_tx: mpsc::UnboundedSender<SaveToDiskMsg>,
         osd_tx: Option<watch::Sender<OsdState>>,
         my_state: flo_core::DeviceState,
-        _local_flo_state: LocalFloState,
+        local_flo_state: LocalFloState,
         motors_tx: watch::Sender<MotorValueCache>,
         processing_feedback_tx: watch::Sender<ProcessingFeedback>,
         audio_stream: Option<&'a rodio::OutputStreamHandle>,
@@ -322,7 +322,7 @@ impl<'a> FloCoordinator<'a> {
             flo_saver_tx,
             osd_tx,
             my_state,
-            _local_flo_state,
+            local_flo_state,
             motors_tx,
             processing_feedback_tx,
             audio_stream,
@@ -567,6 +567,9 @@ impl<'a> FloCoordinator<'a> {
         self.my_state.mode = self.tracking_state.mode; //my_state.mode is just a mirror of tracking_state.mode, make sure it's up to date
         // Reflect the writer's current pre-capture buffer fill.
         self.my_state.precapture_buffered_secs = *self.precapture_buffered_rx.borrow();
+        // Mirror the flight controller's local-position origin so the BUI can
+        // show it. flo-mavlink is the only writer.
+        self.my_state.gps_origin = self.local_flo_state.read().unwrap().gps_origin;
         // relay to HTTP server
         self.from_device_http_tx.send(self.my_state.clone())?;
         self.my_state.stereopsis_state = None; //a hack to skip failed stereopsis detections because of centroid packets not arriving promptly, as there are many
