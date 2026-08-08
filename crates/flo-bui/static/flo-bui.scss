@@ -97,22 +97,35 @@ $body-color-light: #404040;
     }
 }
 
+// The layout is phone-first: a single column of boxes that grows into the
+// available width, with everything sized in `em` off this base so one font-size
+// scales the whole UI. 16px is also the smallest size at which iOS Safari does
+// not zoom the page when an input takes the focus.
 body {
-    font: 10px 'Helvetica Neue', Helvetica, Arial, sans-serif;
-    line-height: 1.4em;
+    font: 16px/1.4 'Helvetica Neue', Helvetica, Arial, sans-serif;
     margin: 0 auto;
+    max-width: 46rem;
+    padding: 0 0.4rem 1.5rem;
+    -webkit-text-size-adjust: 100%;
 }
 
-.center {
-    display: block;
-    margin-left: auto;
-    margin-right: auto;
+h1 {
+    font-size: 1.35rem;
+    margin: 0;
 }
 
-.logo-img {
-    background: black;
-    padding: 10px;
-    border-radius: 7px;
+h2 {
+    font-size: 1.05rem;
+    margin: 0 0 0.3em;
+}
+
+h3 {
+    font-size: 1rem;
+    margin: 0 0 0.25em;
+}
+
+p {
+    margin: 0.4em 0;
 }
 
 button {
@@ -120,11 +133,19 @@ button {
     padding: 0;
     border: 0;
     background: none;
-    font-size: 100%;
     vertical-align: baseline;
-    font-family: inherit;
     font-weight: inherit;
     color: inherit;
+}
+
+// Form controls do not inherit the document font, so they have to be told —
+// otherwise they fall back to a size that triggers focus-zoom on phones.
+button,
+input,
+textarea,
+select {
+    font-family: inherit;
+    font-size: 1rem;
 }
 
 button,
@@ -132,35 +153,29 @@ input[type="checkbox"] {
     outline: none;
 }
 
-.wrapper {
-    margin-left: 20px;
-    margin-right: 20px;
-    margin-top: 2px;
-    margin-bottom: 2px;
+input[type="checkbox"],
+input[type="radio"] {
+    width: 1.15em;
+    height: 1.15em;
 }
 
 // The title, the connection indicator and the connect-a-device button share a
-// single compact row so that the controls below start near the top of the page.
+// single compact row so that the controls below start near the top of a phone
+// screen.
 .app-header {
     display: flex;
     align-items: center;
     gap: 0.6em;
-    padding: 0.35em 0.2em;
+    padding: 0.35rem 0.2rem;
 }
 
-// Without this the button carries `.btn`'s padding and margin, which is most of
-// what made it dominate the top of the page.
 .app-header .btn {
     padding: 0.35em 0.6em;
-    margin: 0;
-}
-
-.app-header h1 {
-    font-size: 1.35em;
-    margin: 0;
+    font-size: 0.9rem;
 }
 
 .app-header-status {
+    font-size: 0.9rem;
     white-space: nowrap;
 }
 
@@ -171,35 +186,55 @@ input[type="checkbox"] {
 .modal-container {
     z-index: 100;
     position: fixed;
-    top: 50px;
-    left: 50px;
-    right: 50px;
-    height: 400px;
-    padding: 20px;
+    top: 0.5rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    max-width: 30rem;
+    margin: 0 auto;
+    max-height: calc(100vh - 1rem);
+    overflow-y: auto;
+    padding: 1rem;
     box-sizing: border-box;
+    border-radius: 6px;
     box-shadow: 0 2px 4px 0 rgba(223, 25, 25, 0.92),
         0 25px 50px 0 rgba(0, 255, 255, 0.91);
 }
 
-.rtp-target-modal {
-    height: auto;
-}
-
 .rtp-target-list {
-    padding-left: 1.5em;
+    list-style: none;
+    padding: 0;
+    margin: 0.2em 0;
 }
 
-// Keep the bitrate and Delete together at the end of the row.
+.rtp-target-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.3em 0;
+}
+
+.rtp-target-addr {
+    word-break: break-all;
+}
+
+// Keep the bitrate and Delete together at the end of the row, wherever the
+// address wraps to.
 .rtp-target-controls {
-    margin-left: 1em;
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    margin-left: auto;
 }
 
-.rtp-target-delete {
-    margin-left: 1em;
+.rtp-target-bitrate {
+    display: flex;
+    align-items: center;
+    gap: 0.3em;
 }
 
 .rtp-target-bitrate input {
-    width: 7em;
+    width: 5em;
 }
 
 .rtp-target-address {
@@ -208,8 +243,10 @@ input[type="checkbox"] {
 }
 
 .rtp-target-address input {
-    width: 18em;
-    margin-left: 0.5em;
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 0.25em;
 }
 
 .rtp-target-error {
@@ -232,19 +269,17 @@ input[type="checkbox"] {
 .camshow-source-choices {
     display: flex;
     flex-wrap: wrap;
-    gap: 1em;
+    gap: 0.3em;
 }
 
-.camshow-source-choice input {
-    margin-right: 0.35em;
-}
-
-// The connect-a-device modal grows with its content (a list of per-interface
-// QR codes) rather than using the fixed height of a plain modal.
-.connect-device-modal {
-    height: auto;
-    max-height: calc(100vh - 100px);
-    overflow-y: auto;
+// Each choice is a full-height row so it can be hit with a thumb; they sit side
+// by side once there is room for them.
+.camshow-source-choice {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    flex: 1 1 12em;
+    padding: 0.45em 0.2em;
 }
 
 .connect-device-list {
@@ -263,6 +298,8 @@ input[type="checkbox"] {
     background: #fff;
     padding: 8px;
     border-radius: 6px;
+    max-width: 100%;
+    height: auto;
 }
 
 .connect-device-link {
@@ -275,37 +312,104 @@ input[type="checkbox"] {
     color: #b00;
 }
 
-.infoCircle {
-    display: inline-block;
-    width: 1.0em;
-    height: 1.0em;
-
-    text-align: center;
-    line-height: 0.9em;
-}
-
 .border-1px {
-    padding: 2px;
-    margin: 2px;
+    padding: 0.5em;
+    margin: 0.4em 0;
     box-sizing: border-box;
-    border-radius: 3px;
+    border-radius: 4px;
 }
 
 .btn {
-    padding: 15px;
-    margin: 15px;
+    padding: 0.5em 0.8em;
+    margin: 0;
     box-sizing: border-box;
-    border-radius: 3px;
+    border-radius: 4px;
+    min-height: 2.4em;
 }
 
 .btn:enabled {
     cursor: pointer;
 }
 
+// Rows of buttons wrap instead of overflowing a narrow screen; the gap replaces
+// the margins the buttons used to carry.
+.button-holder {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.3em 0;
+}
+
+// The mode changes are the controls reached for in the field, so they get the
+// full width and a thumb-sized target.
+.mode-actions .btn {
+    flex: 1 1 6em;
+    min-height: 3em;
+    font-weight: bold;
+}
+
+// Seven focus steps, spread evenly across whatever width there is. They are
+// narrow enough that the labels have to be kept from wrapping.
+.focus-actions .btn {
+    flex: 1 1 2em;
+    min-height: 2.8em;
+    padding: 0.5em 0.3em;
+    white-space: nowrap;
+}
+
+// Label on the left, its input on the right, wrapping only if the label is too
+// long to share the line.
+.field-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4em;
+    padding: 0.35em 0.2em;
+    cursor: pointer;
+}
+
+.field-row input {
+    flex: 0 1 7em;
+    min-width: 4em;
+}
+
+.check-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.45em 0.2em;
+    cursor: pointer;
+}
+
+.recording-row {
+    word-break: break-word;
+}
+
+.precapture-status {
+    font-size: 0.9rem;
+}
+
+.camera-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.2em 0;
+}
+
+.camera-list li {
+    padding: 0.2em 0;
+}
+
+.camera-list a {
+    display: inline-block;
+    padding: 0.25em 0;
+}
+
 // ----
 
 .my-padding {
-    padding: 5px;
+    padding: 0.3em 0.2em;
 }
 
 input[type="text"].ranged-value-input-error {
@@ -315,14 +419,50 @@ input[type="text"].ranged-value-input-error {
 .preformatted {
     font-family: monospace;
     white-space: pre;
+    font-size: 0.75rem;
+    padding: 0.4em;
+    border-radius: 3px;
+    // The YAML dump has long lines; scroll them rather than widening the page.
+    overflow-x: auto;
+}
+
+details summary {
+    cursor: pointer;
+    padding: 0.35em 0;
+}
+
+// Two readouts per row on a phone, three once there is room. Fixed counts
+// rather than `auto-fit`, so the pairs that belong together (pan with tilt,
+// distance with disparity) stay on one line instead of being split by whatever
+// number of columns happens to fit.
+.qqgrid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.3em 0.7em;
+}
+
+@media (min-width: 30rem) {
+    .qqgrid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+.qqblock {
+    min-width: 0;
+}
+
+// A value too long to sit in one column (the GPS origin) takes the whole row.
+.qqblock-wide {
+    grid-column: 1 / -1;
 }
 
 .qqkey {
     font-weight: lighter;
-    font-size: smaller;
+    font-size: 0.8rem;
 }
 
 .qqvalue {
     font-weight: bolder;
-    font-size: larger;
+    font-size: 1.15rem;
+    overflow-wrap: break-word;
 }

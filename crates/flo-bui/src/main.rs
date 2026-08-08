@@ -576,7 +576,7 @@ impl Component for App {
                 </div>
                 <div class="border-1px">
                     <h2>{"Mode"}</h2>
-                    <div>
+                    <div class="my-padding recording-row">
                         <RecordingPathWidget
                         label="Record .floz file"
                         value={self.floz_recording_path.clone()}
@@ -585,13 +585,9 @@ impl Component for App {
                     </div>
                     { self.tracking_cam_mp4_view(ctx) }
                     { self.precapture_view(ctx) }
-                    <div class="button-holder">
+                    <div class="button-holder mode-actions">
                         <Button title="Set Home" onsignal={ctx.link().callback(|_| Msg::SetHomePositionFromCurrent)}/>
-                    </div>
-                    <div class="button-holder">
                         <Button title="Go Home" onsignal={ctx.link().callback(|_| Msg::SwitchToOpenLoop)}/>
-                    </div>
-                    <div class="button-holder">
                         <Button title="Track" onsignal={ctx.link().callback(|_| Msg::SwitchToClosedLoop)}/>
                     </div>
                 </div>
@@ -608,43 +604,35 @@ impl Component for App {
                 { self.remove_rtp_target_dialog(ctx) }
                 <div class="border-1px">
                     <h2>{"Home Position"}</h2>
-                    <div class="my-padding">
-                        <label>{"PAN (degrees)"}
-                            <TypedInput<AngleDegrees>
-                                storage={self.pan_center_degrees.clone()}
-                                placeholder={"pan"}
-                                on_input={ctx.link().callback(|_| Msg::SetHomePosition)}
-                                />
-                        </label>
-                    </div>
-                    <div class="my-padding">
-                        <label>{"TILT (degrees)"}
-                            <TypedInput<AngleDegrees>
-                                storage={self.tilt_center_degrees.clone()}
-                                placeholder={"tilt"}
-                                on_input={ctx.link().callback(|_| Msg::SetHomePosition)}
-                                />
-                        </label>
-                    </div>
-                    <div class="my-padding">
-                        <label>{"FOCUS DISTANCE (meters)"}
-                            <TypedInput<DistanceMeters>
-                                storage={self.distance_center.clone()}
-                                placeholder={"focus"}
-                                on_input={ctx.link().callback(|_| Msg::SetHomePosition)}
-                                />
-                        </label>
-                    </div>
-                    <div class="my-padding">
-                        <label>{"focus correction (m)"}
-                            <TypedInput<DistanceMeters>
-                                storage={self.distance_corr_m.clone()}
-                                placeholder={"m"}
-                                on_input={ctx.link().callback(|_| Msg::SetDistanceCorrection)}
-                                />
-                        </label>
-                    </div>
-                    <div class="button-holder">
+                    <label class="field-row">{"PAN (degrees)"}
+                        <TypedInput<AngleDegrees>
+                            storage={self.pan_center_degrees.clone()}
+                            placeholder={"pan"}
+                            on_input={ctx.link().callback(|_| Msg::SetHomePosition)}
+                            />
+                    </label>
+                    <label class="field-row">{"TILT (degrees)"}
+                        <TypedInput<AngleDegrees>
+                            storage={self.tilt_center_degrees.clone()}
+                            placeholder={"tilt"}
+                            on_input={ctx.link().callback(|_| Msg::SetHomePosition)}
+                            />
+                    </label>
+                    <label class="field-row">{"FOCUS DISTANCE (meters)"}
+                        <TypedInput<DistanceMeters>
+                            storage={self.distance_center.clone()}
+                            placeholder={"focus"}
+                            on_input={ctx.link().callback(|_| Msg::SetHomePosition)}
+                            />
+                    </label>
+                    <label class="field-row">{"focus correction (m)"}
+                        <TypedInput<DistanceMeters>
+                            storage={self.distance_corr_m.clone()}
+                            placeholder={"m"}
+                            on_input={ctx.link().callback(|_| Msg::SetDistanceCorrection)}
+                            />
+                    </label>
+                    <div class="button-holder focus-actions">
                         <Button title="---" onsignal={ctx.link().callback(|_| Msg::AdjustFocus(-3))}/>
                         <Button title="--" onsignal={ctx.link().callback(|_| Msg::AdjustFocus(-2))}/>
                         <Button title="-" onsignal={ctx.link().callback(|_| Msg::AdjustFocus(-1))}/>
@@ -778,7 +766,7 @@ impl App {
                     _ => None,
                 });
         html! {
-            <div class="modal-container rtp-target-modal" onkeydown={onkeydown}>
+            <div class="modal-container" onkeydown={onkeydown}>
                 <h2>{"Add H.264 RTP target"}</h2>
                 <p>{"Enter the destination as host:port (for example, 192.168.1.20:5600)."}</p>
                 <label class="rtp-target-address">
@@ -821,7 +809,7 @@ impl App {
             return html! {};
         };
         html! {
-            <div class="modal-container rtp-target-modal">
+            <div class="modal-container">
                 <h2>{"Remove H.264 RTP target?"}</h2>
                 <p>{format!("Stop streaming H.264 to {target}?")}</p>
                 <div class="button-holder">
@@ -845,7 +833,7 @@ impl App {
         }
 
         html! {
-            <ul>
+            <ul class="camera-list">
                 { for self.strand_cameras.iter().map(|camera| {
                     html! {
                         <li key={camera.name.clone()}>
@@ -868,16 +856,14 @@ impl App {
             .map(|state| state.record_tracking_cam_mp4)
             .unwrap_or_default();
         html! {
-            <div class="my-padding">
-                <label>
-                    <input
-                        type="checkbox"
-                        checked={checked}
-                        onchange={ctx.link().callback(move |_| Msg::SetRecordTrackingCamMp4(!checked))}
-                        />
-                    {" Also record tracking camera .mp4 files with the .floz"}
-                </label>
-            </div>
+            <label class="check-row">
+                <input
+                    type="checkbox"
+                    checked={checked}
+                    onchange={ctx.link().callback(move |_| Msg::SetRecordTrackingCamMp4(!checked))}
+                    />
+                <span>{"Also record tracking camera .mp4 files with the .floz"}</span>
+            </label>
         }
     }
 
@@ -911,21 +897,21 @@ impl App {
         // past. Say so rather than let it silently do the wrong thing.
         let disabled = window <= 0.0 || recording;
         html! {
-            <div class="my-padding">
-                <label>{"Pre-capture buffer (seconds, 0 disables) "}
+            <div>
+                <label class="field-row">{"Pre-capture buffer (seconds, 0 disables)"}
                     <TypedInput<Seconds>
                         storage={self.precapture_seconds.clone()}
                         placeholder={"seconds"}
                         on_input={ctx.link().callback(|_| Msg::SetPreCaptureSeconds)}
                         />
                 </label>
-                <span style="margin-left: 0.5em;">{status}</span>
                 <div class="button-holder">
                     <Button
                         title="Post-trigger record"
                         disabled={disabled}
                         onsignal={ctx.link().callback(|_| Msg::DoPreCaptureRecord)}
                         />
+                    <span class="precapture-status">{status}</span>
                 </div>
             </div>
         }
@@ -1116,7 +1102,7 @@ impl App {
             let tilt_deg = format!("{:.1}°", state.cached_motors.tilt.degrees());
             let cam_state = state.cam_stale.as_msg();
             html! {
-                <div>
+                <div class="qqgrid">
                     <div class="qqblock">
                        <div class="qqkey">{ "Mode" }</div>
                        <div class="qqvalue"> {format!("{}", state.mode) } </div>
@@ -1157,11 +1143,24 @@ impl App {
             let state_string = serde_yaml::to_string(state).unwrap();
             html! {
                 <div>
-                    <p>{"Device ID: "}{format!("{:?}",state.device_id)}</p>
-                    <p>{"Mode: "}{format!("{:?}",state.mode)}</p>
-                    <div class="preformatted">
-                        {state_string}
+                    <div class="qqgrid">
+                        <div class="qqblock">
+                            <div class="qqkey">{"Device ID"}</div>
+                            <div class="qqvalue">{format!("{:?}",state.device_id)}</div>
+                        </div>
+                        <div class="qqblock">
+                            <div class="qqkey">{"Mode"}</div>
+                            <div class="qqvalue">{format!("{:?}",state.mode)}</div>
+                        </div>
                     </div>
+                    // The full dump is long enough to bury everything below it
+                    // on a phone, so it starts collapsed.
+                    <details>
+                        <summary>{"Full state (YAML)"}</summary>
+                        <div class="preformatted">
+                            {state_string}
+                        </div>
+                    </details>
                 </div>
             }
         } else {
@@ -1241,7 +1240,7 @@ fn gps_origin_div(status: &GpsOriginStatus) -> Html {
         ),
     };
     html! {
-        <div class="qqblock">
+        <div class="qqblock qqblock-wide">
             <div class="qqkey">{ "GPS origin (lat, lon, alt)" }</div>
             <div class="qqvalue">{ value }</div>
             if !note.is_empty() {
