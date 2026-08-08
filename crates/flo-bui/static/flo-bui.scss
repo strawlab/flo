@@ -189,11 +189,12 @@ input[type="checkbox"] {
     padding-left: 1.5em;
 }
 
-.rtp-target-delete {
+// Keep the bitrate and Delete together at the end of the row.
+.rtp-target-controls {
     margin-left: 1em;
 }
 
-.rtp-target-bitrate {
+.rtp-target-delete {
     margin-left: 1em;
 }
 

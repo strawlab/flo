@@ -1,6 +1,6 @@
 use console_error_panic_hook::set_once as set_panic_hook;
 
-use std::{fmt, net::SocketAddr};
+use std::{collections::BTreeMap, fmt, net::SocketAddr};
 
 use gloo_events::EventListener;
 use gloo_timers::callback::Interval;
@@ -72,6 +72,41 @@ impl std::fmt::Display for Seconds {
     }
 }
 
+/// An H.264 encoder bitrate in kbps, as typed by the operator.
+#[derive(Clone, Debug, PartialEq)]
+struct Kbps(u32);
+
+/// Why a typed bitrate was rejected.
+///
+/// `TypedInput` needs the parse error to be `Clone`, which `ParseIntError`
+/// already is — but zero has to be rejected too, so both cases end up here.
+#[derive(Clone, Debug, PartialEq)]
+struct KbpsParseError;
+
+impl std::fmt::Display for KbpsParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "expected a whole number of kbps greater than zero")
+    }
+}
+
+impl std::error::Error for KbpsParseError {}
+
+impl std::str::FromStr for Kbps {
+    type Err = KbpsParseError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().parse::<u32>() {
+            Ok(kbps) if kbps > 0 => Ok(Kbps(kbps)),
+            _ => Err(KbpsParseError),
+        }
+    }
+}
+
+impl std::fmt::Display for Kbps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 struct App {
     floz_recording_path: Option<RecordingPath>,
     webcam_recording_path: Option<RecordingPath>,
@@ -89,6 +124,13 @@ struct App {
     last_gamepad_timestamp: f64,
     /// Set once the server broadcasts that it is shutting down.
     server_quit: bool,
+    /// One editable bitrate per current RTP target, keyed by destination.
+    ///
+    /// The state broadcast arrives several times a second, so the field cannot
+    /// be driven straight from `last_state`: re-rendering would overwrite a
+    /// half-typed number. As with the home-position fields, the storage takes
+    /// the server's value only while the input is unfocused.
+    rtp_bitrates: BTreeMap<SocketAddr, TypedInputStorage<Kbps>>,
     adding_rtp_target: bool,
     new_rtp_target: String,
     new_rtp_bitrate: String,
@@ -124,7 +166,7 @@ enum Msg {
     SetNewRtpTarget(String),
     SetNewRtpBitrate(String),
     AddRtpTarget,
-    SetRtpTargetBitrate(String, String),
+    SetRtpTargetBitrate(SocketAddr, Kbps),
     ConfirmRemoveRtpTarget(String),
     CancelRemoveRtpTarget,
     RemoveRtpTarget,
@@ -257,6 +299,7 @@ impl Component for App {
             query_gamepad_interval: None,
             last_gamepad_timestamp: 0.0,
             server_quit: false,
+            rtp_bitrates: BTreeMap::new(),
             adding_rtp_target: false,
             new_rtp_target: String::new(),
             new_rtp_bitrate: flo_core::DEFAULT_RTP_BITRATE_KBPS.to_string(),
@@ -393,18 +436,15 @@ impl Component for App {
                     }
                 }
             }
-            Msg::SetRtpTargetBitrate(target, bitrate) => {
-                if let Ok(bitrate_kbps) = bitrate.parse::<u32>()
-                    && bitrate_kbps > 0
-                {
-                    self.send_message(
-                        flo_core::FloCommand::SetRtpTargetBitrate {
-                            target,
-                            bitrate_kbps,
-                        },
-                        ctx,
-                    );
-                }
+            Msg::SetRtpTargetBitrate(target, Kbps(bitrate_kbps)) => {
+                self.send_message(
+                    flo_core::FloCommand::SetRtpTargetBitrate {
+                        target: target.to_string(),
+                        bitrate_kbps,
+                    },
+                    ctx,
+                );
+                return false; // Don't update DOM; wait for backend state.
             }
             Msg::ConfirmRemoveRtpTarget(target) => {
                 self.rtp_target_pending_removal = Some(target);
@@ -472,6 +512,24 @@ impl Component for App {
                                     new_state.webcam_recording_path.clone();
                                 self.precapture_seconds
                                     .set_if_not_focused(Seconds(new_state.precapture_window_secs));
+
+                                // Drop the storage of any target that is gone
+                                // and add one for any target that is new, so
+                                // the map always mirrors the target list.
+                                self.rtp_bitrates.retain(|addr, _| {
+                                    new_state.rtp_targets.iter().any(|t| &t.addr == addr)
+                                });
+                                for target in &new_state.rtp_targets {
+                                    self.rtp_bitrates
+                                        .entry(target.addr)
+                                        .or_insert_with(|| {
+                                            TypedInputStorage::from_initial(Kbps(
+                                                target.bitrate_kbps,
+                                            ))
+                                        })
+                                        .set_if_not_focused(Kbps(target.bitrate_kbps));
+                                }
+
                                 self.last_state = Some(new_state);
                             }
                             BuiEventData::Config(cfg) => {
@@ -654,44 +712,46 @@ impl App {
         }
     }
 
+    /// The current RTP destinations, each with an editable bitrate.
+    ///
+    /// The rows come from `rtp_bitrates` rather than from `last_state` so that
+    /// what is drawn and what the input fields hold cannot drift apart. The
+    /// bitrate is sent when the field loses the focus or on Enter, which is
+    /// what makes a typed value stick across the state broadcasts that arrive
+    /// while it is being typed.
     fn rtp_targets_view(&self, ctx: &Context<Self>) -> Html {
-        let targets = self
-            .last_state
-            .as_ref()
-            .map(|state| &state.rtp_targets)
-            .cloned()
-            .unwrap_or_default();
         html! {
             <div class="my-padding">
-                if targets.is_empty() {
+                if self.rtp_bitrates.is_empty() {
                     <p>{"camshow is not currently streaming H.264 to any targets."}</p>
                 } else {
                     <ul class="rtp-target-list">
-                        { for targets.into_iter().map(|target| {
-                            let addr = target.addr.to_string();
-                            let addr_for_bitrate = addr.clone();
-                            let addr_for_delete = addr.clone();
+                        { for self.rtp_bitrates.iter().map(|(addr, bitrate)| {
+                            let addr_string = addr.to_string();
+                            let addr_for_bitrate = *addr;
+                            let addr_for_delete = addr_string.clone();
                             html! {
-                                <li key={addr.clone()}>
-                                    <code>{addr}</code>
-                                    <label class="rtp-target-bitrate">
-                                        <input
-                                            type="number"
-                                            min="1"
-                                            value={target.bitrate_kbps.to_string()}
-                                            onchange={ctx.link().callback(move |event: Event| {
-                                                Msg::SetRtpTargetBitrate(
-                                                    addr_for_bitrate.clone(),
-                                                    event.target_unchecked_into::<HtmlInputElement>().value(),
-                                                )
-                                            })}
-                                            />
-                                        {" kbps"}
-                                    </label>
-                                    <button
-                                        class="btn rtp-target-delete"
-                                        onclick={ctx.link().callback(move |_| Msg::ConfirmRemoveRtpTarget(addr_for_delete.clone()))}
-                                        >{"Delete"}</button>
+                                <li key={addr_string.clone()} class="rtp-target-item">
+                                    <code class="rtp-target-addr">{addr_string}</code>
+                                    // The bitrate and Delete stay together as
+                                    // one group, so on a narrow screen they
+                                    // wrap below the address as a unit.
+                                    <div class="rtp-target-controls">
+                                        <label class="rtp-target-bitrate">
+                                            <TypedInput<Kbps>
+                                                storage={bitrate.clone()}
+                                                placeholder={"kbps"}
+                                                on_send_valid={ctx.link().callback(move |kbps| {
+                                                    Msg::SetRtpTargetBitrate(addr_for_bitrate, kbps)
+                                                })}
+                                                />
+                                            {" kbps"}
+                                        </label>
+                                        <button
+                                            class="btn rtp-target-delete"
+                                            onclick={ctx.link().callback(move |_| Msg::ConfirmRemoveRtpTarget(addr_for_delete.clone()))}
+                                            >{"Delete"}</button>
+                                    </div>
                                 </li>
                             }
                         }) }
@@ -1206,9 +1266,9 @@ fn parse_new_rtp_target(target: &str, bitrate: &str) -> Result<(String, u32), St
             "\"{target}\" is not a numeric address and port, such as 192.168.1.20:5600."
         ));
     }
-    match bitrate.trim().parse::<u32>() {
-        Ok(bitrate_kbps) if bitrate_kbps > 0 => Ok((target.to_owned(), bitrate_kbps)),
-        _ => Err("The bitrate must be a whole number of kbps greater than zero.".to_owned()),
+    match bitrate.parse::<Kbps>() {
+        Ok(Kbps(bitrate_kbps)) => Ok((target.to_owned(), bitrate_kbps)),
+        Err(_) => Err("The bitrate must be a whole number of kbps greater than zero.".to_owned()),
     }
 }
 
@@ -1241,7 +1301,26 @@ impl From<u16> for ReadyState {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_new_rtp_target;
+    use super::{Kbps, parse_new_rtp_target};
+
+    #[test]
+    fn parses_a_bitrate_and_rejects_zero() {
+        // The field is trimmed because the operator types into it directly.
+        assert_eq!(" 4000 ".parse::<Kbps>(), Ok(Kbps(4000)));
+        // Zero would stop the encoder, so it is a parse error and shows up as
+        // an invalid field rather than being sent.
+        assert!("0".parse::<Kbps>().is_err());
+        assert!("-1".parse::<Kbps>().is_err());
+        assert!("4.5".parse::<Kbps>().is_err());
+        assert!("".parse::<Kbps>().is_err());
+    }
+
+    #[test]
+    fn a_bitrate_round_trips_through_its_display() {
+        // `TypedInputStorage` formats with `Display` and reads back with
+        // `FromStr`, so the two have to agree.
+        assert_eq!(Kbps(4000).to_string().parse::<Kbps>(), Ok(Kbps(4000)));
+    }
 
     #[test]
     fn accepts_a_numeric_address_and_port() {
