@@ -689,6 +689,13 @@ impl Component for App {
 
                     { self.view_state() }
                 </div>
+                <footer id="footer">
+                {format!(
+                    "FLO version: {} (revision {})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("GIT_HASH")
+                )}
+                </footer>
             </div>
         }
     }
