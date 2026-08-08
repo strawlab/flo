@@ -515,6 +515,27 @@ impl Component for App {
                     { self.info_div() }
                 </div>
                 <div class="border-1px">
+                    <h2>{"Mode"}</h2>
+                    <div>
+                        <RecordingPathWidget
+                        label="Record .floz file"
+                        value={self.floz_recording_path.clone()}
+                        ontoggle={ctx.link().callback(|checked| {Msg::DoRecordMotorPositionsFloz(checked)})}
+                        />
+                    </div>
+                    { self.tracking_cam_mp4_view(ctx) }
+                    { self.precapture_view(ctx) }
+                    <div class="button-holder">
+                        <Button title="Set Home" onsignal={ctx.link().callback(|_| Msg::SetHomePositionFromCurrent)}/>
+                    </div>
+                    <div class="button-holder">
+                        <Button title="Go Home" onsignal={ctx.link().callback(|_| Msg::SwitchToOpenLoop)}/>
+                    </div>
+                    <div class="button-holder">
+                        <Button title="Track" onsignal={ctx.link().callback(|_| Msg::SwitchToClosedLoop)}/>
+                    </div>
+                </div>
+                <div class="border-1px">
                     <h2>{"Cameras"}</h2>
                     { self.camera_links() }
                     { self.camshow_display_view(ctx) }
@@ -571,33 +592,6 @@ impl Component for App {
                         <Button title="+" onsignal={ctx.link().callback(|_| Msg::AdjustFocus(1))}/>
                         <Button title="++" onsignal={ctx.link().callback(|_| Msg::AdjustFocus(2))}/>
                         <Button title="+++" onsignal={ctx.link().callback(|_| Msg::AdjustFocus(3))}/>
-                    </div>
-                </div>
-
-                <div class="border-1px">
-                    <h2>{"Mode"}</h2>
-                    // <div class="button-holder">
-                    //     <Button title="Sawtooth" onsignal={ctx.link().callback(|_| Msg::Sawtooth)}/>
-                    //     <Button title="Voltage Follower ADC1, ADC2" onsignal={ctx.link().callback(|_| Msg::VoltageFollower12)}/>
-                    //     <Button title="Voltage Follower ADC1, ADC3" onsignal={ctx.link().callback(|_| Msg::VoltageFollower13)}/>
-                    // </div>
-                    <div>
-                        <RecordingPathWidget
-                        label="Record .floz file"
-                        value={self.floz_recording_path.clone()}
-                        ontoggle={ctx.link().callback(|checked| {Msg::DoRecordMotorPositionsFloz(checked)})}
-                        />
-                    </div>
-                    { self.tracking_cam_mp4_view(ctx) }
-                    { self.precapture_view(ctx) }
-                    <div class="button-holder">
-                        <Button title="Set Home" onsignal={ctx.link().callback(|_| Msg::SetHomePositionFromCurrent)}/>
-                    </div>
-                    <div class="button-holder">
-                        <Button title="Go Home" onsignal={ctx.link().callback(|_| Msg::SwitchToOpenLoop)}/>
-                    </div>
-                    <div class="button-holder">
-                        <Button title="Track" onsignal={ctx.link().callback(|_| Msg::SwitchToClosedLoop)}/>
                     </div>
                 </div>
 
