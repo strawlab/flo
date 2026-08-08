@@ -250,7 +250,11 @@ Output options:
   `--rtp-dest`): `--rtp-encoder <ffmpeg|openh264>`, `--rtp-bitrate-kbps`,
   `--rtp-fps`, `--rtp-mtu`, `--rtp-idr-interval`, `--rtp-dump-annexb <FILE>`.
   The flo BUI can add and remove destinations and change each
-  destination's bitrate independently while camshow runs.
+  destination's bitrate independently while camshow runs. Its **Send to all
+  targets** checkbox stops and resumes every stream at once, keeping the
+  destinations so they need not be retyped; adding a destination switches
+  sending back on, since adding one is a request to send. Sending is on by
+  default.
 
 Other options:
 

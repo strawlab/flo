@@ -167,6 +167,7 @@ enum Msg {
     SetNewRtpBitrate(String),
     AddRtpTarget,
     SetRtpTargetBitrate(SocketAddr, Kbps),
+    SetRtpSendEnabled(bool),
     ConfirmRemoveRtpTarget(String),
     CancelRemoveRtpTarget,
     RemoveRtpTarget,
@@ -446,6 +447,10 @@ impl Component for App {
                 );
                 return false; // Don't update DOM; wait for backend state.
             }
+            Msg::SetRtpSendEnabled(enable) => {
+                self.send_message(flo_core::FloCommand::SetRtpSendEnabled(enable), ctx);
+                return false; // Don't update DOM; wait for backend state.
+            }
             Msg::ConfirmRemoveRtpTarget(target) => {
                 self.rtp_target_pending_removal = Some(target);
             }
@@ -709,11 +714,31 @@ impl App {
     /// what makes a typed value stick across the state broadcasts that arrive
     /// while it is being typed.
     fn rtp_targets_view(&self, ctx: &Context<Self>) -> Html {
+        // Defaults to on: without state from the server yet, the switch shows
+        // what a running FLO does, rather than reading as "off" for a moment.
+        let send_enabled = self
+            .last_state
+            .as_ref()
+            .map(|state| state.rtp_send_enabled)
+            .unwrap_or(true);
         html! {
             <div class="my-padding">
+                <label class="check-row">
+                    <input
+                        type="checkbox"
+                        checked={send_enabled}
+                        onchange={ctx.link().callback(move |_| Msg::SetRtpSendEnabled(!send_enabled))}
+                        />
+                    <span>{"Send to all targets"}</span>
+                </label>
                 if self.rtp_bitrates.is_empty() {
                     <p>{"camshow is not currently streaming H.264 to any targets."}</p>
                 } else {
+                    if !send_enabled {
+                        <p class="rtp-send-off">{"Sending is off. The targets below are kept, \
+                                                  and streaming resumes when this is switched \
+                                                  back on."}</p>
+                    }
                     <ul class="rtp-target-list">
                         { for self.rtp_bitrates.iter().map(|(addr, bitrate)| {
                             let addr_string = addr.to_string();

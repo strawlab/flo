@@ -222,6 +222,19 @@ fn get_device_id() -> Result<flo_core::DeviceId> {
     Ok(device_id)
 }
 
+/// The streams camshow should be sending right now.
+///
+/// With sending switched off this is empty while `state.rtp_targets` still holds
+/// the destinations, which is what lets one switch stop every stream without
+/// losing the list.
+fn rtp_targets_to_send(state: &flo_core::DeviceState) -> Vec<flo_core::RtpTarget> {
+    if state.rtp_send_enabled {
+        canonical_rtp_targets(state.rtp_targets.clone())
+    } else {
+        Vec::new()
+    }
+}
+
 fn canonical_rtp_targets(targets: Vec<flo_core::RtpTarget>) -> Vec<flo_core::RtpTarget> {
     let mut unique = Vec::with_capacity(targets.len());
     for target in targets {
@@ -880,6 +893,11 @@ impl<'a> FloCoordinator<'a> {
                     self.my_state
                         .rtp_targets
                         .push(flo_core::RtpTarget { addr, bitrate_kbps });
+                    // Adding a destination is a request to send to it, so it
+                    // takes effect even if sending was switched off. Otherwise
+                    // the new target would sit there doing nothing, looking like
+                    // the add had failed.
+                    self.my_state.rtp_send_enabled = true;
                     self.publish_rtp_targets()?;
                 }
             }
@@ -925,9 +943,23 @@ impl<'a> FloCoordinator<'a> {
                     self.publish_rtp_targets()?;
                 }
             }
+            FloCommand::SetRtpSendEnabled(enable) => {
+                if self.my_state.rtp_send_enabled != enable {
+                    self.my_state.rtp_send_enabled = enable;
+                    self.publish_rtp_targets()?;
+                }
+            }
             FloCommand::SetRtpTargets(targets) => {
                 self.my_state.rtp_targets = canonical_rtp_targets(targets);
-                self.from_device_http_tx.send(self.my_state.clone())?;
+                if self.my_state.rtp_send_enabled {
+                    self.from_device_http_tx.send(self.my_state.clone())?;
+                } else {
+                    // This is camshow reporting the destinations it started
+                    // with, which it does once per connection. With sending
+                    // switched off they have to be taken away from it again, or
+                    // a camshow restart would quietly resume streaming.
+                    self.publish_rtp_targets()?;
+                }
             }
             FloCommand::SetRecordingState(enable) => {
                 if enable {
@@ -970,9 +1002,15 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
+    /// Tell camshow which streams to send, and the BUI what FLO now holds.
+    ///
+    /// While sending is disabled camshow is given an empty list: it is the same
+    /// message it already understands, so nothing about the protocol or camshow
+    /// changes, and the destinations stay in `my_state` ready to be switched
+    /// back on.
     fn publish_rtp_targets(&self) -> Result<()> {
-        let targets = canonical_rtp_targets(self.my_state.rtp_targets.clone());
-        self.rtp_targets_tx.send(targets)?;
+        self.rtp_targets_tx
+            .send(rtp_targets_to_send(&self.my_state))?;
         self.from_device_http_tx.send(self.my_state.clone())?;
         Ok(())
     }
@@ -2249,6 +2287,29 @@ mod tests {
             canonical_rtp_targets(vec![first, second, duplicate]),
             vec![first, second]
         );
+    }
+
+    /// One switch stops every stream, and does it without forgetting where the
+    /// streams were going.
+    #[test]
+    fn nothing_is_sent_while_sending_is_switched_off() {
+        let target = flo_core::RtpTarget {
+            addr: "127.0.0.1:5600".parse().unwrap(),
+            bitrate_kbps: 4000,
+        };
+        let mut state =
+            flo_core::DeviceState::new(flo_core::DeviceId::new([0; flo_core::DEVICE_ID_LEN]));
+        state.rtp_targets = vec![target];
+
+        assert!(state.rtp_send_enabled, "sending is on by default");
+        assert_eq!(rtp_targets_to_send(&state), vec![target]);
+
+        state.rtp_send_enabled = false;
+        assert_eq!(rtp_targets_to_send(&state), vec![]);
+        // The destination is kept, so switching back on restores it.
+        assert_eq!(state.rtp_targets, vec![target]);
+        state.rtp_send_enabled = true;
+        assert_eq!(rtp_targets_to_send(&state), vec![target]);
     }
 
     #[test]

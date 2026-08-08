@@ -795,9 +795,20 @@ pub struct DeviceState {
     /// What camshow is currently displaying and sending over RTP.
     #[serde(default)]
     pub display_source: DisplaySource,
-    /// H.264/RTP streams camshow is currently configured to send.
+    /// H.264/RTP streams camshow is configured to send.
+    ///
+    /// The list is kept whether or not sending is enabled, so switching
+    /// [`Self::rtp_send_enabled`] back on restores exactly these streams.
     #[serde(default)]
     pub rtp_targets: Vec<RtpTarget>,
+    /// Whether camshow is sending to the targets at all.
+    ///
+    /// One switch for every stream: with this off, camshow is told to send to
+    /// nothing, which frees the encoders and the uplink without the operator
+    /// having to delete destinations they will want back. Adding a target turns
+    /// it on, since adding one is a request to send.
+    #[serde(default = "default_true")]
+    pub rtp_send_enabled: bool,
     /// Whether starting a `.floz` recording also starts the tracking cameras'
     /// MP4 recordings. Initialized from
     /// [`FloControllerConfig::record_tracking_cam_mp4_with_floz`].
@@ -1297,6 +1308,7 @@ impl DeviceState {
             cam_stale: Default::default(),
             display_source: DisplaySource::default(),
             rtp_targets: Vec::new(),
+            rtp_send_enabled: default_true(),
             record_tracking_cam_mp4: default_true(),
             mavlink: None,
         }

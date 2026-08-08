@@ -253,6 +253,11 @@ input[type="radio"] {
     color: #f66;
 }
 
+// Says why a listed target is not being streamed to.
+.rtp-send-off {
+    color: #c80;
+}
+
 // The map links sit under the origin readout, at body size rather than the
 // bold, enlarged size of the value itself, and tall enough to tap.
 .map-links {

@@ -94,6 +94,9 @@ pub enum FloCommand {
     },
     /// Remove an H.264/RTP destination. The address must be `host:port`.
     RemoveRtpTarget(String),
+    /// Start or stop sending to every H.264/RTP destination at once. The
+    /// destinations themselves are kept either way.
+    SetRtpSendEnabled(bool),
     /// Synchronize the active H.264/RTP destinations reported by camshow.
     SetRtpTargets(Vec<crate::RtpTarget>),
 }
