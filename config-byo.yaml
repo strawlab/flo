@@ -74,25 +74,23 @@ tracking_thresholds:
 # current motor command
 motor_timeconstant_secs: .01
 #stereopsis parameters
-strand_cam_main:
-  url: http://127.0.0.1:3440
-  on_attach_json_commands:
-  - '{"ToCamera":{"SetImOpsCenterX":960}}'
-  - '{"ToCamera":{"SetImOpsCenterY":600}}'
-  - '{"ToCamera":{"SetImOpsThreshold":250}}'
-  - '{"ToCamera":{"ToggleImOpsDetection":true}}'
-  # - '{"ToCamera":{"SetMp4MaxFramerate": "Fps30"}}'
-  # - '{"ToCamera":{"SetMp4Codec":{"Ffmpeg":{"device_args":[["-vaapi_device","/dev/dri/renderD128"]],"pre_codec_args":[["-vf","format=nv12,hwupload"]],"codec":"h264_vaapi","post_codec_args":null}}}}'
-strand_cam_secondary:
-  url: http://127.0.0.1:3441
-  cam_name: Basler-40300216 # cross-checked against the name the camera reports
-  on_attach_json_commands:
-  - '{"ToCamera":{"SetImOpsCenterX":960}}'
-  - '{"ToCamera":{"SetImOpsCenterY":600}}'
-  - '{"ToCamera":{"SetImOpsThreshold":250}}'
-  - '{"ToCamera":{"ToggleImOpsDetection":true}}'
-  # - '{"ToCamera":{"SetMp4MaxFramerate": "Fps1"}}'
-  #- '{"ToCamera":{"SetMp4Codec":{"Ffmpeg":{"device_args":[["-vaapi_device","/dev/dri/renderD128"]],"pre_codec_args":[["-vf","format=nv12,hwupload"]],"codec":"h264_vaapi","post_codec_args":null}}}}'
+flo-strand-cam:
+  main:
+    backend: pylon
+    camera_name: Basler-1234567
+    imops:
+      enabled: true
+      threshold: 250
+      center_x: 960
+      center_y: 600
+  secondary:
+    backend: pylon
+    camera_name: Basler-40300216
+    imops:
+      enabled: true
+      threshold: 250
+      center_x: 960
+      center_y: 600
 stereopsis_calib:
   r1_m: 0.918
   x_offset_1_px: 191.7

@@ -17,10 +17,6 @@ pub struct ReplayArgs {
     /// Input .floz filename (a ZIP archive or an extracted directory).
     input: PathBuf,
 
-    /// UDP address of the running FLO controller (its `--udp-addr`).
-    #[arg(long, default_value = "127.0.0.1:8080")]
-    target: String,
-
     /// Playback speed multiplier. 2.0 plays twice as fast; 0.5 half speed.
     #[arg(long, default_value_t = 1.0)]
     speed: f64,
@@ -52,7 +48,7 @@ pub struct ReplayArgs {
 }
 
 /// Convert a recorded [`StampedMomentCentroid`] back into the [`MomentCentroid`]
-/// that originally arrived over UDP, applying any camera-name relabeling.
+/// that originally entered FLO, applying any camera-name relabeling.
 fn to_moment_centroid(row: &StampedMomentCentroid, new_cam_name: &str) -> MomentCentroid {
     MomentCentroid {
         schema_version: row.schema_version,
@@ -93,7 +89,7 @@ pub fn run_with_sink(
     // Build the camera-name relabeling map from first-seen order: the first
     // distinct camera becomes `--primary-cam`, the second `--secondary-cam`.
     // Cameras without an override keep their recorded name.
-    let cam_remap = build_cam_remap(&centroids, &opt);
+    let cam_remap = build_cam_remap(&centroids, opt);
     for (orig, new) in &cam_remap {
         if orig != new {
             tracing::info!("Relabeling camera {orig:?} -> {new:?}");
@@ -148,14 +144,6 @@ pub fn run_with_sink(
 
     tracing::info!("Done.");
     Ok(())
-}
-
-/// Run the legacy UDP transport adapter.
-pub fn run(opt: ReplayArgs) -> Result<()> {
-    let socket = crate::synth::connect_udp(&opt.target)?;
-    run_with_sink(&opt, |centroid| {
-        crate::synth::send_centroid(&socket, &centroid)
-    })
 }
 
 /// Emit every scheduled centroid once, sleeping between sends to reproduce the

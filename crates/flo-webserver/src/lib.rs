@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::State,
     response::{
         IntoResponse,
         sse::{Event, Sse},
@@ -10,7 +10,7 @@ use axum::{
 use base64::Engine;
 use eyre as anyhow;
 use futures_util::stream::Stream;
-use http::{HeaderValue, StatusCode, header::ACCEPT, request::Parts};
+use http::{StatusCode, header::ACCEPT, request::Parts};
 use preferences_serde1::{AppInfo, Preferences};
 use std::{collections::BTreeMap, convert::Infallible, io::Write, net::SocketAddr};
 use tokio::sync::watch;
@@ -26,11 +26,6 @@ pub const APP_INFO: AppInfo = AppInfo {
     author: "AndrewStraw",
 };
 const COOKIE_SECRET_KEY: &str = "cookie-secret-base64";
-
-/// Authenticated Strand Camera sessions, keyed by the camera name reported by
-/// each server. The names are exposed as the first path component below
-/// `/camera`.
-pub type StrandCamSessions = BTreeMap<String, strand_bui_backend_session::HttpSession>;
 
 /// State-erased Strand Camera routers supplied by in-process camera hosts.
 /// FLO mounts each below its authenticated `/camera/<name>` path.
@@ -155,67 +150,6 @@ async fn device_connect_urls_handler(
     }
 }
 
-/// Forward one request through the authenticated HTTP session for a Strand
-/// Camera.
-///
-/// This intentionally follows `braid-run`'s camera proxy: only the `Accept`
-/// headers, HTTP method, and body need explicit forwarding. `HttpSession`
-/// supplies the camera's session cookie and the JSON content type.
-async fn cam_proxy_handler_inner(
-    app_state: AppState,
-    raw_cam_name: String,
-    cam_path: String,
-    req: axum::extract::Request,
-) -> impl IntoResponse {
-    tracing::debug!(
-        raw_cam_name,
-        cam_path,
-        ?req,
-        "proxying request to Strand Cam"
-    );
-    let accepts: Vec<HeaderValue> = req
-        .headers()
-        .get_all(http::header::ACCEPT)
-        .iter()
-        .cloned()
-        .collect();
-
-    let Some(mut session) = app_state.strand_cam_sessions.get(&raw_cam_name).cloned() else {
-        let message = format!("Unknown camera {raw_cam_name:?}");
-        tracing::warn!("{message}");
-        return Err((StatusCode::NOT_FOUND, message));
-    };
-
-    session
-        .req_accepts(&cam_path, &accepts, req.method().clone(), req.into_body())
-        .await
-        .map_err(|e| {
-            let message = format!("Failed request to Strand Cam {raw_cam_name:?}: {e}");
-            tracing::error!("{message}");
-            (StatusCode::BAD_GATEWAY, message)
-        })
-}
-
-async fn cam_proxy_handler_root(
-    State(app_state): State<AppState>,
-    session_key: axum_token_auth::SessionKey,
-    Path(raw_cam_name): Path<String>,
-    req: axum::extract::Request,
-) -> impl IntoResponse {
-    session_key.is_present();
-    cam_proxy_handler_inner(app_state, raw_cam_name, String::new(), req).await
-}
-
-async fn cam_proxy_handler(
-    State(app_state): State<AppState>,
-    session_key: axum_token_auth::SessionKey,
-    Path((raw_cam_name, cam_path)): Path<(String, String)>,
-    req: axum::extract::Request,
-) -> impl IntoResponse {
-    session_key.is_present();
-    cam_proxy_handler_inner(app_state, raw_cam_name, cam_path, req).await
-}
-
 /// Whether `uri`'s host is a loopback address (so unreachable from another
 /// device). Used to decide which connection URLs are worth offering to scan.
 fn is_loopback_uri(uri: &http::Uri) -> bool {
@@ -255,7 +189,6 @@ struct AppState {
     /// The cookie/token secret, used to mint a fresh short-lived access token
     /// when a device-connection QR code is requested.
     persistent_secret: cookie::Key,
-    strand_cam_sessions: StrandCamSessions,
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
 }
 
@@ -477,7 +410,6 @@ pub async fn main_loop(
     token_config: Option<axum_token_auth::TokenConfig>,
     persistent_secret: cookie::Key,
     trusted_networks: Vec<axum_token_auth::CidrBlock>,
-    strand_cam_sessions: StrandCamSessions,
     embedded_strand_cam_routers: EmbeddedStrandCamRouters,
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
     from_device_rx: watch::Receiver<DeviceState>,
@@ -487,7 +419,6 @@ pub async fn main_loop(
 ) -> Result<(), anyhow::Error> {
     let bound_addr = tcp_listener.local_addr()?;
     let token_required = token_config.is_some();
-    let has_strand_cam_sessions = !strand_cam_sessions.is_empty();
     let app_state = AppState {
         from_device_rx,
         user_commands_tx,
@@ -496,7 +427,6 @@ pub async fn main_loop(
         bound_addr,
         token_required,
         persistent_secret: persistent_secret.clone(),
-        strand_cam_sessions,
         strand_cam_proxy_info,
     };
 
@@ -529,26 +459,11 @@ pub async fn main_loop(
             .join("pkg"),
     );
 
-    // The legacy split-process path retains its HTTP proxy. Embedded cameras
-    // are mounted directly below the same authenticated FLO application.
-    let mut router = axum::Router::new()
+    // Embedded cameras are mounted directly below the authenticated FLO UI.
+    let router = axum::Router::new()
         .route(&format!("/{}", flo_core::EVENTS_PATH), get(events_handler))
         .route("/callback", post(callback_handler))
         .route("/device-connect-urls", get(device_connect_urls_handler));
-    if has_strand_cam_sessions {
-        router = router
-            .route(
-                &format!("/{}/{{encoded_cam_name}}/", flo_core::CAM_PROXY_PATH),
-                axum::routing::method_routing::any(cam_proxy_handler_root),
-            )
-            .route(
-                &format!(
-                    "/{}/{{encoded_cam_name}}/{{*path}}",
-                    flo_core::CAM_PROXY_PATH
-                ),
-                axum::routing::method_routing::any(cam_proxy_handler),
-            );
-    }
     let router = nest_embedded_camera_routers(router, embedded_strand_cam_routers)
         .fallback_service(serve_dir)
         .layer(
@@ -573,34 +488,10 @@ pub async fn main_loop(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
+    use axum::{Router, body::Body, routing::any};
+    use http::{Request, StatusCode};
 
-    use axum::{Router, body::Body, response::IntoResponse, routing::any};
-    use http::{Method, Request, StatusCode, header::ACCEPT};
-
-    use super::{
-        AppState, EmbeddedStrandCamRouters, StrandCamSessions, build_connect_urls,
-        cam_proxy_handler_inner, nest_embedded_camera_routers,
-    };
-
-    fn test_app_state(strand_cam_sessions: StrandCamSessions) -> AppState {
-        let state =
-            flo_core::DeviceState::new(flo_core::DeviceId::new([0; flo_core::DEVICE_ID_LEN]));
-        let (_, from_device_rx) = tokio::sync::watch::channel(state);
-        let (user_commands_tx, _) = tokio::sync::broadcast::channel(1);
-        let (_, quit_rx) = tokio::sync::watch::channel(false);
-        AppState {
-            from_device_rx,
-            user_commands_tx,
-            cfg: Default::default(),
-            quit_rx,
-            bound_addr: "127.0.0.1:0".parse().unwrap(),
-            token_required: false,
-            persistent_secret: cookie::Key::generate(),
-            strand_cam_sessions,
-            strand_cam_proxy_info: Vec::new(),
-        }
-    }
+    use super::{EmbeddedStrandCamRouters, build_connect_urls, nest_embedded_camera_routers};
 
     #[test]
     fn loopback_addr_has_no_token_and_is_loopback_only() {
@@ -626,97 +517,6 @@ mod tests {
         );
         // A token must actually be present after `token=`.
         assert!(url.len() > "http://192.168.1.5:3440/?token=".len());
-    }
-
-    #[test]
-    fn camera_proxy_forwards_path_method_accept_and_body() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            async fn echo_request(req: Request<Body>) -> String {
-                let method = req.method().clone();
-                let path = req.uri().path().to_string();
-                let accept = req
-                    .headers()
-                    .get(ACCEPT)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or_default()
-                    .to_string();
-                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                format!(
-                    "{method} {path} {accept} {}",
-                    String::from_utf8_lossy(&body)
-                )
-            }
-
-            let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let upstream_addr = upstream_listener.local_addr().unwrap();
-            let upstream_task = tokio::spawn(async move {
-                axum::serve(
-                    upstream_listener,
-                    Router::new()
-                        .route("/", any(echo_request))
-                        .route("/{*path}", any(echo_request)),
-                )
-                .await
-                .unwrap();
-            });
-
-            let info = strand_bui_backend_session_types::BuiServerAddrInfo::new(
-                upstream_addr,
-                strand_bui_backend_session_types::AccessToken::NoToken,
-            );
-            let jar = Arc::new(RwLock::new(cookie_store::CookieStore::new(None)));
-            let session = strand_bui_backend_session::create_session(&info, jar)
-                .await
-                .unwrap();
-            let mut sessions = StrandCamSessions::new();
-            sessions.insert("camera one".to_string(), session);
-
-            let request = Request::builder()
-                .method(Method::POST)
-                .uri("/ignored-by-inner-handler")
-                .header(ACCEPT, "text/event-stream")
-                .body(Body::from("hello camera"))
-                .unwrap();
-            let response = cam_proxy_handler_inner(
-                test_app_state(sessions),
-                "camera one".to_string(),
-                "nested/path".to_string(),
-                request,
-            )
-            .await
-            .into_response();
-
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            assert_eq!(
-                body.as_ref(),
-                b"POST /nested/path text/event-stream hello camera"
-            );
-
-            upstream_task.abort();
-        });
-    }
-
-    #[test]
-    fn camera_proxy_returns_not_found_for_unknown_camera() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let request = Request::builder().body(Body::empty()).unwrap();
-            let response = cam_proxy_handler_inner(
-                test_app_state(StrandCamSessions::new()),
-                "missing camera".to_string(),
-                String::new(),
-                request,
-            )
-            .await
-            .into_response();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        });
     }
 
     #[tokio::test]

@@ -1,10 +1,11 @@
 //! The composed FLO and Strand Camera application.
 //!
 //! This crate is the composition root for camera acquisition and FLO. It
-//! deliberately disables FLO's legacy UDP centroid listener and carries ImOps
-//! detections through bounded Tokio channels instead.
+//! carries ImOps detections through bounded Tokio channels.
 
 use color_eyre::eyre::{Context, Result, eyre};
+use flo_imops::{ImOpsDetection, ImOpsFrameMetadata, ImOpsProcessor, ImOpsProcessorConfig};
+use machine_vision_formats::{owned::OImage, pixel_format::Mono8};
 use serde::Deserialize;
 use std::{
     ffi::OsString,
@@ -12,20 +13,31 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use strand_cam::imops_processor::{
-    ImOpsDetection, ImOpsHostConfiguration, ImOpsHostOptions, ImOpsProcessorConfig,
+use strand_cam::{
+    HostAnnotation, HostFrame, StandaloneArgs, StandaloneOrBraid, StrandCamArgs,
+    StrandCamHostOptions,
 };
-use strand_cam::{StandaloneArgs, StandaloneOrBraid, StrandCamArgs, TimestampSource};
 use strand_cam_remote_control::{CamArg, CodecSelection, FfmpegCodecArgs, RecordingFrameRate};
-use tokio::sync::{mpsc, oneshot};
+use strand_http_video_streaming_types::Point;
+use tokio::sync::{mpsc, oneshot, watch};
+
+mod video_relay;
+use video_relay::{VideoRelay, VideoRelayConfig};
 
 const APP_NAME: &str = "flo-strand-cam";
-const CAMERA_DETECTION_QUEUE_CAPACITY: usize = 64;
+/// The lossless Strand Camera-to-FLO queue only absorbs scheduling jitter. A
+/// deeper queue would retain several full frames and add tracking latency.
+const CAMERA_FRAME_SINK_QUEUE_CAPACITY: usize = 2;
+
+/// Frames already received by FLO may be discarded for display. This queue is
+/// deliberately shallow so camshow can never backpressure detection.
+const CAMERA_VIDEO_RELAY_QUEUE_CAPACITY: usize = 2;
 
 #[derive(Debug, Clone)]
 struct CameraHostConfig {
     main: CameraConfig,
     secondary: Option<CameraConfig>,
+    video_relay: VideoRelayConfig,
 }
 
 impl CameraHostConfig {
@@ -48,7 +60,11 @@ impl CameraHostConfig {
             }
         }
 
-        Ok(Self { main, secondary })
+        Ok(Self {
+            main,
+            secondary,
+            video_relay: raw.video_relay,
+        })
     }
 }
 
@@ -58,6 +74,10 @@ struct RawCameraHostConfig {
     main: RawCameraConfig,
     #[serde(default)]
     secondary: Option<RawCameraConfig>,
+    /// Relaying camera frames to camshow for the operator's live view. Enabled
+    /// by default; the section only needs to be present to change something.
+    #[serde(default)]
+    video_relay: VideoRelayConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -219,6 +239,18 @@ fn default_threshold() -> u8 {
     200
 }
 
+impl ImOpsConfig {
+    /// The detector state FLO owns for one embedded camera. Strand Camera only
+    /// receives frames; it no longer needs a configuration channel for ImOps.
+    fn processor_config(self) -> ImOpsProcessorConfig {
+        ImOpsProcessorConfig {
+            threshold: self.threshold,
+            center_x: self.center_x,
+            center_y: self.center_y,
+        }
+    }
+}
+
 const CAMERA_CONTROL_QUEUE_CAPACITY: usize = 16;
 
 struct CameraControlChannels {
@@ -330,12 +362,8 @@ impl StrandCamHost {
         ctx: flo::CameraHostContext<'_>,
     ) -> Result<tokio::task::JoinHandle<Result<()>>> {
         let centroid_tx = ctx.centroid_tx.clone();
-        // Keep this receiver with the camera task. The first integration does
-        // not alter detection from FLO state yet, but this reserves the
-        // feedback path for time-aware processing without a later transport
-        // redesign.
-        let processing_feedback = ctx.processing_feedback.clone();
-        let mut host_shutdown_rx = ctx.shutdown_rx.clone();
+        let host_shutdown_rx = ctx.shutdown_rx.clone();
+        let display_source = ctx.display_source.clone();
         let data_dir = ctx.data_dir.as_std_path().to_owned();
 
         // Strand Camera's acquisition future is intentionally `!Send`: it
@@ -343,62 +371,72 @@ impl StrandCamHost {
         // camera hosts inside its caller-owned LocalSet, so keep this task on
         // that same runtime rather than creating another runtime or process.
         Ok(tokio::task::spawn_local(async move {
-            let _processing_feedback = processing_feedback;
-            let (detection_tx, mut detection_rx) = mpsc::channel(CAMERA_DETECTION_QUEUE_CAPACITY);
+            // Every embedded camera gets a lossless sink because tracking
+            // detection must see every processed frame. The optional relay is
+            // downstream of FLO and is allowed to discard display frames.
+            let video_relay_config = self.config.video_relay.clone();
+            let video_relay_enabled = video_relay_config.enabled;
+            let relay_channel = || {
+                video_relay_enabled
+                    .then(|| mpsc::channel(CAMERA_VIDEO_RELAY_QUEUE_CAPACITY))
+                    .unzip()
+            };
+            let (main_relay_tx, main_relay_rx) = relay_channel();
+            let (secondary_relay_tx, secondary_relay_rx) =
+                if video_relay_enabled && self.config.secondary.is_some() {
+                    relay_channel()
+                } else {
+                    (None, None)
+                };
+            let (main_frame_sink, main_frames) = mpsc::channel(CAMERA_FRAME_SINK_QUEUE_CAPACITY);
+            let (secondary_frame_sink, secondary_frames) = if self.config.secondary.is_some() {
+                let (tx, rx) = mpsc::channel(CAMERA_FRAME_SINK_QUEUE_CAPACITY);
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
+
             let main = CameraRuntime::new(
                 self.config.main,
-                detection_tx.clone(),
+                centroid_tx.clone(),
                 self.controls.main_tx.clone(),
                 self.controls.take_main_receiver(),
                 self.controls.take_main_router_sender(),
+                main_frame_sink,
+                main_frames,
+                main_relay_tx,
             );
             let secondary = self.config.secondary.map(|config| {
                 CameraRuntime::new(
                     config,
-                    detection_tx,
+                    centroid_tx,
                     self.controls.secondary_tx.clone(),
                     self.controls.take_secondary_receiver(),
                     self.controls.take_secondary_router_sender(),
+                    secondary_frame_sink
+                        .expect("secondary frame sink exists with secondary config"),
+                    secondary_frames
+                        .expect("secondary frame receiver exists with secondary config"),
+                    secondary_relay_tx,
                 )
             });
-            let mut camera_task = Box::pin(run_cameras(
-                main,
-                secondary,
-                data_dir,
-                host_shutdown_rx.clone(),
-            ));
 
-            loop {
-                tokio::select! {
-                    shutdown = host_shutdown_rx.changed() => {
-                        if shutdown.is_err() || *host_shutdown_rx.borrow() {
-                            camera_task.await?;
-                            return Ok(());
-                        }
-                    }
-                    camera = &mut camera_task => {
-                        camera?;
-                        return Err(eyre!("Strand Camera stopped unexpectedly"));
-                    }
-                    detection = detection_rx.recv() => {
-                        let Some(detection) = detection else {
-                            return Err(eyre!("Strand Camera ImOps detection channel closed"));
-                        };
-                        let Some(centroid) = detection_to_centroid(detection) else {
-                            continue;
-                        };
-                        match centroid_tx.try_send(centroid) {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                tracing::warn!("dropping ImOps detection because FLO's centroid queue is full");
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                return Err(eyre!("FLO centroid input channel closed"));
-                            }
-                        }
-                    }
+            // Best-effort and separate from camera supervision: camshow not
+            // running, or the video link failing, must never take a camera down.
+            tokio::task::spawn_local(async move {
+                let result = video_relay::run(VideoRelay {
+                    config: video_relay_config,
+                    main_tap: main_relay_rx,
+                    secondary_tap: secondary_relay_rx,
+                    display_source,
+                })
+                .await;
+                if let Err(e) = result {
+                    tracing::error!("video relay stopped: {e:?}");
                 }
-            }
+            });
+
+            run_cameras(main, secondary, data_dir, host_shutdown_rx).await
         }))
     }
 }
@@ -427,14 +465,10 @@ fn detection_to_centroid(detection: ImOpsDetection) -> Option<flo_core::MomentCe
             return None;
         }
     };
-    let timestamp_source = match detection.metadata.timestamp_source {
-        TimestampSource::BraidTrigger => flo_core::TimestampSource::BraidTrigger,
-        TimestampSource::HostAcquiredTimestamp => flo_core::TimestampSource::HostAcquiredTimestamp,
-    };
     Some(flo_core::MomentCentroid {
         schema_version: 2,
         framenumber: frame_number,
-        timestamp_source,
+        timestamp_source: detection.metadata.timestamp_source,
         timestamp: detection.metadata.timestamp,
         mu00: f64::from(detection.mu00),
         mu01: f64::from(detection.mu01),
@@ -447,53 +481,158 @@ fn detection_to_centroid(detection: ImOpsDetection) -> Option<flo_core::MomentCe
 
 struct CameraRuntime {
     config: CameraConfig,
-    imops: ImOpsHostOptions,
+    host_options: StrandCamHostOptions,
     embedded_http: strand_cam::EmbeddedHttpOptions,
-    // Retain the sender for the lifetime of the camera host. Future FLO policy
-    // can update this live control path without networking or a restart.
-    _imops_configuration_tx: tokio::sync::watch::Sender<ImOpsHostConfiguration>,
+    /// Dropping a join handle detaches the worker. It exits after Strand Camera
+    /// drops its frame sink, so joining it from the LocalSet would only add a
+    /// shutdown wait with no additional cleanup.
+    _imops_worker: std::thread::JoinHandle<()>,
 }
 
 impl CameraRuntime {
     fn new(
         config: CameraConfig,
-        detection_tx: mpsc::Sender<ImOpsDetection>,
+        centroid_tx: flo::CentroidInputSender,
         cam_args_tx: mpsc::Sender<CamArg>,
         cam_args_rx: mpsc::Receiver<CamArg>,
         router_tx: oneshot::Sender<axum::Router>,
+        frame_sink: mpsc::Sender<HostFrame>,
+        frames: mpsc::Receiver<HostFrame>,
+        relay_tx: Option<mpsc::Sender<HostFrame>>,
     ) -> Self {
-        let initial_cam_args = [
-            config
-                .mp4_max_framerate
-                .clone()
-                .map(CamArg::SetMp4MaxFramerate),
-            config.mp4_codec.clone().map(CamArg::SetMp4Codec),
-        ];
-        for arg in initial_cam_args.into_iter().flatten() {
-            cam_args_tx
-                .try_send(arg)
-                .expect("initial camera commands fit the bounded control queue");
-        }
-        let (imops_configuration_tx, imops_configuration_rx) =
-            tokio::sync::watch::channel(ImOpsHostConfiguration {
-                enabled: config.imops.enabled,
-                processor: ImOpsProcessorConfig {
-                    threshold: config.imops.threshold,
-                    center_x: config.imops.center_x,
-                    center_y: config.imops.center_y,
-                },
-            });
+        send_initial_camera_args(&config, &cam_args_tx);
+        let (annotation_tx, annotation_rx) = watch::channel(HostAnnotation::default());
+        let imops_worker = spawn_imops_worker(
+            config.camera_name.clone(),
+            config.imops,
+            frames,
+            centroid_tx,
+            relay_tx,
+            annotation_tx,
+        );
         Self {
             config,
-            imops: ImOpsHostOptions {
-                configuration_rx: imops_configuration_rx,
-                detection_tx,
+            host_options: StrandCamHostOptions {
                 cam_args_rx: Some(cam_args_rx),
+                frame_sink: Some(frame_sink),
+                annotation_rx: Some(annotation_rx),
             },
             embedded_http: strand_cam::EmbeddedHttpOptions { router_tx },
-            _imops_configuration_tx: imops_configuration_tx,
+            _imops_worker: imops_worker,
         }
     }
+}
+
+fn send_initial_camera_args(config: &CameraConfig, cam_args_tx: &mpsc::Sender<CamArg>) {
+    let initial_cam_args = [
+        config
+            .mp4_max_framerate
+            .clone()
+            .map(CamArg::SetMp4MaxFramerate),
+        config.mp4_codec.clone().map(CamArg::SetMp4Codec),
+    ];
+    for arg in initial_cam_args.into_iter().flatten() {
+        cam_args_tx
+            .try_send(arg)
+            .expect("initial camera commands fit the bounded control queue");
+    }
+}
+
+fn spawn_imops_worker(
+    camera_name: String,
+    config: ImOpsConfig,
+    mut frames: mpsc::Receiver<HostFrame>,
+    centroid_tx: flo::CentroidInputSender,
+    relay_tx: Option<mpsc::Sender<HostFrame>>,
+    annotation_tx: watch::Sender<HostAnnotation>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("flo-imops-{camera_name}"))
+        .spawn(move || {
+            let processor = ImOpsProcessor::new(config.processor_config());
+            while let Some(frame) = frames.blocking_recv() {
+                if let Some(relay_tx) = &relay_tx {
+                    // Display is best-effort. Detection has already received
+                    // this frame, so a full relay queue is the intended place
+                    // to drop it.
+                    let _ = relay_tx.try_send(frame.clone());
+                }
+
+                let detection = if config.enabled {
+                    process_host_frame(&processor, &camera_name, &frame)
+                } else {
+                    None
+                };
+                let _ = annotation_tx.send(HostAnnotation {
+                    points: detection
+                        .as_ref()
+                        .and_then(|detection| detection.centroid)
+                        .map(|centroid| Point {
+                            x: centroid.x,
+                            y: centroid.y,
+                            theta: None,
+                            area: None,
+                        })
+                        .into_iter()
+                        .collect(),
+                    frame_number: frame.frame_number,
+                    timestamp: Some(frame.timestamp),
+                });
+
+                let Some(detection) = detection else {
+                    continue;
+                };
+                let Some(centroid) = detection_to_centroid(detection) else {
+                    continue;
+                };
+                match centroid_tx.try_send(centroid) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            "dropping ImOps detection because FLO's centroid queue is full"
+                        );
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::warn!(
+                            "ending ImOps worker because FLO's centroid queue is closed"
+                        );
+                        return;
+                    }
+                }
+            }
+        })
+        .expect("spawning FLO ImOps worker thread")
+}
+
+fn process_host_frame(
+    processor: &ImOpsProcessor,
+    camera_name: &str,
+    frame: &HostFrame,
+) -> Option<ImOpsDetection> {
+    let image = frame.image.borrow();
+    let Some(mono8) = image.as_static::<Mono8>() else {
+        tracing::warn!(
+            camera_name,
+            pixel_format = ?image.pixel_format(),
+            "ImOps only supports Mono8 frames"
+        );
+        return None;
+    };
+    let timestamp_source = match frame.timestamp_source {
+        strand_cam::TimestampSource::BraidTrigger => flo_core::TimestampSource::BraidTrigger,
+        strand_cam::TimestampSource::HostAcquiredTimestamp => {
+            flo_core::TimestampSource::HostAcquiredTimestamp
+        }
+    };
+    Some(processor.process(
+        OImage::copy_from(&mono8),
+        ImOpsFrameMetadata {
+            frame_number: frame.frame_number,
+            timestamp: frame.timestamp,
+            timestamp_source,
+            camera_name: camera_name.to_owned(),
+        },
+    ))
 }
 
 async fn run_cameras(
@@ -724,7 +863,7 @@ async fn run_camera(
 ) -> Result<()> {
     let CameraRuntime {
         config,
-        imops,
+        host_options,
         embedded_http,
         ..
     } = camera;
@@ -739,7 +878,7 @@ async fn run_camera(
                 args,
                 APP_NAME,
                 shutdown_rx,
-                Some(imops),
+                Some(host_options),
                 Some(embedded_http),
             )
             .await?;
@@ -753,7 +892,7 @@ async fn run_camera(
                 args,
                 APP_NAME,
                 shutdown_rx,
-                Some(imops),
+                Some(host_options),
                 Some(embedded_http),
             )
             .await?;
@@ -767,7 +906,7 @@ async fn run_camera(
                 args,
                 APP_NAME,
                 shutdown_rx,
-                Some(imops),
+                Some(host_options),
                 Some(embedded_http),
             )
             .await?;
@@ -781,7 +920,7 @@ async fn run_camera(
                 args,
                 APP_NAME,
                 shutdown_rx,
-                Some(imops),
+                Some(host_options),
                 Some(embedded_http),
             )
             .await?;
@@ -804,7 +943,7 @@ where
 {
     let CameraRuntime {
         config,
-        imops,
+        host_options,
         embedded_http,
         ..
     } = camera;
@@ -813,7 +952,7 @@ where
         strand_args(&config, data_dir),
         APP_NAME,
         shutdown_rx,
-        Some(imops),
+        Some(host_options),
         Some(embedded_http),
     )
     .await?;
@@ -884,7 +1023,7 @@ fn parse_composed_config(yaml: &str) -> Result<(CameraHostConfig, flo_core::FloC
 /// Run the composed application while retaining caller-supplied FLO options.
 ///
 /// Downstream binaries can use this to add ordinary [`flo::Extension`] values.
-/// The camera host and no-UDP policy remain owned by this crate.
+/// The camera host remains owned by this crate.
 pub fn run(options: flo::AppOptions) -> Result<()> {
     run_with_args(options, std::env::args_os())
 }
@@ -919,7 +1058,6 @@ fn compose_options(
         config,
         controls: CameraControlChannels::new(),
     }));
-    options.enable_udp_listener = false;
     Ok(options)
 }
 
@@ -927,14 +1065,13 @@ fn compose_options(
 mod tests {
     use super::*;
     use chrono::DateTime;
-    use strand_cam::imops_processor::ImOpsFrameMetadata;
 
     fn detection(frame_number: u64) -> ImOpsDetection {
         ImOpsDetection {
             metadata: ImOpsFrameMetadata {
                 frame_number,
                 timestamp: DateTime::UNIX_EPOCH,
-                timestamp_source: TimestampSource::HostAcquiredTimestamp,
+                timestamp_source: flo_core::TimestampSource::HostAcquiredTimestamp,
                 camera_name: "sim-camera".to_owned(),
             },
             mu00: 1.0,
@@ -957,6 +1094,26 @@ mod tests {
     #[test]
     fn drops_frame_numbers_flo_cannot_represent() {
         assert!(detection_to_centroid(detection(u64::from(u32::MAX) + 1)).is_none());
+    }
+
+    #[test]
+    fn imops_configuration_is_owned_by_flo() {
+        let config = ImOpsConfig {
+            enabled: false,
+            threshold: 123,
+            center_x: 456,
+            center_y: 789,
+        };
+
+        assert!(!config.enabled);
+        assert_eq!(
+            config.processor_config(),
+            ImOpsProcessorConfig {
+                threshold: 123,
+                center_x: 456,
+                center_y: 789,
+            }
+        );
     }
 
     #[test]
@@ -992,13 +1149,14 @@ mod tests {
     }
 
     #[test]
-    fn integrated_app_disables_legacy_udp_centroid_listener() {
+    fn integrated_app_composes_a_camera_host() {
         let (config, _) =
             parse_composed_config(include_str!("../../../config-flo-strand-cam-sim.yaml")).unwrap();
         assert!(
-            !compose_options(flo::AppOptions::default(), config)
+            compose_options(flo::AppOptions::default(), config)
                 .unwrap()
-                .enable_udp_listener
+                .camera_host
+                .is_some()
         );
     }
 
@@ -1028,7 +1186,6 @@ mod tests {
         let composed = compose_options(options, config).unwrap();
         assert_eq!(composed.extensions.len(), 1);
         assert_eq!(composed.extensions[0].name(), "dummy");
-        assert!(!composed.enable_udp_listener);
 
         let (config, _) =
             parse_composed_config(include_str!("../../../config-flo-strand-cam-sim.yaml")).unwrap();
@@ -1196,31 +1353,24 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let (detection_tx, _) = mpsc::channel(1);
             let (cam_args_tx, cam_args_rx) = mpsc::channel(CAMERA_CONTROL_QUEUE_CAPACITY);
-            let (router_tx, _router_rx) = oneshot::channel();
-            let camera = CameraRuntime::new(
-                CameraConfig {
-                    backend: CameraBackend::Sim,
-                    camera_name: "main".to_owned(),
-                    http_address: "127.0.0.1:3440".to_owned(),
-                    expected_fps: Some(60.0),
-                    mp4_max_framerate: Some(RecordingFrameRate::Fps60),
-                    mp4_codec: Some(CodecSelection::H264OpenH264),
-                    imops: ImOpsConfig {
-                        enabled: true,
-                        threshold: 200,
-                        center_x: 1,
-                        center_y: 1,
-                    },
-                    force_camera_sync_mode: None,
+            let config = CameraConfig {
+                backend: CameraBackend::Sim,
+                camera_name: "main".to_owned(),
+                http_address: "127.0.0.1:3440".to_owned(),
+                expected_fps: Some(60.0),
+                mp4_max_framerate: Some(RecordingFrameRate::Fps60),
+                mp4_codec: Some(CodecSelection::H264OpenH264),
+                imops: ImOpsConfig {
+                    enabled: true,
+                    threshold: 200,
+                    center_x: 1,
+                    center_y: 1,
                 },
-                detection_tx,
-                cam_args_tx,
-                cam_args_rx,
-                router_tx,
-            );
-            let mut cam_args_rx = camera.imops.cam_args_rx.unwrap();
+                force_camera_sync_mode: None,
+            };
+            send_initial_camera_args(&config, &cam_args_tx);
+            let mut cam_args_rx = cam_args_rx;
             assert!(matches!(
                 cam_args_rx.recv().await,
                 Some(CamArg::SetMp4MaxFramerate(RecordingFrameRate::Fps60))

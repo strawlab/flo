@@ -6,30 +6,35 @@ members = [
   "crates/camshow-protocol",
   "crates/flo-bui",
   "crates/flo-core",
+  "crates/flo-imops",
+  "crates/flo",
   "crates/flo-mavlink",
-  "crates/flo-tracing",
   "crates/flo-mavlink/mavlink-dump",
+  "crates/flo-strand-cam",
+  "crates/flo-tracing",
   "crates/flo-webserver",
+  "crates/floz-cli",
+  "crates/floz-parser",
+  "crates/floz-repack",
+  "crates/floz-replay",
+  "crates/floz-retrack",
+  "crates/floz-viewer",
+  "crates/floz-writer",
   "crates/h264-recorder",
   "crates/h264-recorder/h264-recorder-cli",
+  "crates/h264-rtp",
   "crates/osd-displayport",
   "crates/osd-overlay",
   "crates/osd-utils",
   "crates/platform-uuid",
   "crates/pwm-motor-types",
+  "crates/rtp-h264-streamer",
   "crates/sbgc-gimbal",
   "crates/simplebgc",
   "crates/simplebgc-derive",
   "crates/tilta-dongle-comms",
   "crates/tokio-mavlink",
-  "crates/trinamic", "crates/floz-parser",
-  "crates/floz-viewer",
-  "crates/floz-cli",
-  "crates/floz-repack",
-  "crates/floz-retrack",
-  "crates/floz-writer",
-  "crates/floz-replay",
-  "crates/flo-strand-cam",
+  "crates/trinamic",
 ]
 exclude = [
   "firmware/beamdriver",
@@ -37,104 +42,12 @@ exclude = [
   "firmware/rpipico-pantilt",
 ]
 
-[package]
-name = "flo"
-version = "0.1.0"
-edition = "2024"
-authors = [
-  "Andrew Straw <strawman@astraw.com>",
-  "Victor V. Titov <vv.titov@gmail.com>",
-  "Stephan Lochner <lochner@bio.uni-freiburg.de>",
-]
-description = "method for videography using a camera system that automatically moves to follow the subject"
-license = "MIT OR Apache-2.0"
-
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "flo"
-path = "src/main.rs"
-
-[dependencies]
-color-eyre.workspace = true
-thiserror.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_yaml.workspace = true
-bytes.workspace = true
-futures.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "sync", "time"] }
-tokio-util = { workspace = true, features = ["net", "codec", "time"] }
-tokio-serial.workspace = true
-tokio-stream = { workspace = true, features = ["sync"] }
-preferences-serde1.workspace = true
-cookie_store = "0.21.0"
-clap = { workspace = true, features = ["derive"] }
-memchr = "2.5.0"
-sha2 = "0.10.6"
-rand = "0.8.5"
-chrono = { workspace = true, default-features = true, features = ["serde"] }
-zip.workspace = true
-walkdir = "2.2"
-csv.workspace = true
-home.workspace = true
-iana-time-zone = "0.1.57"
-rodio = { version = "0.20", default-features = false, features = [
-  "wav",
-  "vorbis",
-] }
-flo-tracing.workspace = true
-floz-writer.workspace = true
-hyper = "1.1"
-tempfile = "3"
-tracing.workspace = true
-serde_cbor.workspace = true
-packed_struct = "0.3" # required by multiwii_serial_protocol_v2 0.1.12
-glob = "0.3.1"
-regex = "1.10.5"
-http-body-util = "0.1.0"
-axum.workspace = true
-camino.workspace = true
-nalgebra.workspace = true
-adskalman.workspace = true
-json-lines = { version = "0.1.1", features = ["codec"] }
-
-multiwii_serial_protocol_v2.workspace = true
-
-camshow-protocol.workspace = true
-flo-core.workspace = true
-flo-mavlink.workspace = true
-flo-webserver = { path = "crates/flo-webserver", default-features = false }
-h264-recorder.workspace = true
-osd-displayport.workspace = true
-osd-utils.workspace = true
-platform-uuid = { path = "crates/platform-uuid" }
-sbgc-gimbal = { path = "crates/sbgc-gimbal" }
-tilta-dongle-comms = { path = "crates/tilta-dongle-comms" }
-trinamic = { path = "crates/trinamic" }
-
-strand-bui-backend-session-types.workspace = true
-strand-bui-backend-session.workspace = true
-strand-cam-remote-control.workspace = true
-strand-cam-storetype.workspace = true
-
-# for rodio: if "error: could not find system library 'alsa' required by the 'alsa-sys' crate":
-# sudo apt install librust-alsa-sys-dev
-
-[dev-dependencies]
-approx.workspace = true
-floz-parser.workspace = true
-
-[target.'cfg(target_os = "windows")'.dependencies]
-ansi_term = "0.12.1"
-
 [workspace.dependencies]
-adskalman = { version = "0.17", default-features = false }
+adskalman = { version = "0.18", default-features = false }
 approx = "0.5"
 axum = "0.8.1"
 bytes = "1"
-cam-geom = "0.16"
+cam-geom = "0.17"
 camino = { version = "1.1.12", features = ["serde1"] }
 chrono = { version = "0.4.38", default-features = false }
 clap = "4.0.10"
@@ -143,6 +56,7 @@ csv = "1.3.0"
 enumflags2 = "0.7.7"
 eyre = "0.6.12"
 futures = "0.3.30"
+h264-reader = "0.8.0"
 http = "1"
 home = "0.5.4"
 if-addrs = "0.14"
@@ -155,16 +69,20 @@ yew = { version = "0.22.0", features = ["csr"] }
 machine-vision-formats = "0.1.5"
 mavlink = { version = "0.12.2", default-features = false }
 multiwii_serial_protocol_v2 = "0.1.12"
-nalgebra = { version = "0.34", default-features = false }
+nalgebra = { version = "0.35", default-features = false }
 num-derive = "0.4.2"
 num-traits = "0.2.19"
-opencv-ros-camera = { version = "0.16", features = ["serde-serialize"] }
+opencv-ros-camera = { version = "0.17", features = ["serde-serialize"] }
+openh264 = "0.9.7"
 percent-encoding = "2.3"
 preferences-serde1 = "2.0.0"
+rand = "0.9"
+rtp-rs = "0.6"
 serde = { version = "1.0.79", default-features = false }
 serde_json = "1.0.116"
 serde_yaml = "0.9.14"
 serde_cbor = "0.11.1"
+tempfile = "3"
 thiserror = "2"
 tokio = "1"
 tokio-serial = { package = "kioto-serial", version = "0.1.2" }
@@ -174,53 +92,57 @@ tracing = { version = "0.1.41" }
 tracing-subscriber = { version = "0.3.16", features = ["env-filter", "time"] }
 tracing-panic = "0.1.1"
 base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
 flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 zip = { version = "2.2.2", default-features = false, features = ["deflate", "time"] }
+# The same y4m fork strand-braid's y4m-writer builds against; a second, distinct
+# y4m version would make `y4m::Colorspace` values from this crate unusable in
+# `y4m_writer::encode_y4m_dynamic_frame`.
+y4m = { git = "https://github.com/astraw/y4m", rev = "6992473b73838c84cb659387b21d2ab2ebe94766" }
 
 camshow-protocol = { path = "crates/camshow-protocol" }
-flo = { path = ".", default-features = false }
+flo = { path = "crates/flo", default-features = false }
 flo-core = { path = "crates/flo-core", default-features = false }
+flo-imops = { path = "crates/flo-imops" }
+flo-strand-cam = { path = "crates/flo-strand-cam" }
 flo-tracing = { path = "crates/flo-tracing" }
 osd-overlay = { path = "crates/osd-overlay" }
 flo-mavlink = { path = "crates/flo-mavlink" }
 floz-parser = { path = "crates/floz-parser" }
 floz-writer = { path = "crates/floz-writer" }
 h264-recorder = { path = "crates/h264-recorder" }
+h264-rtp = { path = "crates/h264-rtp" }
 osd-displayport = { path = "crates/osd-displayport" }
 osd-utils = { path = "crates/osd-utils" }
 pwm-motor-types = { path = "crates/pwm-motor-types" }
+rtp-h264-streamer = { path = "crates/rtp-h264-streamer" }
 simplebgc = { path = "crates/simplebgc" }
 simplebgc-derive = { path = "crates/simplebgc-derive" }
 tokio-mavlink = { path = "crates/tokio-mavlink" }
 
-ads-webasm = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-build-util = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ci2 = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ci2-async = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ci2-pylon = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ci2-sim = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ci2-vimba = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ci2-webcam = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-download-verify = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ffmpeg-rewriter = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-ffmpeg-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-frame-source = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-srt-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-strand-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-strand-bui-backend-session-types = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-strand-cam = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef", default-features = false }
-strand-cam-bui-components = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-strand-cam-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-strand-dynamic-frame = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-zip-or-dir = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
-
-[features]
-default = ["bundle_files"]
-
-# Serve style
-## Bundle files into executable
-bundle_files = ["flo-webserver/bundle_files"]
-## Serve files from disk at runtime
-serve_files = ["flo-webserver/serve_files"]
+ads-webasm = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+build-util = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ci2 = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ci2-async = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ci2-pylon = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ci2-sim = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ci2-vimba = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ci2-webcam = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+download-verify = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ffmpeg-rewriter = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+ffmpeg-writer = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+frame-source = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+imops = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+srt-writer = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+strand-bui-backend-session = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+strand-bui-backend-session-types = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+strand-cam = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff", default-features = false }
+strand-cam-bui-components = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+strand-cam-remote-control = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+strand-cam-storetype = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+strand-dynamic-frame = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+strand-http-video-streaming-types = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+y4m-writer = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }
+zip-or-dir = { git = "https://github.com/strawlab/strand-braid", rev = "ec1a5641c3f53f85365dd6183a5f723c611188ff" }

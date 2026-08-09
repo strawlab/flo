@@ -1,0 +1,30 @@
+[package]
+name = "rtp-h264-streamer"
+version = "0.1.0"
+edition = "2024"
+description = "low-latency H.264 RTP/UDP streaming with pluggable encoders and runtime bitrate control"
+
+[dependencies]
+# deps published on crates.io
+chrono = { workspace = true, features = ["clock", "std"] }
+clap = { workspace = true, features = ["derive"] }
+color-eyre.workspace = true
+eyre.workspace = true
+h264-reader.workspace = true
+machine-vision-formats.workspace = true
+openh264.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-panic.workspace = true
+tracing-subscriber.workspace = true
+y4m.workspace = true
+
+# flo and strand-braid deps
+ffmpeg-writer.workspace = true
+frame-source = { workspace = true, features = ["openh264"] }
+h264-rtp.workspace = true
+strand-dynamic-frame.workspace = true
+y4m-writer = { workspace = true, features = ["openh264"] }
+
+[dev-dependencies]
+tempfile.workspace = true

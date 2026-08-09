@@ -36,6 +36,11 @@ pub struct CameraHostContext<'a> {
     pub processing_feedback: tokio::sync::watch::Receiver<ProcessingFeedback>,
     /// Set when FLO is stopping; camera hosts should shut down promptly.
     pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    /// What the operator's live view is currently showing. A host that can
+    /// relay its cameras' frames to that view should send only for the selected
+    /// camera and drop everything else — nothing is watching, so the bandwidth
+    /// and the copy are pure cost.
+    pub display_source: tokio::sync::watch::Receiver<flo_core::DisplaySource>,
     /// Directory where the host may write recordings or other camera outputs.
     pub data_dir: &'a camino::Utf8Path,
 }

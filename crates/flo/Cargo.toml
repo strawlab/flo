@@ -1,0 +1,77 @@
+[package]
+name = "flo"
+version = "0.1.0"
+edition = "2024"
+authors = [
+  "Andrew Straw <strawman@astraw.com>",
+  "Victor V. Titov <vv.titov@gmail.com>",
+  "Stephan Lochner <lochner@bio.uni-freiburg.de>",
+]
+description = "method for videography using a camera system that automatically moves to follow the subject"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+color-eyre.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+bytes.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "sync", "time"] }
+tokio-util = { workspace = true, features = ["net", "codec", "time"] }
+tokio-serial.workspace = true
+tokio-stream = { workspace = true, features = ["sync"] }
+clap = { workspace = true, features = ["derive"] }
+memchr = "2.5.0"
+sha2 = "0.10.6"
+rand.workspace = true
+chrono = { workspace = true, default-features = true, features = ["serde"] }
+zip.workspace = true
+walkdir = "2.2"
+csv.workspace = true
+home.workspace = true
+iana-time-zone = "0.1.57"
+rodio = { version = "0.20", default-features = false, features = ["wav", "vorbis"] }
+flo-tracing.workspace = true
+floz-writer.workspace = true
+hyper = "1.1"
+tempfile.workspace = true
+tracing.workspace = true
+packed_struct = "0.3" # required by multiwii_serial_protocol_v2 0.1.12
+glob = "0.3.1"
+regex = "1.10.5"
+http-body-util = "0.1.0"
+axum.workspace = true
+camino.workspace = true
+nalgebra.workspace = true
+adskalman.workspace = true
+json-lines = { version = "0.1.1", features = ["codec"] }
+
+multiwii_serial_protocol_v2.workspace = true
+
+camshow-protocol.workspace = true
+flo-core.workspace = true
+flo-mavlink.workspace = true
+flo-webserver = { path = "../flo-webserver", default-features = false }
+h264-recorder.workspace = true
+osd-displayport.workspace = true
+osd-utils.workspace = true
+platform-uuid = { path = "../platform-uuid" }
+sbgc-gimbal = { path = "../sbgc-gimbal" }
+tilta-dongle-comms = { path = "../tilta-dongle-comms" }
+trinamic = { path = "../trinamic" }
+
+strand-cam-remote-control.workspace = true
+
+[dev-dependencies]
+approx.workspace = true
+floz-parser.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+ansi_term = "0.12.1"
+
+[features]
+default = ["bundle_files"]
+bundle_files = ["flo-webserver/bundle_files"]
+serve_files = ["flo-webserver/serve_files"]

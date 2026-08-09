@@ -1,6 +1,6 @@
 [package]
 name = "camshow"
-description = "Webcam viewer with OSD overlay; receives canvas + recording control from flo over localhost"
+description = "Webcam capture with OSD overlay pushed from flo: optional local video display, optional H.264/RTP stream, and flo-controlled recording to disk"
 version = "0.1.0"
 edition = "2024"
 authors = [
@@ -12,15 +12,14 @@ authors = [
 [dependencies]
 camino.workspace = true
 chrono = { workspace = true, default-features = true, features = ["serde"] }
-home.workspace = true
 clap = { workspace = true, features = ["derive"] }
 color-eyre.workspace = true
 eyre.workspace = true
-flo-tracing.workspace = true
 futures.workspace = true
+home.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true
 
@@ -36,11 +35,14 @@ nokhwa = { version = "0.10.9", features = ["input-native"] }
 bg-movie-writer.workspace = true
 srt-writer.workspace = true
 strand-cam-remote-control.workspace = true
-strand-dynamic-frame.workspace = true
+strand-dynamic-frame = { workspace = true, features = ["convert-image"] }
 
 camshow-protocol.workspace = true
+flo-core.workspace = true
+flo-tracing.workspace = true
 osd-overlay.workspace = true
 osd-utils.workspace = true
+rtp-h264-streamer.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ansi_term = "0.12.1"

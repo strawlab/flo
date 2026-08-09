@@ -1,0 +1,13 @@
+[package]
+name = "flo-imops"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Threshold-and-moment image detection for FLO"
+
+[dependencies]
+chrono.workspace = true
+machine-vision-formats.workspace = true
+
+flo-core.workspace = true
+imops.workspace = true

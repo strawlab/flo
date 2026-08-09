@@ -24,12 +24,12 @@ impl<W: Write + Seek> FlozWriter<W> {
     pub fn start_file(&mut self, name: &str) -> zip::result::ZipResult<()> {
         if self.entry_count == 0 && name != README_FNAME {
             return Err(zip::result::ZipError::InvalidArchive(
-                "README.md must be the first FLOZ entry".into(),
+                "README.md must be the first FLOZ entry",
             ));
         }
         if self.entry_count != 0 && name == README_FNAME {
             return Err(zip::result::ZipError::InvalidArchive(
-                "README.md must only occur as the first FLOZ entry".into(),
+                "README.md must only occur as the first FLOZ entry",
             ));
         }
 

@@ -15,13 +15,9 @@ Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor V
 
 ## What is in this repository
 
-This repository contains two FLO application binaries. The standalone `flo`
-binary supports the legacy split-process deployment: it runs tracking and motor
-control, while Strand Camera must be launched separately to acquire and process
-images and send observations to `flo` over the network. The integrated
-`flo-strand-cam` binary is the preferred deployment for this repository. It
-brings the same FLO application together with Strand Camera acquisition and the
-experimental ImOps detector in one process, with image observations traveling
+The `flo-strand-cam` application is the FLO deployment in this repository. It
+combines FLO tracking and motor control with Strand Camera acquisition and the
+ImOps detector in one process. Images, detections, and camera controls travel
 through bounded Rust channels rather than a network socket.
 
 While FLO was originally designed as a generic camera tracking system for all
@@ -65,11 +61,11 @@ or SimpleBGC gimbal motors.
 
 ## Overview of top-level directories
 
-- `crates` Rust crates (libraries) used by `flo` and other software
+- `crates` Rust crates and application binaries, including `flo-strand-cam`
 - `firmware/beamdriver` Firmware for IR LED source
 - `firmware/flo-tilta-dongle` Firmware for USB dongle to control Tilta motors.
 - `firmware/rpipico-pantilt` Firmware for RPi Pico to control PWM servo motors.
-- `src` Rust source code for `flo`
+- `crates/flo` Rust source for the FLO controller
 
 ## Running with Strand Camera
 
@@ -85,7 +81,7 @@ open separate HTTP listeners.
 flo-strand-cam:
   main:
     backend: pylon
-    camera_name: Basler-40522040
+    camera_name: Basler-1234567
     expected_fps: 60.0
     mp4_max_framerate: Fps60
     imops:
@@ -95,7 +91,7 @@ flo-strand-cam:
       center_y: 600
   secondary: # omit for monocular tracking
     backend: pylon
-    camera_name: Basler-40522041
+    camera_name: Basler-40300216
     imops:
       enabled: true
       threshold: 200
@@ -109,82 +105,19 @@ Then run the composed executable:
 
 Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Camera
 observations and recording controls (including MP4 codec, frame-rate, and
-pre-trigger commands) use bounded in-process channels; the integrated binary
-does not use FLO's legacy UDP centroid listener. Do not configure the legacy
-`strand_cam_main` or `strand_cam_secondary` HTTP client sections in the same
-file. The optional `mp4_codec` accepts Strand Camera's `CodecSelection`; the
-simulated example includes its VAAPI `Ffmpeg` form. See [the crate
+pre-trigger commands) use bounded in-process channels. The optional `mp4_codec`
+accepts Strand Camera's `CodecSelection`; the simulated example includes its
+VAAPI `Ffmpeg` form. See [the crate
 README](crates/flo-strand-cam/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
 ## Running without hardware (simulation / testing)
 
-You can run the full `flo` controller — tracking, Kalman filter, distance
-estimation, recording, and web UI — with no camera or motor hardware attached.
-The `floz-replay` tool feeds centroid data to `flo` over FLO's legacy UDP
-channel, so the controller behaves as if a camera were present. This is useful
-for checking that new code runs, runs usefully, and that the UI works, before
-testing on real hardware.
-
-The legacy `floz-replay` CLI uses UDP and therefore involves **two processes**:
-start `flo` first so it is listening on its UDP port. If you start
-`floz-replay` with nothing listening, the send fails immediately with `Sending
-UDP packet: Connection refused` (the operating system reports the unreachable
-port).
-
-1. Start `flo` with a hardware-free config — one with no `strand_cam_*` blocks
-   (so nothing connects to Strand Camera) and no motor flags (so motor commands
-   are computed and harmlessly discarded). The bundled `config-sim-stereo.yaml`
-   is such a config, set up for stereo distance testing:
-
-   ```
-   flo --config config-sim-stereo.yaml
-   ```
-
-   By default `flo` listens for centroids on UDP `0.0.0.0:8080` and serves the
-   web UI on `--http-addr` (default port `2222`). Open the UI to watch tracking.
-
-2. In a second terminal, drive `flo` one of two ways. Both subcommands send to
-   `127.0.0.1:8080` by default, matching `flo`'s default UDP port; use
-   `--target <addr>` if you changed `flo`'s `--udp-addr`.
-
-   **Synthetic trajectory (`synth`)** generates centroids from a parametric
-   virtual-insect trajectory, projected through the config's calibration so the
-   angles and stereopsis distance the controller recovers match the requested
-   trajectory:
-
-   ```
-   cargo run -r -p floz-replay -- synth --config config-sim-stereo.yaml
-   ```
-
-   Pass `--config` the same file you gave `flo`, so the projection and the
-   controller agree. Useful options: `--distance <m>` and
-   `--distance-amplitude <m>` (target range and its sinusoidal variation, for
-   distance testing), `--azimuth-deg` / `--elevation-deg` / `--period` (the
-   angular sweep), `--rate <hz>`, `--duration <s>`, and `--loop`.
-   `config-sim-stereo.yaml` includes a `stereopsis_calib` and a secondary
-   camera, so distance tracking is exercised; pass `--no-stereo` (or use a
-   config without `stereopsis_calib`) to send only the primary camera.
-
-   **Replay a recording (`replay`)** re-emits the centroids saved in a `.floz`
-   file at their original cadence:
-
-   ```
-   cargo run -r -p floz-replay -- replay recording.floz
-   ```
-
-   Useful options: `--speed <x>`, `--loop`, `--start <s>`, `--duration <s>`, and
-   `--primary-cam` / `--secondary-cam` to relabel the recording's camera names
-   to the ones the controller expects (e.g. `synth-secondary` to match
-   `config-sim-stereo.yaml`).
-
-### In-process replay or synthesis (no UDP listener)
-
-`floz-replay-inprocess` composes the same source with FLO through
-`CentroidInputSender`; it deliberately disables the UDP listener. Source
-arguments come first and normal FLO arguments follow `--`. For now, `synth`
-still takes its calibration config explicitly, so pass the same config on both
-sides:
+You can run tracking, Kalman filtering, distance estimation, recording, and the
+web UI with no camera or motor hardware. `floz-replay-inprocess` embeds a
+synthetic or replay centroid source alongside the simulated camera host; source
+arguments come first and FLO arguments follow `--`. Pass the same configuration
+to the source and the host:
 
 ```
 cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
@@ -192,15 +125,26 @@ cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
   --config config-sim-stereo.yaml
 ```
 
-For a recording, replace the source portion with `replay recording.floz`.
-The original `floz-replay` commands remain available as compatibility UDP
-adapters while integrations migrate to the in-process input.
+`config-sim-stereo.yaml` supplies simulated primary and secondary cameras, so
+stereo distance tracking is exercised. For a recording, replace the source
+portion with `replay recording.floz`. Useful source options include
+`--distance`, `--distance-amplitude`, `--rate`, `--duration`, and `--loop`.
 
 ## `camshow` binary
 
-`camshow` is a separate desktop process that shows a USB webcam feed and draws
-an OSD overlay received from `flo` over TCP. Keeping it as a separate process
-means camera preview can keep running even while `flo` is restarted.
+`camshow` is a separate process that captures a USB webcam feed and draws an OSD
+overlay received from `flo` over TCP. Keeping it as a separate process means
+camera capture can keep running even while `flo` is restarted.
+
+Each displayed frame goes to whichever outputs the CLI enables — a local video
+display, an H.264/RTP stream, both at once, or neither. These are runtime
+options only; there is one binary and no build-time choice to make. Recording
+the clean (no-OSD) webcam video to disk on `flo`'s command happens regardless of
+which outputs are on.
+
+What is *displayed* is also selectable at runtime: the FPV webcam with its OSD,
+or a tracking camera relayed from `flo-strand-cam`. See [Switching the display
+source](#switching-the-display-source).
 
 ### Build and run
 
@@ -208,15 +152,39 @@ Build:
 
     cargo build --release -p camshow
 
-Run with defaults:
+Show the video locally:
 
-    cargo run --release -p camshow
+    cargo run --release -p camshow -- --gui --windowed
 
-Useful options:
+Stream to a groundstation, headless:
+
+    cargo run --release -p camshow -- --rtp-dest 192.168.1.20:5600
+
+Do both at once:
+
+    cargo run --release -p camshow -- --gui --rtp-dest 192.168.1.20:5600
+
+Output options:
+
+- `--gui` Show the video in a local window. Fullscreen unless `--windowed` is
+  also given. Without this flag no window is opened.
+- `--rtp-dest <HOST:PORT>` Stream the OSD-stamped video as H.264/RTP/UDP to this
+  destination, e.g. an OpenIPC-style groundstation receiver. Without this flag
+  nothing is streamed. Tuning (all optional, and only accepted alongside
+  `--rtp-dest`): `--rtp-encoder <ffmpeg|openh264>`, `--rtp-bitrate-kbps`,
+  `--rtp-fps`, `--rtp-mtu`, `--rtp-idr-interval`, `--rtp-dump-annexb <FILE>`.
+  `flo` can change the bitrate — or disable and re-enable the stream — while it
+  runs.
+
+Other options:
 
 - `--listen <ADDR>` TCP listen address for `flo` connections.
   Default: `127.0.0.1:2224`.
-- `--windowed` Run in a window instead of fullscreen.
+- `--video-listen <ADDR>` TCP listen address for the video link, over which
+  `flo-strand-cam` relays tracking-camera frames. Default: `127.0.0.1:2225`.
+- `--display-source <webcam|strand-cam-main|strand-cam-secondary>` What to
+  display and stream at startup. Default: `webcam`. `flo` overrides this
+  whenever the operator switches; mainly useful for bench testing.
 - `--fpv-cam <HUMAN_NAME>` Prefer a specific webcam name. If not set, the
   first available camera is used.
 - `--test-pattern` Show a fixed OSD test pattern whenever `flo` is not
@@ -225,7 +193,7 @@ Useful options:
 
 Example:
 
-    cargo run --release -p camshow -- --windowed --listen 127.0.0.1:2224
+    cargo run --release -p camshow -- --gui --windowed --listen 127.0.0.1:2224
 
 ### Connect `flo` to `camshow`
 
@@ -261,3 +229,61 @@ Or override from CLI when running `flo`:
 When recording is enabled in `flo`, recording start/stop is forwarded to
 `camshow`. `camshow` writes webcam MP4 output (and a matching OSD SRT sidecar)
 into the recording directory selected by `flo`.
+
+### Switching the display source
+
+While flying, the operator can switch what the local display and the RTP stream
+show between the FPV webcam and the main tracking (IR) camera. Configure an RC
+channel condition for it:
+
+```yaml
+mavlink_config:
+  # ...
+rc_config:
+  # ...
+  display_ir:
+    ch_no: 8
+    val_min: 0.5
+    val_max: 1.0
+```
+
+Unlike `track_start` / `track_stop` / `set_home`, this is a **level**, not a
+trigger: while the condition holds, the tracking camera is displayed; leave it
+and the view returns to the webcam. Losing the RC link also returns it to the
+webcam.
+
+The frames come from `flo-strand-cam`, which relays them to `camshow` over the
+video link. This is on by default and needs no configuration; the section exists
+to change it:
+
+```yaml
+flo-strand-cam:
+  main: # ...
+  video_relay:
+    enabled: true
+    camshow_video_addr: 127.0.0.1:2225   # matches camshow's --video-listen
+    max_fps: 30.0                        # per camera
+```
+
+Nothing is sent while the webcam is selected, so with no `display_ir` configured
+the relay costs nothing.
+
+Four things to know about the switched view:
+
+- **The recording never changes.** It is always the clean FPV webcam, and its
+  OSD sidecar keeps logging `flo`'s live canvas even while the tracking camera
+  is displayed.
+- **No OSD is drawn on a tracking-camera frame.** The canvas is calibrated for
+  the FPV camera's geometry, so it would put the marks in the wrong place. The
+  operator therefore has no on-screen telemetry while looking at the IR view.
+- **The RTP receiver resyncs on every switch.** The cameras have different
+  resolutions and the H.264 encoder cannot change size, so it is rebuilt with a
+  new SSRC. If a groundstation does not cope, the fix is to scale relayed frames
+  to the webcam's geometry so the stream format never changes.
+- **A dead relay falls back to the webcam.** If `flo` dies or the tracking
+  camera stalls, `camshow` shows the webcam and logs it rather than freezing on
+  the last frame. `camshow`'s frame watchdog watches the webcam only, so this is
+  never a process restart.
+
+`--display-source` on `camshow` sets the same thing at startup, which is how to
+bench-test the path without MAVLink.

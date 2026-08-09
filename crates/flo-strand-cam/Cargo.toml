@@ -17,9 +17,11 @@ color-eyre.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "sync", "time"] }
 tracing.workspace = true
 axum.workspace = true
+
+machine-vision-formats.workspace = true
 
 ci2.workspace = true
 ci2-async.workspace = true
@@ -28,10 +30,14 @@ ci2-sim.workspace = true
 ci2-vimba.workspace = true
 ci2-webcam.workspace = true
 
+camshow-protocol.workspace = true
 flo.workspace = true
 flo-core.workspace = true
+flo-imops.workspace = true
 strand-cam.workspace = true
 strand-cam-remote-control.workspace = true
+strand-dynamic-frame = { workspace = true, features = ["convert-image"] }
+strand-http-video-streaming-types.workspace = true
 
 [features]
 default = ["bundle_files"]

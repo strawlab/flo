@@ -22,16 +22,15 @@
 //! so the controller's pairing (constant frame offset, <5 ms timestamp skew)
 //! locks immediately.
 
-use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::Args;
-use color_eyre::eyre::{Context, Result, bail};
+use color_eyre::eyre::{Result, bail};
 
 use flo_core::{
     CentroidToAngleCalibration, FloControllerConfig, MomentCentroid, StereopsisCalibration,
-    TimestampSource, UdpMsg,
+    TimestampSource,
 };
 
 #[derive(Debug, Args)]
@@ -41,10 +40,6 @@ pub struct SynthArgs {
     /// the controller uses. Use the same config you pass to `flo`.
     #[arg(long)]
     config: PathBuf,
-
-    /// UDP address of the running FLO controller (its `--udp-addr`).
-    #[arg(long, default_value = "127.0.0.1:8080")]
-    target: String,
 
     /// Centroid output rate, in Hz (per camera).
     #[arg(long, default_value_t = 100.0)]
@@ -100,7 +95,7 @@ pub struct SynthArgs {
     primary_cam: String,
 
     /// Secondary (stereo) camera name. Should match the controller's
-    /// `strand_cam_secondary.cam_name`.
+    /// embedded secondary camera name.
     #[arg(long, default_value = "synth-secondary")]
     secondary_cam: String,
 
@@ -169,7 +164,6 @@ struct Sample {
     secondary: Option<MomentCentroid>,
 }
 
-#[expect(clippy::too_many_arguments)]
 fn project(
     opt: &SynthArgs,
     cfg: &FloControllerConfig,
@@ -326,35 +320,6 @@ pub fn run_with_sink(
     Ok(())
 }
 
-/// Run the legacy UDP transport adapter.
-pub fn run(opt: SynthArgs) -> Result<()> {
-    let cfg: FloControllerConfig = {
-        let rdr = std::fs::File::open(&opt.config)
-            .with_context(|| format!("Opening config {}", opt.config.display()))?;
-        serde_yaml::from_reader(rdr)
-            .with_context(|| format!("Parsing config {}", opt.config.display()))?
-    };
-    let socket = connect_udp(&opt.target)?;
-    run_with_sink(&opt, &cfg, |centroid| send_centroid(&socket, &centroid))
-}
-
-/// Bind a local UDP socket and connect it to `target` so `send` can be used.
-pub fn connect_udp(target: &str) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind("0.0.0.0:0").context("Binding local UDP socket")?;
-    socket
-        .connect(target)
-        .with_context(|| format!("Connecting UDP socket to {target}"))?;
-    Ok(socket)
-}
-
-/// CBOR-encode a centroid as the controller's [`UdpMsg`] and send it.
-pub fn send_centroid(socket: &UdpSocket, centroid: &MomentCentroid) -> Result<()> {
-    let bytes = flo_core::encode_udp_msg(&UdpMsg::Centroid(centroid.clone()))
-        .context("Encoding centroid")?;
-    socket.send(&bytes).context("Sending UDP packet")?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,7 +328,6 @@ mod tests {
     fn in_process_source_validates_before_using_a_transport() {
         let args = SynthArgs {
             config: PathBuf::from("unused.yaml"),
-            target: "127.0.0.1:8080".into(),
             rate: 0.0,
             duration: 1.0,
             r#loop: false,

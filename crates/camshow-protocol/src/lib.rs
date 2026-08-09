@@ -6,16 +6,23 @@
 //! plus recording start/stop commands. The link is one-way (flo → camshow).
 //! camshow keeps showing the camera regardless of whether flo is connected,
 //! so the link is best-effort.
+//!
+//! Relayed camera frames travel on a second, separate connection with its own
+//! binary framing — see [`video`].
 
 use osd_utils::OsdCache;
 use serde::{Deserialize, Serialize};
+
+pub mod video;
 
 /// Default address camshow listens on and flo connects to.
 pub const DEFAULT_CAMSHOW_ADDR: &str = "127.0.0.1:2224";
 
 /// Bumped when the wire protocol changes incompatibly. camshow rejects
 /// connections from flo if the version does not match.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 2: added `SetDisplaySource`.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Parameters for a recording-start: the codec config, the output
 /// directory, and the timestamp used to derive the file name. Defined as a
@@ -45,6 +52,19 @@ pub enum FloToCamshow {
     StartRecording(Box<RecordingStart>),
     /// Stop recording, finalize the file.
     StopRecording,
+    /// Set the bitrate of the encoder, in kilo bits per second. If `None`,
+    /// disable the RTP stream. Ignored unless camshow was started with an RTP
+    /// destination.
+    SetRtpBitrateKbps(Option<u32>),
+    /// Choose what the display and RTP stream show. A non-webcam source needs
+    /// frames arriving on the video link (see [`video`]); without them camshow
+    /// shows the webcam instead. Never affects the recording.
+    ///
+    /// A named field rather than a newtype: serde's internally-tagged
+    /// representation flattens a nested unit-variant enum into a bare key
+    /// (`{"strand_cam_main":null}`), which is not a shape worth putting on a
+    /// wire.
+    SetDisplaySource { source: flo_core::DisplaySource },
 }
 
 pub type CamshowFramedCodec = json_lines::codec::JsonLinesCodec<FloToCamshow, FloToCamshow>;
@@ -96,6 +116,24 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn set_display_source_roundtrip() {
+        let msg = FloToCamshow::SetDisplaySource {
+            source: flo_core::DisplaySource::StrandCamMain,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            s, r#"{"kind":"set_display_source","source":"strand_cam_main"}"#,
+            "got {s}"
+        );
+        assert!(matches!(
+            roundtrip(&msg),
+            FloToCamshow::SetDisplaySource {
+                source: flo_core::DisplaySource::StrandCamMain
+            }
+        ));
     }
 
     #[test]

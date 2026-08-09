@@ -1,7 +1,7 @@
 // Copyright (C) The FLO Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Compose FLO and a synthetic/replay centroid source without UDP.
+//! Compose the embedded FLO camera host and a synthetic/replay centroid source.
 
 use std::ffi::OsString;
 
@@ -45,9 +45,8 @@ fn main() -> Result<()> {
     };
     let options = flo::AppOptions {
         extensions: vec![Box::new(extension)],
-        enable_udp_listener: false,
         ..Default::default()
     };
-    let flo_args = std::iter::once(OsString::from("flo")).chain(flo_args);
-    flo::run_with_args(options, flo_args)
+    let flo_args = std::iter::once(OsString::from("flo-strand-cam")).chain(flo_args);
+    flo_strand_cam::run_with_args(options, flo_args)
 }

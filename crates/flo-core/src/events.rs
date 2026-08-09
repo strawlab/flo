@@ -74,6 +74,9 @@ pub enum FloCommand {
     SetPreCaptureSeconds(FloatType),
     SetDistCorr(FloatType),
     AdjustFocus(i32),
+    /// Choose what the operator's live view shows. This affects the camshow
+    /// display and its RTP stream only — the recording stays the clean webcam.
+    SetDisplaySource(crate::DisplaySource),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]

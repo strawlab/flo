@@ -1,22 +1,15 @@
 # Hardware-free STEREO simulation config for FLO.
 #
-# This config runs the controller with no camera or motor hardware, with a
-# secondary (stereo) camera assigned so distance tracking via stereopsis is
-# exercised. Drive it with the `floz-replay synth` tool, which projects a
+# This config runs the embedded FLO camera host with simulated cameras and no
+# motor hardware. Drive it with `floz-replay-inprocess synth`, which projects a
 # virtual-insect trajectory through this same calibration:
 #
-#   flo --config config-sim-stereo.yaml --udp-addr 127.0.0.1:8080
-#   floz-replay synth --config config-sim-stereo.yaml --target 127.0.0.1:8080 \
-#       --distance 3 --distance-amplitude 1
+#   floz-replay-inprocess synth --config config-sim-stereo.yaml \
+#       --distance 3 --distance-amplitude 1 -- --config config-sim-stereo.yaml
 #
 # Notes:
-#   * No `strand_cam_main` / `strand_cam_secondary` blocks: nothing connects to
-#     Strand Camera. Centroids arrive over UDP instead.
-#   * No motor flags on the `flo` command line: motor commands are computed and
-#     discarded.
-#   * `strand_cam_secondary.cam_name` must match `floz-replay synth
-#     --secondary-cam` (default `synth-secondary`); the synth tool's
-#     `--primary-cam` default is `synth-primary`.
+#   * ImOps is disabled because the in-process source supplies the centroids.
+#   * The camera names must match the synthetic source defaults.
 # Config schema version. Version 2 means kalman_filter_parameters holds
 # RMS values; version 1 (or a missing field) meant variances and is
 # auto-converted on load with a warning.
@@ -68,11 +61,23 @@ tracking_thresholds:
   # how long to stay in SuspendedClosedLoop before centering
   msecs_to_acquire_lock: 30000
 motor_timeconstant_secs: .001
-# Declare the second (stereo) camera. With no `url`, no HTTP session is opened;
-# the camera is identified purely by `cam_name`, so stereopsis works headless.
-# Must match `floz-replay synth --secondary-cam`.
-strand_cam_secondary:
-  cam_name: synth-secondary
+flo-strand-cam:
+  main:
+    backend: sim
+    camera_name: synth-primary
+    imops:
+      enabled: false
+      threshold: 200
+      center_x: 960
+      center_y: 600
+  secondary:
+    backend: sim
+    camera_name: synth-secondary
+    imops:
+      enabled: false
+      threshold: 200
+      center_x: 960
+      center_y: 600
 # Stereopsis calibration: distance r (m) maps to the main-vs-stereo x disparity
 # (px) as disparity = x_offset(r). These are example values; `floz-replay synth`
 # inverts exactly this model, so recovered distance matches the requested range.
