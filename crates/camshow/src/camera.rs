@@ -176,7 +176,11 @@ impl ActiveRecording {
         srt_path.set_extension("osd.srt");
 
         info!("starting webcam recording to {mp4_path}");
-        let mp4 = bg_movie_writer::BgMovieWriter::new(cfg.clone(), 100, mp4_path.clone().into());
+        let mp4 = bg_movie_writer::BgMovieWriter::new(
+            with_h264_metadata(cfg, creation_time),
+            100,
+            mp4_path.clone().into(),
+        );
         let srt_fd = std::fs::File::create(&srt_path)
             .with_context(|| format!("creating SRT file {srt_path}"))?;
         let srt = BufferingSrtFrameWriter::new(Box::new(srt_fd));
@@ -213,6 +217,28 @@ impl ActiveRecording {
         }
         info!("webcam recording closed");
     }
+}
+
+/// Stamp our identity and the recording's creation time into the config's
+/// H.264 metadata SEI.
+///
+/// flo sends a bare codec config, whose metadata is `None`. Without this the
+/// file names no writing application and, because that metadata is the only
+/// place a UTC offset is recorded, readers such as `show-timestamps` report
+/// every capture time in UTC rather than local time.
+fn with_h264_metadata(
+    cfg: &strand_cam_remote_control::RecordingConfig,
+    creation_time: Timestamp,
+) -> strand_cam_remote_control::RecordingConfig {
+    use strand_cam_remote_control::{H264Metadata, RecordingConfig};
+
+    let metadata = H264Metadata::new(APP_NAME, creation_time.into());
+    let mut cfg = cfg.clone();
+    match &mut cfg {
+        RecordingConfig::Mp4(c) => c.h264_metadata = Some(metadata),
+        RecordingConfig::Ffmpeg(c) => c.h264_metadata = Some(metadata),
+    }
+    cfg
 }
 
 /// Runs the capture loop until shutdown is requested or every output has gone
