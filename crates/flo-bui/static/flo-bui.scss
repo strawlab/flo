@@ -145,6 +145,42 @@ input[type="checkbox"] {
         0 25px 50px 0 rgba(0, 255, 255, 0.91);
 }
 
+// The connect-a-device modal grows with its content (a list of per-interface
+// QR codes) rather than using the fixed height of a plain modal.
+.connect-device-modal {
+    height: auto;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+}
+
+.connect-device-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.connect-device-item {
+    margin-bottom: 1.25em;
+}
+
+.connect-device-qr {
+    display: block;
+    margin: 0.5em 0;
+    background: #fff;
+    padding: 8px;
+    border-radius: 6px;
+}
+
+.connect-device-link {
+    word-break: break-all;
+    font-family: monospace;
+    font-size: 0.85em;
+}
+
+.connect-device-error {
+    color: #b00;
+}
+
 .infoCircle {
     display: inline-block;
     width: 1.0em;

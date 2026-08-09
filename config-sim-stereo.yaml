@@ -1,9 +1,28 @@
+# Hardware-free STEREO simulation config for FLO.
+#
+# This config runs the controller with no camera or motor hardware, with a
+# secondary (stereo) camera assigned so distance tracking via stereopsis is
+# exercised. Drive it with the `floz-replay synth` tool, which projects a
+# virtual-insect trajectory through this same calibration:
+#
+#   flo --config config-sim-stereo.yaml --udp-addr 127.0.0.1:8080
+#   floz-replay synth --config config-sim-stereo.yaml --target 127.0.0.1:8080 \
+#       --distance 3 --distance-amplitude 1
+#
+# Notes:
+#   * No `strand_cam_main` / `strand_cam_secondary` blocks: nothing connects to
+#     Strand Camera. Centroids arrive over UDP instead.
+#   * No motor flags on the `flo` command line: motor commands are computed and
+#     discarded.
+#   * `strand_cam_secondary.cam_name` must match `floz-replay synth
+#     --secondary-cam` (default `synth-secondary`); the synth tool's
+#     `--primary-cam` default is `synth-primary`.
 # Config schema version. Version 2 means kalman_filter_parameters holds
 # RMS values; version 1 (or a missing field) meant variances and is
 # auto-converted on load with a warning.
 config_version: 2
 geometry: MovingCamera
-pwm_output_enabled: true
+pwm_output_enabled: false
 kalman_filter_parameters:
   # Pan/tilt filter. Both values are RMS (root-mean-square), as for
   # kalman_filter_dist_parameters; kalman_step squares them.
@@ -48,19 +67,18 @@ tracking_thresholds:
   msecs_to_suspend: 1000
   # how long to stay in SuspendedClosedLoop before centering
   msecs_to_acquire_lock: 30000
-# motor_timeconstant (s) needs to be larger than main loop dt
-# if motor_timeconstant_secs=dt (=.001), the estimated motor position is the
-# current motor command
 motor_timeconstant_secs: .001
-strand_cam_main:
-  url: http://127.0.0.1:5555
-  # Used to size the camera's post-trigger buffer for pre-capture recording
-  # (the seconds configured in the BUI are converted to frames via this rate).
-  # Should match SetMp4MaxFramerate below.
-  expected_fps: 60.0
-  on_attach_json_commands:
-  - '{"ToCamera":{"SetImOpsCenterX":960}}'
-  - '{"ToCamera":{"SetImOpsCenterY":600}}'
-  - '{"ToCamera":{"SetImOpsThreshold":200}}'
-  - '{"ToCamera":{"ToggleImOpsDetection":true}}'
-  - '{"ToCamera":{"SetMp4MaxFramerate": "Fps60"}}'
+# Declare the second (stereo) camera. With no `url`, no HTTP session is opened;
+# the camera is identified purely by `cam_name`, so stereopsis works headless.
+# Must match `floz-replay synth --secondary-cam`.
+strand_cam_secondary:
+  cam_name: synth-secondary
+# Stereopsis calibration: distance r (m) maps to the main-vs-stereo x disparity
+# (px) as disparity = x_offset(r). These are example values; `floz-replay synth`
+# inverts exactly this model, so recovered distance matches the requested range.
+stereopsis_calib:
+  r1_m: 2.0
+  x_offset_1_px: 20.0
+  r2_m: 5.0
+  x_offset_2_px: 10.0
+  pixel_size_um: 3.4

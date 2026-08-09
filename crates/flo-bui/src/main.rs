@@ -17,6 +17,8 @@ use flo_core::*;
 mod recording_path;
 use recording_path::RecordingPathWidget;
 
+use ads_webasm::components::ConnectDevice;
+
 const JOYGAIN: f64 = 1.0;
 
 #[derive(Clone, PartialEq)]
@@ -53,6 +55,23 @@ impl std::fmt::Display for DistanceMeters {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct Seconds(FloatType);
+
+impl std::str::FromStr for Seconds {
+    type Err = std::num::ParseFloatError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let v = FloatType::from_str(s)?;
+        Ok(Seconds(v))
+    }
+}
+
+impl std::fmt::Display for Seconds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 struct App {
     floz_recording_path: Option<RecordingPath>,
     webcam_recording_path: Option<RecordingPath>,
@@ -60,12 +79,15 @@ struct App {
     tilt_center_degrees: TypedInputStorage<AngleDegrees>,
     distance_center: TypedInputStorage<DistanceMeters>,
     distance_corr_m: TypedInputStorage<DistanceMeters>,
+    precapture_seconds: TypedInputStorage<Seconds>,
     last_state: Option<flo_core::DeviceState>,
     cfg: Option<flo_core::FloControllerConfig>,
     es: EventSource,
     _listeners: Vec<EventListener>,
     query_gamepad_interval: Option<Interval>,
     last_gamepad_timestamp: f64,
+    /// Set once the server broadcasts that it is shutting down.
+    server_quit: bool,
 }
 
 enum Msg {
@@ -79,8 +101,12 @@ enum Msg {
     GamepadInterval,
     SendMessageFetchState(FetchState),
     DoRecordMotorPositionsFloz(bool),
+    DoPreCaptureRecord,
+    SetPreCaptureSeconds,
     SetDistanceCorrection,
     AdjustFocus(i32),
+    /// The server broadcast that it is shutting down.
+    ServerQuit,
     RenderView,
 }
 
@@ -170,6 +196,20 @@ impl Component for App {
             ));
         }
 
+        {
+            // Listen for the server-is-quitting event so this browser shows the
+            // "FLO has quit" screen and stops trying to reconnect, even if the
+            // shutdown was initiated elsewhere.
+            let quit_callback = ctx.link().callback(|_| Msg::ServerQuit);
+            _listeners.push(EventListener::new(
+                &es,
+                FLO_QUIT_EVENT_NAME,
+                move |_event: &Event| {
+                    quit_callback.emit(());
+                },
+            ));
+        }
+
         let link = ctx.link().clone();
         _listeners.push(EventListener::new(&es, "error", move |_event: &Event| {
             // Trigger a UI redraw on error, because we won't get any state
@@ -185,18 +225,26 @@ impl Component for App {
             tilt_center_degrees: TypedInputStorage::from_initial(AngleDegrees(0.0)),
             distance_center: TypedInputStorage::from_initial(DistanceMeters(0.5)),
             distance_corr_m: TypedInputStorage::from_initial(DistanceMeters(0.082)),
+            precapture_seconds: TypedInputStorage::from_initial(Seconds(0.0)),
 
             last_state: None,
             cfg: None,
             _listeners,
             query_gamepad_interval: None,
             last_gamepad_timestamp: 0.0,
+            server_quit: false,
         }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             Msg::RenderView => {}
+            Msg::ServerQuit => {
+                // The server is shutting down. Show the "has quit" screen and
+                // close the event stream so the browser stops reconnecting.
+                self.server_quit = true;
+                self.es.close();
+            }
             Msg::GamepadConnected((_connected, _gamepad)) => {
                 if self.n_connected_gamepads() > 0 {
                     let handle = {
@@ -233,6 +281,18 @@ impl Component for App {
             //     self.set_device_mode(flo_core::DeviceMode::VoltageFollower13, ctx);
             //     return false;
             // }
+            Msg::DoPreCaptureRecord => {
+                let msg = flo_core::FloCommand::StartPreCaptureRecording;
+                self.send_message(msg, ctx);
+                return false; // Don't update DOM; wait for backend state.
+            }
+            Msg::SetPreCaptureSeconds => {
+                if let Ok(secs) = self.precapture_seconds.parsed() {
+                    let msg = flo_core::FloCommand::SetPreCaptureSeconds(secs.0);
+                    self.send_message(msg, ctx);
+                }
+                return false; // Don't update DOM; wait for backend state.
+            }
             Msg::SetDistanceCorrection => {
                 if let Ok(dist_corr) = self.distance_corr_m.parsed() {
                     let msg = flo_core::FloCommand::SetDistCorr(dist_corr.0);
@@ -297,6 +357,8 @@ impl Component for App {
                                 self.floz_recording_path = new_state.floz_recording_path.clone();
                                 self.webcam_recording_path =
                                     new_state.webcam_recording_path.clone();
+                                self.precapture_seconds
+                                    .set_if_not_focused(Seconds(new_state.precapture_window_secs));
                                 self.last_state = Some(new_state);
                             }
                             BuiEventData::Config(cfg) => {
@@ -320,10 +382,17 @@ impl Component for App {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
+        if self.server_quit {
+            // Render only the "has quit" screen. Rendering nothing else stops
+            // the rest of the UI (and any of its timers) from running against
+            // the now-gone server.
+            return self.server_quit_dialog();
+        }
         html! {
             <div>
                 <h1>{"FLO"}</h1>
                 {self.disconnected_dialog()}
+                <div style="text-align: center;"><ConnectDevice /></div>
                 { self.browser_info() }
                 <div class="border-1px">
                     <h2>{"Info"}</h2>
@@ -392,6 +461,7 @@ impl Component for App {
                         ontoggle={ctx.link().callback(|checked| {Msg::DoRecordMotorPositionsFloz(checked)})}
                         />
                     </div>
+                    { self.precapture_view(ctx) }
                     <div class="button-holder">
                         <Button title="Set Home" onsignal={ctx.link().callback(|_| Msg::SetHomePositionFromCurrent)}/>
                     </div>
@@ -414,6 +484,48 @@ impl Component for App {
 }
 
 impl App {
+    /// Pre-capture ("post-trigger") controls. Setting the window above zero
+    /// makes the writer continuously buffer recent data in RAM. The separate
+    /// "Post-trigger record" button starts a recording that begins with that
+    /// buffered window, letting the operator capture an event that already
+    /// happened. (The normal record button above is unaffected and records
+    /// from now.) The readout shows how many seconds are currently buffered.
+    fn precapture_view(&self, ctx: &Context<Self>) -> Html {
+        let buffered = self
+            .last_state
+            .as_ref()
+            .map(|s| s.precapture_buffered_secs)
+            .unwrap_or(0.0);
+        let window = self
+            .last_state
+            .as_ref()
+            .map(|s| s.precapture_window_secs)
+            .unwrap_or(0.0);
+        let status = if window > 0.0 {
+            format!("buffered: {buffered:.1} s ready")
+        } else {
+            "disabled".to_string()
+        };
+        html! {
+            <div class="my-padding">
+                <label>{"Pre-capture buffer (seconds, 0 disables) "}
+                    <TypedInput<Seconds>
+                        storage={self.precapture_seconds.clone()}
+                        placeholder={"seconds"}
+                        on_input={ctx.link().callback(|_| Msg::SetPreCaptureSeconds)}
+                        />
+                </label>
+                <span style="margin-left: 0.5em;">{status}</span>
+                <div class="button-holder">
+                    <Button
+                        title="Post-trigger record"
+                        onsignal={ctx.link().callback(|_| Msg::DoPreCaptureRecord)}
+                        />
+                </div>
+            </div>
+        }
+    }
+
     fn handle_gamepad_interval(&mut self, ctx: &Context<Self>, cfg: FloControllerConfig) {
         for js_val in gloo_utils::window()
             .navigator()
@@ -541,6 +653,16 @@ impl App {
                     <p>{ "Please restart FLO and reload this webpage" }</p>
                 </div>
             }
+        }
+    }
+
+    fn server_quit_dialog(&self) -> Html {
+        html! {
+            <div class="modal-container">
+                <h1> { "FLO has quit" } </h1>
+                <p>{ "The FLO server has shut down. Restart FLO and reload this \
+                      webpage to reconnect." }</p>
+            </div>
         }
     }
 

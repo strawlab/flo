@@ -3,9 +3,7 @@ use thiserror::Error;
 use bytes::{BytesMut, buf::Buf};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::UdpMsg;
-
-use serde::Serialize;
+use flo_core::UdpMsg;
 
 #[derive(Error, Debug)]
 pub(crate) enum Error {
@@ -15,21 +13,13 @@ pub(crate) enum Error {
     Io(#[from] std::io::Error),
 }
 
-// We encode `T` and not `&T` because we do not want to deal with
-// the lifetime issues (this is used in async contexts.)
-fn do_encode_cbor<T: Serialize>(msg: T, final_buf: &mut bytes::BytesMut) -> Result<(), Error> {
-    // TODO: why doesn't this work
-    // serde_cbor::to_writer(&mut final_buf,&msg)?;
-    let v = serde_cbor::to_vec(&msg)?;
-    final_buf.extend_from_slice(v.as_slice());
-    Ok(())
-}
-
 // -------------------------
 
 /// This codec runs on the device (or emulated devices).
 ///
 /// This codec decodes messages to the device and encodes messages to the host.
+/// The wire format ([UdpMsg] as CBOR) lives in `flo-core` so that any sender
+/// (e.g. `floz-replay`) stays byte-compatible with this decoder.
 #[derive(Default)]
 pub(crate) struct FloControllerUdpCodec {}
 
@@ -41,7 +31,7 @@ impl Decoder for FloControllerUdpCodec {
         if buf.is_empty() {
             Ok(None)
         } else {
-            let msg = match serde_cbor::from_slice(&buf[..]) {
+            let msg = match flo_core::decode_udp_msg(&buf[..]) {
                 Ok(msg) => msg,
                 Err(e) => {
                     // If decode fails, we should still advance the buffer.
@@ -58,11 +48,10 @@ impl Decoder for FloControllerUdpCodec {
     }
 }
 
-// We encode `T` and not `&T` because we do not want to deal with
-// the lifetime issues (this is used in async contexts.)
 impl Encoder<UdpMsg> for FloControllerUdpCodec {
     type Error = Error;
     fn encode(&mut self, msg: UdpMsg, final_buf: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        do_encode_cbor(msg, final_buf)
+        final_buf.extend_from_slice(&flo_core::encode_udp_msg(&msg)?);
+        Ok(())
     }
 }

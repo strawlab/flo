@@ -23,6 +23,7 @@ serde_path_to_error = "0.1.16"
 
 yew-tincture = "0.3"
 
+ads-webasm.workspace = true
 flo-core.workspace = true
 
 [dependencies.web-sys]

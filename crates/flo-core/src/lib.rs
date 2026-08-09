@@ -32,6 +32,17 @@ pub const UNICAST_UDP_DEFAULT: &str = const_format::concatcp!("0.0.0.0:", UNICAS
 
 pub type CamNameString = String;
 
+pub const MOTOR_POSITIONS_FNAME: &str = "motor_positions.csv";
+pub const TRACKING_STATE_FNAME: &str = "tracking_state.csv";
+pub const CENTROID_FNAME: &str = "centroid.csv";
+pub const ENCODER_DATA_FNAME: &str = "encoder_data.csv";
+pub const ENCODER_OFFSETS_FNAME: &str = "encoder_offsets.csv";
+/// Serialized [`FloControllerConfig`] saved alongside the recorded tables.
+pub const FLO_CONFIG_FNAME: &str = "flo-config.yaml";
+/// Newline-delimited JSON log of [`StampedBMsg`] events (detections, mode
+/// changes, commands) recorded during a session.
+pub const BROADWAY_FNAME: &str = "broadway.jsonl";
+
 pub use pwm_motor_types::{
     DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,
 };
@@ -194,6 +205,84 @@ impl TrackingState {
             drivemode: MotorDriveMode::Position,
             rel_frame,
             focus: self.focus_command_motpos + self.focus_backlash_correction,
+        }
+    }
+}
+
+// These are all f32 to keep file size down.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct SaveTrackingState {
+    pub centroid_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub est_pan: Option<f32>,
+    pub est_tilt: Option<f32>,
+    pub est_dist: Option<f32>,
+    pub pan_obs: f32,
+    pub tilt_obs: f32,
+    pub dist_obs: f32,
+    pub cam_pan: f32,
+    pub cam_tilt: f32,
+    pub motor_cmd_pan: f32,
+    pub motor_cmd_tilt: f32,
+    pub motor_cmd_focus: f32,
+    pub pan_predicted: f32,
+    pub tilt_predicted: f32,
+    pub pan_error_integral: f32,
+    pub tilt_error_integral: f32,
+    pub processed_timestamp: chrono::DateTime<chrono::Local>,
+}
+
+impl From<StampedTrackingState> for SaveTrackingState {
+    fn from(orig: StampedTrackingState) -> Self {
+        let (est_pan, est_tilt) = if let Some(ke) = orig.tracking_state.kalman_estimates.as_ref() {
+            (Some(ke.0.state()[0]), Some(ke.0.state()[1]))
+        } else {
+            (None, None)
+        };
+
+        let est_dist = orig
+            .tracking_state
+            .kalman_estimates_distance
+            .as_ref()
+            .map(|ke| ke.0.state()[0]);
+
+        let to_f32 = |x: FloatType| x as f32;
+        let (cam_pan, cam_tilt) = if let Some(pos) = orig.tracking_state.last_motor_readout {
+            (to_f32(pos.pan_imu.0), to_f32(pos.tilt_imu.0))
+        } else {
+            (0.0, 0.0)
+        };
+
+        Self {
+            centroid_timestamp: orig.centroid_timestamp,
+            est_pan: est_pan.map(to_f32),
+            est_tilt: est_tilt.map(to_f32),
+            est_dist: est_dist.map(to_f32),
+            pan_obs: to_f32(orig.tracking_state.pan_obs),
+            tilt_obs: to_f32(orig.tracking_state.tilt_obs),
+            dist_obs: to_f32(orig.tracking_state.dist_obs),
+            cam_pan,
+            cam_tilt,
+            motor_cmd_pan: to_f32(orig.tracking_state.pan_command.as_float()),
+            motor_cmd_tilt: to_f32(orig.tracking_state.tilt_command.as_float()),
+            motor_cmd_focus: to_f32(orig.tracking_state.focus_command.as_float()),
+            pan_predicted: to_f32(orig.tracking_state.pan.as_float()),
+            tilt_predicted: to_f32(orig.tracking_state.tilt.as_float()),
+            pan_error_integral: to_f32(orig.tracking_state.pan_err_integral),
+            tilt_error_integral: to_f32(orig.tracking_state.tilt_err_integral),
+            processed_timestamp: orig.processed_timestamp,
+        }
+    }
+}
+
+trait AsFloat {
+    fn as_float(&self) -> f64;
+}
+
+impl AsFloat for Option<RadialDistance> {
+    fn as_float(&self) -> f64 {
+        match self {
+            None => f64::NAN,
+            Some(v) => v.0,
         }
     }
 }
@@ -431,7 +520,13 @@ pub struct FloControllerConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub encoder_lag: FloatType,
 
-    /// DEPRECATED. Name of second camera used for stereopsis.
+    /// DEPRECATED. Name of the second (stereo) camera.
+    ///
+    /// Superseded by `strand_cam_secondary.cam_name`. Still honored for
+    /// backward compatibility (with a deprecation warning): if
+    /// `strand_cam_secondary` is also present, the two names must agree;
+    /// otherwise this name identifies the secondary camera on its own. New
+    /// configs should set `strand_cam_secondary.cam_name` instead.
     #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub secondary_cam_name: Option<CamNameString>,
 
@@ -602,6 +697,12 @@ pub struct DeviceState {
     pub home_position: (Angle, Angle, RadialDistance),
     pub floz_recording_path: Option<RecordingPath>,
     pub webcam_recording_path: Option<RecordingPath>,
+    /// Configured pre-capture buffer window in seconds (0 = disabled).
+    #[serde(default)]
+    pub precapture_window_secs: FloatType,
+    /// Amount of data currently held in the pre-capture buffer, in seconds.
+    #[serde(default)]
+    pub precapture_buffered_secs: FloatType,
     pub stereopsis_state: Option<StereopsisState>,
     /// Is data from cameras stale.
     pub cam_stale: CamStaleBitmask,
@@ -802,9 +903,34 @@ impl Default for TrinamicAxisConfig {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
 pub struct StrandCamConfig {
-    pub url: String,
+    /// URL of the Strand Cam HTTP control session for this camera.
+    ///
+    /// When omitted, `flo` opens no HTTP session to this camera. This is the
+    /// hardware-free / simulation case: centroids are injected over UDP (e.g.
+    /// by `floz-replay`) rather than produced by a live camera. The camera is
+    /// then identified solely by `cam_name`, which is required in that case.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub url: Option<String>,
+
+    /// The camera's name, matching the `cam_name` field of incoming centroids.
+    ///
+    /// Required when `url` is omitted (it is how the controller identifies this
+    /// camera's centroids). When `url` is present this is optional; if given, it
+    /// is checked against the name the camera reports over HTTP.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub cam_name: Option<CamNameString>,
+
     #[serde(default, skip_serializing_if = "is_default")]
     pub on_attach_json_commands: Vec<String>,
+
+    /// Expected recording frame rate of this camera, in frames per second.
+    ///
+    /// Used to convert the pre-capture window (configured in seconds) into the
+    /// frame count that Strand Cam's post-trigger buffer expects
+    /// (`CamArg::SetPostTriggerBufferSize`). When omitted, `flo` cannot size
+    /// the camera's pre-capture buffer and will skip configuring it.
+    #[serde(default, skip_serializing_if = "is_none_or_default")]
+    pub expected_fps: Option<FloatType>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
@@ -974,6 +1100,53 @@ impl MomentCentroid {
     }
 }
 
+/// A message sent over UDP to the FLO controller's centroid listener.
+///
+/// This is the wire payload exchanged on the controller's `--udp-addr` port.
+/// The live source is Strand Camera's `imops` module; tools such as
+/// `floz-replay` produce the same messages to drive the controller without
+/// hardware. Encoding is CBOR via [encode_udp_msg]; decoding via
+/// [decode_udp_msg]. Keep this type and the encoding here as the single source
+/// of truth so any sender stays byte-compatible with the controller.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub enum UdpMsg {
+    Centroid(MomentCentroid),
+}
+
+/// Encode a [UdpMsg] to the CBOR bytes sent on the FLO UDP port.
+pub fn encode_udp_msg(msg: &UdpMsg) -> Result<Vec<u8>, serde_cbor::Error> {
+    serde_cbor::to_vec(msg)
+}
+
+/// Decode a [UdpMsg] from CBOR bytes received on the FLO UDP port.
+pub fn decode_udp_msg(buf: &[u8]) -> Result<UdpMsg, serde_cbor::Error> {
+    serde_cbor::from_slice(buf)
+}
+
+/// A [MomentCentroid] stamped with the time it was received, as saved to the
+/// `centroid.csv` file within a `.floz` archive.
+///
+/// This is kept as a superset of [MomentCentroid] (see the
+/// `test_stamped_is_superset` test in the `flo` crate). The `deny_unknown_fields`
+/// attribute ensures new fields added to [MomentCentroid] are not silently
+/// dropped here.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct StampedMomentCentroid {
+    pub received_timestamp: chrono::DateTime<chrono::Local>,
+    pub schema_version: u8,
+    pub framenumber: u32,
+    pub timestamp_source: TimestampSource,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub mu00: FloatType,
+    pub mu01: FloatType,
+    pub mu10: FloatType,
+    pub center_x: u32,
+    pub center_y: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cam_name: CamNameString,
+}
+
 impl Default for KalmanFilterParameters {
     fn default() -> Self {
         // RMS values. These are the square roots of the variances this default
@@ -1046,6 +1219,8 @@ impl DeviceState {
             home_position: (Angle(0.0), Angle(0.0), RadialDistance(1.0)),
             floz_recording_path: None,
             webcam_recording_path: None,
+            precapture_window_secs: 0.0,
+            precapture_buffered_secs: 0.0,
             stereopsis_state: Default::default(),
             cam_stale: Default::default(),
         }
@@ -1128,7 +1303,18 @@ fn unique_id_to_hex(unique_id: &[u8; DEVICE_ID_LEN], hex_out: &mut [u8; DEVICE_I
 #[derive(Debug)]
 pub enum SaveToDiskMsg {
     /// Start or stop saving data to disk.
-    ToggleSavingFloz(Option<(chrono::DateTime<chrono::Local>, camino::Utf8PathBuf)>),
+    ///
+    /// On start, the boolean requests that the pre-capture buffer be flushed
+    /// into the new recording first (so it begins with the buffered window).
+    /// A normal recording passes `false` and ignores the buffer.
+    ToggleSavingFloz(Option<(chrono::DateTime<chrono::Local>, camino::Utf8PathBuf, bool)>),
+    /// Set the pre-capture buffer window in seconds (0 disables and clears it).
+    ///
+    /// While not recording, the writer task retains recent data messages in a
+    /// RAM ring buffer covering this window. When recording subsequently
+    /// starts, the buffered data is written first, so the recording includes
+    /// the preceding window. See [`FloCommand::SetPreCaptureSeconds`].
+    SetPreCaptureSeconds(FloatType),
     /// New centroid data
     CentroidData((chrono::DateTime<chrono::Local>, MomentCentroid)),
     /// New tracking state data
@@ -1275,6 +1461,13 @@ pub fn all_addrs(orig_addr: std::net::SocketAddr) -> Option<Vec<std::net::Socket
 // -----------------------------------------------------------------------------
 // HTTP stuff
 pub const EVENT_NAME: &str = "flo-evt";
+
+/// Event name for the server-is-quitting SSE message.
+///
+/// Broadcast to every connected browser just before the server shuts down so
+/// that all clients (not only the one that initiated the quit) show the "FLO
+/// has quit" screen and stop trying to reconnect.
+pub const FLO_QUIT_EVENT_NAME: &str = "flo-quit";
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RecordingPath {

@@ -10,9 +10,8 @@ tokio = { workspace = true, features = ["net", "sync", "rt-multi-thread"] }
 http.workspace = true
 tokio-stream = { workspace = true, features = ["sync"] }
 axum.workspace = true
-axum-token-auth = "0.2.0"
+axum-token-auth = "0.3.0"
 camino = { workspace = true, optional = true }
-if-addrs.workspace = true
 tower = "0.5.2"
 tower-http = { version = "0.6.2", features = ["trace", "fs"] }
 preferences-serde1.workspace = true
@@ -22,6 +21,9 @@ futures-util = "0.3.30"
 qrcodegen = "1.8.0"
 tower-serve-static = { version = "0.1", optional = true }
 include_dir = { version = "0.7.3", optional = true }
+
+strand-bui-backend-session.workspace = true
+strand-bui-backend-session-types.workspace = true
 
 flo-core.workspace = true
 futures.workspace = true

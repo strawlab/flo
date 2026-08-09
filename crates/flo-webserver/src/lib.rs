@@ -12,15 +12,14 @@ use eyre as anyhow;
 use futures_util::stream::Stream;
 use http::{StatusCode, header::ACCEPT, request::Parts};
 use preferences_serde1::{AppInfo, Preferences};
-use std::{
-    convert::Infallible,
-    io::Write,
-    net::{IpAddr, SocketAddr},
-};
+use std::{convert::Infallible, io::Write, net::SocketAddr};
 use tokio::sync::watch;
 use tower_http::trace::TraceLayer;
 
-use flo_core::{BuiEventData, DeviceState, EVENT_NAME, FloCommand, FloControllerConfig, FloEvent};
+use flo_core::{
+    BuiEventData, DeviceState, EVENT_NAME, FLO_QUIT_EVENT_NAME, FloCommand, FloControllerConfig,
+    FloEvent,
+};
 
 pub const APP_INFO: AppInfo = AppInfo {
     name: "flo",
@@ -77,50 +76,57 @@ async fn events_handler(
     _: AcceptsEventStream,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     session_key.is_present();
-    // use futures::stream::StreamExt;
-    use futures::stream::{self, StreamExt};
+    use futures::stream;
+    use tokio_stream::StreamExt;
+    use tokio_stream::wrappers::WatchStream;
     let from_device_rx = app_state.from_device_rx.clone();
     let cfg = app_state.cfg.clone();
 
     let stream1 = stream::iter(vec![BuiEventData::Config(cfg)]);
-    let stream2 =
-        tokio_stream::wrappers::WatchStream::from(from_device_rx).map(BuiEventData::DeviceState);
+    let stream2 = WatchStream::from(from_device_rx).map(BuiEventData::DeviceState);
 
-    let stream = stream1.chain(stream2);
+    let data_stream = stream1
+        .chain(stream2)
+        .map(|msg| Ok(Event::default().event(EVENT_NAME).json_data(msg).unwrap()));
 
-    let stream = stream.map(|msg| Ok(Event::default().event(EVENT_NAME).json_data(msg).unwrap()));
+    // When the server is shutting down it flips this watch channel to `true`.
+    // Emit a dedicated SSE event so every connected browser (not only the one
+    // that triggered the quit) shows the "FLO has quit" screen and stops
+    // reconnecting. The initial `false` value is filtered out.
+    let quit_stream = WatchStream::new(app_state.quit_rx.clone())
+        .filter(|quitting| *quitting)
+        .map(|_| Ok(Event::default().event(FLO_QUIT_EVENT_NAME).data("quit")));
+
+    let stream = data_stream.merge(quit_stream);
     Sse::new(stream)
 }
 
-fn expand_unspecified_addr(addr: &SocketAddr) -> std::io::Result<Vec<SocketAddr>> {
-    if addr.ip().is_unspecified() {
-        Ok(expand_unspecified_ip(addr.ip())?
-            .into_iter()
-            .map(|ip| SocketAddr::new(ip, addr.port()))
-            .collect())
-    } else {
-        Ok(vec![*addr])
+/// Returns the URLs (one per reachable network interface) at which this web UI
+/// can be reached, each carrying a freshly minted short-lived access token. The
+/// frontend turns these into QR codes for connecting another device.
+async fn device_connect_urls_handler(
+    State(app_state): State<AppState>,
+    session_key: axum_token_auth::SessionKey,
+) -> impl IntoResponse {
+    session_key.is_present();
+    match build_connect_urls(
+        app_state.bound_addr,
+        app_state.token_required,
+        &app_state.persistent_secret,
+    ) {
+        Ok(urls) => Json(urls).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to enumerate network interfaces: {e}"),
+        )
+            .into_response(),
     }
 }
 
-fn expand_unspecified_ip(ip: IpAddr) -> std::io::Result<Vec<IpAddr>> {
-    if ip.is_unspecified() {
-        // Get all interfaces if IP is unspecified.
-        Ok(if_addrs::get_if_addrs()?
-            .iter()
-            .filter_map(|x| {
-                let this_ip = x.addr.ip();
-                // Take only IP addresses from correct family.
-                if ip.is_ipv4() == this_ip.is_ipv4() {
-                    Some(this_ip)
-                } else {
-                    None
-                }
-            })
-            .collect())
-    } else {
-        Ok(vec![ip])
-    }
+/// Whether `uri`'s host is a loopback address (so unreachable from another
+/// device). Used to decide which connection URLs are worth offering to scan.
+fn is_loopback_uri(uri: &http::Uri) -> bool {
+    matches!(uri.host(), Some("127.0.0.1") | Some("[::1]"))
 }
 
 async fn handle_auth_error(err: tower::BoxError) -> (StatusCode, &'static str) {
@@ -144,6 +150,18 @@ struct AppState {
     from_device_rx: watch::Receiver<DeviceState>,
     user_commands_tx: tokio::sync::broadcast::Sender<FloEvent>,
     cfg: FloControllerConfig,
+    /// Flips to `true` once, just before shutdown, so the SSE handler can tell
+    /// every connected browser the server is quitting.
+    quit_rx: watch::Receiver<bool>,
+    /// The address the HTTP server is bound to (possibly unspecified, e.g.
+    /// `0.0.0.0`), used to enumerate device-connection URLs on demand.
+    bound_addr: SocketAddr,
+    /// Whether reaching this server requires an access token (true unless bound
+    /// to loopback). Mirrors the policy used when the startup URL is minted.
+    token_required: bool,
+    /// The cookie/token secret, used to mint a fresh short-lived access token
+    /// when a device-connection QR code is requested.
+    persistent_secret: cookie::Key,
 }
 
 fn display_qr_url(url: &str) {
@@ -170,64 +188,68 @@ fn display_qr_url(url: &str) {
     writeln!(stdout_handle).expect("write failed");
 }
 
-pub async fn start_listener(
-    address_string: &str,
-) -> anyhow::Result<(
-    tokio::net::TcpListener,
-    Option<axum_token_auth::TokenConfig>,
-)> {
-    let socket_addr = std::net::ToSocketAddrs::to_socket_addrs(&address_string)?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no address found for HTTP server"))?;
-
-    let listener = tokio::net::TcpListener::bind(socket_addr).await?;
-    let listener_local_addr = listener.local_addr()?;
-    let all_addrs = expand_unspecified_addr(&listener_local_addr)?;
-
-    let token_config: Option<axum_token_auth::TokenConfig> =
-        if !listener_local_addr.ip().is_loopback() {
-            Some(axum_token_auth::TokenConfig::new_token("token"))
-        } else {
-            None
-        };
-
-    for addr in all_addrs.iter() {
-        let url = {
-            let query = match &token_config {
-                None => "".to_string(),
-                Some(tok) => format!("token={}", tok.value),
-            };
-            http::uri::Builder::new()
-                .scheme("http")
-                .authority(format!("{}:{}", addr.ip(), addr.port()))
-                .path_and_query(format!("/?{query}"))
-                .build()
-                .unwrap()
-        };
-        tracing::info!("FLO listener at {listener_local_addr}, predicted URL: {url}");
-
-        if !addr.ip().is_loopback() {
-            println!("QR code for {url}");
-            display_qr_url(&format!("{url}"));
-        }
-    }
-
-    Ok((listener, token_config))
+/// Describe the bound server for [`strand_bui_backend_session::build_urls`],
+/// minting a fresh short-lived access token when one is required (i.e. the
+/// server is not bound to loopback).
+///
+/// The token is self-expiring and signed with the persistent secret; the auth
+/// layer (same secret) validates it by signature and expiry, so nothing is
+/// stored. A single token is embedded in every interface URL, exactly as the
+/// startup URL is minted.
+fn make_bui_server_info(
+    bound_addr: SocketAddr,
+    token_required: bool,
+    persistent_secret: &cookie::Key,
+) -> strand_bui_backend_session_types::BuiServerAddrInfo {
+    use strand_bui_backend_session_types::{AccessToken, BuiServerAddrInfo};
+    let token = if token_required {
+        AccessToken::PreSharedToken(axum_token_auth::generate_token(
+            persistent_secret,
+            ACCESS_TOKEN_TTL,
+        ))
+    } else {
+        AccessToken::NoToken
+    };
+    BuiServerAddrInfo::new(bound_addr, token)
 }
 
-pub async fn main_loop(
-    tcp_listener: tokio::net::TcpListener,
-    token_config: Option<axum_token_auth::TokenConfig>,
-    from_device_rx: watch::Receiver<DeviceState>,
-    cfg: FloControllerConfig,
-    user_commands_tx: tokio::sync::broadcast::Sender<FloEvent>,
-) -> Result<(), anyhow::Error> {
-    let app_state = AppState {
-        from_device_rx,
-        user_commands_tx,
-        cfg,
-    };
+/// Enumerate the interfaces the server is reachable on and build the
+/// [`DeviceConnectUrls`] describing them, minting a fresh access token when one
+/// is required.
+///
+/// [`DeviceConnectUrls`]: strand_bui_backend_session_types::DeviceConnectUrls
+fn build_connect_urls(
+    bound_addr: SocketAddr,
+    token_required: bool,
+    persistent_secret: &cookie::Key,
+) -> std::io::Result<strand_bui_backend_session_types::DeviceConnectUrls> {
+    let info = make_bui_server_info(bound_addr, token_required, persistent_secret);
+    let uris = strand_bui_backend_session::build_urls(&info)?;
+    let loopback_only = uris.iter().all(is_loopback_uri);
+    let urls = uris.into_iter().map(|u| u.to_string()).collect();
+    Ok(strand_bui_backend_session_types::DeviceConnectUrls {
+        urls,
+        loopback_only,
+    })
+}
 
+/// Duration for which a freshly minted access token remains valid.
+///
+/// A token is only needed for a client's first request: a successful auth hands
+/// back a session cookie that carries the session afterward. Keeping the token
+/// short-lived bounds the window in which a token leaked via a URL (terminal
+/// scrollback, log files, a photographed QR code) can be replayed.
+pub const ACCESS_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Load the persistent cookie/token secret, generating and saving a fresh one
+/// if none exists.
+///
+/// This secret signs both the session cookies and the self-expiring access
+/// tokens, so it must be loaded once and shared between [start_listener] (which
+/// mints the token printed in the URL) and [main_loop] (which validates it).
+/// Keeping the secret stable across restarts keeps already-issued browser
+/// cookies valid through an upgrade.
+pub fn load_persistent_secret() -> anyhow::Result<cookie::Key> {
     let persistent_secret_base64 = match String::load(&APP_INFO, COOKIE_SECRET_KEY) {
         Ok(secret_base64) => secret_base64,
         Err(_) => {
@@ -240,16 +262,154 @@ pub async fn main_loop(
         }
     };
 
+    // The secret can forge any session cookie and mint any token, so ensure its
+    // on-disk file is owner-only.
+    harden_prefs_file(&APP_INFO, COOKIE_SECRET_KEY);
+
     let persistent_secret =
         base64::engine::general_purpose::STANDARD.decode(persistent_secret_base64)?;
-    let persistent_secret = cookie::Key::try_from(persistent_secret.as_slice())?;
+    Ok(cookie::Key::try_from(persistent_secret.as_slice())?)
+}
 
-    let cfg = axum_token_auth::AuthConfig {
-        token_config,
+/// Restrict the on-disk `preferences_serde1` file backing `key` to owner-only
+/// access (Unix mode 0600), warning if it was previously reachable by other
+/// local users.
+///
+/// The cookie/token secret is effectively a master credential and the persisted
+/// cookie jar holds live session cookies, so neither should be group- or
+/// world-readable. `preferences_serde1` creates the file with the process umask
+/// (typically 0644); this tightens it after the fact. No-op on non-Unix
+/// platforms, whose permission model differs.
+pub fn harden_prefs_file(app: &AppInfo, key: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Mirror `preferences_serde1`'s path layout: <config>/<app>/<key>.prefs.json
+        let Some(mut path) = preferences_serde1::prefs_base_dir() else {
+            return;
+        };
+        path.push(app.name);
+        path.push(key);
+        let Some(mut name) = path.file_name().map(|n| n.to_os_string()) else {
+            return;
+        };
+        name.push(".prefs.json");
+        path.set_file_name(name);
+
+        let Ok(md) = std::fs::metadata(&path) else {
+            // No file on disk: nothing to do.
+            return;
+        };
+        let mode = md.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                "Restricting permissions on sensitive file {} from {mode:o} to 600 \
+                 (it was accessible to other local users).",
+                path.display(),
+            );
+        }
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("Could not restrict permissions on {}: {e}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, key);
+    }
+}
+
+pub async fn start_listener(
+    address_string: &str,
+    persistent_secret: &cookie::Key,
+) -> anyhow::Result<(
+    tokio::net::TcpListener,
+    Option<axum_token_auth::TokenConfig>,
+)> {
+    let socket_addr = std::net::ToSocketAddrs::to_socket_addrs(&address_string)?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no address found for HTTP server"))?;
+
+    let listener = tokio::net::TcpListener::bind(socket_addr).await?;
+    let listener_local_addr = listener.local_addr()?;
+
+    // With self-expiring signed tokens the `TokenConfig` carries no value; it
+    // only signals that a token is required. The token string handed to the
+    // user is minted separately below from the persistent secret.
+    let token_config: Option<axum_token_auth::TokenConfig> =
+        if !listener_local_addr.ip().is_loopback() {
+            Some(axum_token_auth::TokenConfig::new("token"))
+        } else {
+            None
+        };
+
+    let info = make_bui_server_info(
+        listener_local_addr,
+        token_config.is_some(),
         persistent_secret,
-        cookie_name: "braid-bui-session",
-        cookie_expires: Some(std::time::Duration::from_secs(60 * 60 * 24 * 400)), // 400 days
+    );
+    for url in strand_bui_backend_session::build_urls(&info)? {
+        tracing::info!("FLO listener at {listener_local_addr}, predicted URL: {url}");
+
+        if !is_loopback_uri(&url) {
+            println!("QR code for {url}");
+            display_qr_url(&format!("{url}"));
+        }
+    }
+
+    Ok((listener, token_config))
+}
+
+/// Parse a list of CIDR strings (e.g. `"100.64.0.0/10"`) into the network type
+/// expected by [`main_loop`]'s `trusted_networks` argument, returning a
+/// descriptive error for the first one that fails to parse.
+pub fn parse_trusted_networks(nets: &[String]) -> anyhow::Result<Vec<axum_token_auth::CidrBlock>> {
+    nets.iter()
+        .map(|s| {
+            s.parse::<axum_token_auth::CidrBlock>()
+                .map_err(|e| anyhow::Error::msg(format!("invalid trusted network CIDR {s:?}: {e}")))
+        })
+        .collect()
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the web server wiring genuinely needs all of these inputs"
+)]
+pub async fn main_loop(
+    tcp_listener: tokio::net::TcpListener,
+    token_config: Option<axum_token_auth::TokenConfig>,
+    persistent_secret: cookie::Key,
+    trusted_networks: Vec<axum_token_auth::CidrBlock>,
+    from_device_rx: watch::Receiver<DeviceState>,
+    cfg: FloControllerConfig,
+    user_commands_tx: tokio::sync::broadcast::Sender<FloEvent>,
+    quit_rx: watch::Receiver<bool>,
+) -> Result<(), anyhow::Error> {
+    let bound_addr = tcp_listener.local_addr()?;
+    let token_required = token_config.is_some();
+    let app_state = AppState {
+        from_device_rx,
+        user_commands_tx,
+        cfg,
+        quit_rx,
+        bound_addr,
+        token_required,
+        persistent_secret: persistent_secret.clone(),
     };
+
+    // `AuthConfig` is `#[non_exhaustive]`, so build it via `new` and set fields.
+    let mut cfg = axum_token_auth::AuthConfig::new(persistent_secret);
+    cfg.token_config = token_config;
+    cfg.cookie_name = "braid-bui-session";
+    // Sessions slide forward on use and survive up to 400 days of absence,
+    // enforced server-side via the signed cookie. Existing cookies that
+    // predate this field carry no embedded expiry and are treated as
+    // non-expiring until renewed, so they stay valid across the upgrade.
+    cfg.session_expires = Some(std::time::Duration::from_secs(60 * 60 * 24 * 400)); // 400 days
+    // Clients on a trusted overlay network (e.g. Tailscale/WireGuard) are
+    // accepted without a token; the overlay has already authenticated them.
+    cfg.trusted_networks = trusted_networks;
     let auth_layer = cfg.into_layer();
 
     #[cfg(feature = "bundle_files")]
@@ -270,6 +430,7 @@ pub async fn main_loop(
     let router = axum::Router::new()
         .route(&format!("/{}", flo_core::EVENTS_PATH), get(events_handler))
         .route("/callback", post(callback_handler))
+        .route("/device-connect-urls", get(device_connect_urls_handler))
         .fallback_service(serve_dir)
         .layer(
             tower::ServiceBuilder::new()
@@ -289,4 +450,35 @@ pub async fn main_loop(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_connect_urls;
+
+    #[test]
+    fn loopback_addr_has_no_token_and_is_loopback_only() {
+        let secret = cookie::Key::generate();
+        // A specified (non-wildcard) address yields exactly that one URL.
+        let addr = "127.0.0.1:3440".parse().unwrap();
+        let info = build_connect_urls(addr, false, &secret).unwrap();
+        assert_eq!(info.urls, vec!["http://127.0.0.1:3440/".to_string()]);
+        assert!(info.loopback_only);
+    }
+
+    #[test]
+    fn routable_addr_carries_a_token_and_is_not_loopback() {
+        let secret = cookie::Key::generate();
+        let addr = "192.168.1.5:3440".parse().unwrap();
+        let info = build_connect_urls(addr, true, &secret).unwrap();
+        assert!(!info.loopback_only);
+        assert_eq!(info.urls.len(), 1);
+        let url = &info.urls[0];
+        assert!(
+            url.starts_with("http://192.168.1.5:3440/?token="),
+            "unexpected url: {url}"
+        );
+        // A token must actually be present after `token=`.
+        assert!(url.len() > "http://192.168.1.5:3440/?token=".len());
+    }
 }
