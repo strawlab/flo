@@ -980,6 +980,12 @@ fn strand_args(config: &CameraConfig, data_dir: std::path::PathBuf) -> StrandCam
         ..Default::default()
     });
     args.data_dir = Some(data_dir);
+    // FLO detects for itself, in `spawn_imops_worker`, from the frames Strand
+    // Camera hands to the host sink. Leaving Strand Camera's own detector
+    // available would cost a second threshold-and-moments pass over every
+    // frame, and would offer the operator a panel of ImOps controls in the
+    // camera BUI that cannot affect the detection FLO is actually using.
+    args.disable_imops = true;
     args
 }
 

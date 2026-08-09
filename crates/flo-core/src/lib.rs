@@ -10,7 +10,8 @@ pub use events::*;
 
 pub mod drone_structs;
 pub use drone_structs::{
-    DroneChannelData, GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus, RcConfig,
+    Attitude, DroneChannelData, GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus,
+    LocalPositionNed, MavlinkState, RcConfig, flight_mode_label,
 };
 
 mod eucm_camera;
@@ -36,10 +37,41 @@ pub const CAM_PROXY_PATH: &str = "camera";
 pub const DEFAULT_RTP_BITRATE_KBPS: u32 = 4000;
 
 /// One independently encoded H.264/RTP network stream.
+///
+/// This is what camshow is told to send. Whether the operator currently wants it
+/// sent is [`RtpTargetConfig::enabled`], which is FLO's business: camshow is
+/// given the streams it should be sending and nothing it has to ignore.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
 pub struct RtpTarget {
     pub addr: SocketAddr,
     pub bitrate_kbps: u32,
+}
+
+/// One H.264/RTP destination as FLO holds it: the stream, plus whether it is
+/// being sent.
+///
+/// A disabled destination keeps its address and bitrate so that it can be
+/// switched back on without being retyped.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+pub struct RtpTargetConfig {
+    // Flattened so that a destination reads as one flat object, and so that
+    // anything recorded before this flag existed still deserializes — as
+    // enabled, which is what it was doing.
+    #[serde(flatten)]
+    pub target: RtpTarget,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl RtpTargetConfig {
+    /// A newly added destination, which is sent to immediately: adding one is a
+    /// request to send.
+    pub fn new(target: RtpTarget) -> Self {
+        Self {
+            target,
+            enabled: true,
+        }
+    }
 }
 
 /// The role a connected Strand Camera has in FLO's tracking configuration.
@@ -794,19 +826,30 @@ pub struct DeviceState {
     /// What camshow is currently displaying and sending over RTP.
     #[serde(default)]
     pub display_source: DisplaySource,
-    /// H.264/RTP streams camshow is currently configured to send.
+    /// Every H.264/RTP destination FLO knows about, enabled or not.
+    ///
+    /// Disabled ones are kept here so they can be switched back on without
+    /// being retyped; only the enabled ones are given to camshow.
     #[serde(default)]
-    pub rtp_targets: Vec<RtpTarget>,
+    pub rtp_targets: Vec<RtpTargetConfig>,
+    /// The master switch over all of the destinations above.
+    ///
+    /// With this off camshow is told to send to nothing, freeing the encoders
+    /// and the uplink in one tap while each destination keeps its own
+    /// [`RtpTargetConfig::enabled`] setting for when sending resumes. Adding a
+    /// destination turns it on, since adding one is a request to send.
+    #[serde(default = "default_true")]
+    pub rtp_send_enabled: bool,
     /// Whether starting a `.floz` recording also starts the tracking cameras'
     /// MP4 recordings. Initialized from
     /// [`FloControllerConfig::record_tracking_cam_mp4_with_floz`].
     #[serde(default)]
     pub record_tracking_cam_mp4: bool,
-    /// The flight controller's local-position origin, as requested by FLO and
-    /// as reported back. Everything FLO derives from `LOCAL_POSITION_NED`
-    /// refers to this point, so the operator needs to see it.
-    #[serde(default)]
-    pub gps_origin: GpsOriginStatus,
+    /// What the flight controller has told FLO, or `None` when there is no
+    /// flight controller — in which case the BUI has no MAVLink section to
+    /// show, and the field is left out of the state event entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mavlink: Option<MavlinkState>,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -815,16 +858,36 @@ pub struct DeviceState {
 /// truth.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct LocalFloStateInner {
-    /// The current GNSS RTK mode, if known.
-    pub gnss_rtk_mode: GnssRtkMode,
+    /// What the flight controller has told FLO, mirrored into
+    /// [`DeviceState::mavlink`] each slow tick so the BUI can show it.
+    ///
+    /// `None` means there is no flight controller: only flo-mavlink fills this
+    /// in, and that task runs only when one is configured.
+    #[serde(default)]
+    pub mavlink: Option<MavlinkState>,
     /// True when LOCAL_POSITION_NED is >=10km from global origin.
     #[serde(default)]
     pub local_position_out_of_bounds: bool,
-    /// The local-position origin FLO asked for and the one the flight
-    /// controller reports. Mirrored into [`DeviceState::gps_origin`] each slow
-    /// tick so the BUI can show it.
-    #[serde(default)]
-    pub gps_origin: GpsOriginStatus,
+}
+
+impl LocalFloStateInner {
+    /// The MAVLink state, created on first use.
+    ///
+    /// Reaching for this is what marks a flight controller as present, so it is
+    /// for flo-mavlink only — anything else would make [`Self::mavlink`] claim
+    /// a controller that is not there.
+    pub fn mavlink_mut(&mut self) -> &mut MavlinkState {
+        self.mavlink.get_or_insert_with(Default::default)
+    }
+
+    /// The GNSS mode the flight controller last reported, defaulting to
+    /// [`GnssRtkMode::NoGps`] when there is no controller or it has not said.
+    pub fn gnss_rtk_mode(&self) -> GnssRtkMode {
+        self.mavlink
+            .as_ref()
+            .and_then(|mavlink| mavlink.gnss_rtk_mode.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// FLO state which is not shared with the BUI.
@@ -1276,8 +1339,9 @@ impl DeviceState {
             cam_stale: Default::default(),
             display_source: DisplaySource::default(),
             rtp_targets: Vec::new(),
+            rtp_send_enabled: default_true(),
             record_tracking_cam_mp4: default_true(),
-            gps_origin: GpsOriginStatus::default(),
+            mavlink: None,
         }
     }
 }

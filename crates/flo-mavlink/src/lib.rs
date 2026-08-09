@@ -3,8 +3,8 @@ use flo_core::{
     Angle, Broadway, CommandSource, DeviceMode, DisplaySource, DroneChannelData, FloCommand,
     FloEvent, FloatType, LocalFloState, ModeChangeReason, MyTimestamp, SaveToDiskMsg, StampedJson,
     drone_structs::{
-        self, BatteryState, ChannelCondition, DroneEvent, FlightMode, GnssRtkMode, GpsGlobalOrigin,
-        GpsOriginCheck,
+        self, Attitude, BatteryState, ChannelCondition, DroneEvent, FlightMode, GnssRtkMode,
+        GpsGlobalOrigin, GpsOriginCheck, LocalPositionNed,
     },
     elapsed, now,
 };
@@ -142,8 +142,10 @@ impl DroneCoordinator {
             origin_requested_at: None,
         };
         {
+            // This is also what makes `LocalFloStateInner::mavlink` `Some`,
+            // and so what tells the BUI there is a flight controller at all.
             let mut state = self_.local_flo_state.write().unwrap();
-            state.gps_origin.requested = self_.requested_origin;
+            state.mavlink_mut().gps_origin.requested = self_.requested_origin;
         }
 
         // Below is the old Self::init() method, now moved into the constructor.
@@ -276,7 +278,12 @@ impl DroneCoordinator {
     }
 
     fn set_origin_status_check(&mut self, check: GpsOriginCheck) {
-        self.local_flo_state.write().unwrap().gps_origin.check = check;
+        self.local_flo_state
+            .write()
+            .unwrap()
+            .mavlink_mut()
+            .gps_origin
+            .check = check;
     }
 
     /// Compare what the flight controller reports against what FLO asked for.
@@ -299,8 +306,9 @@ impl DroneCoordinator {
         self.origin_requested_at = None;
         let (check, was) = {
             let mut state = self.local_flo_state.write().unwrap();
-            let was = state.gps_origin.check;
-            (state.gps_origin.on_reported(reported), was)
+            let mavlink = state.mavlink_mut();
+            let was = mavlink.gps_origin.check;
+            (mavlink.gps_origin.on_reported(reported), was)
         };
         match check {
             GpsOriginCheck::Confirmed => {
@@ -423,6 +431,11 @@ impl DroneCoordinator {
                     })?;
                 }
                 let fm = msg.custom_mode;
+                self.local_flo_state
+                    .write()
+                    .unwrap()
+                    .mavlink_mut()
+                    .custom_mode = Some(fm);
                 if self.flight_mode_cd.update(&fm) {
                     self.broadway
                         .drone_events
@@ -448,7 +461,6 @@ impl DroneCoordinator {
                     }))?;
             }
             MavMessage::ALTITUDE(_)
-            | MavMessage::ATTITUDE(_)
             | MavMessage::ATTITUDE_TARGET(_)
             | MavMessage::CURRENT_EVENT_SEQUENCE(_)
             | MavMessage::ESTIMATOR_STATUS(_)
@@ -503,16 +515,24 @@ impl DroneCoordinator {
                 save("UTM_GLOBAL_POSITION", logger, &v)?;
             }
             MavMessage::GPS_RAW_INT(v) => {
-                self.local_flo_state.write().unwrap().gnss_rtk_mode =
-                    convert_gnss_rtk_mode(v.fix_type);
+                self.local_flo_state
+                    .write()
+                    .unwrap()
+                    .mavlink_mut()
+                    .gnss_rtk_mode = Some(convert_gnss_rtk_mode(v.fix_type));
                 save("GPS_RAW_INT", logger, &v)?;
             }
             MavMessage::LOCAL_POSITION_NED(v) => {
                 let local_position_out_of_bounds = is_local_position_out_of_bounds(&v);
-                self.local_flo_state
-                    .write()
-                    .unwrap()
-                    .local_position_out_of_bounds = local_position_out_of_bounds;
+                {
+                    let mut state = self.local_flo_state.write().unwrap();
+                    state.local_position_out_of_bounds = local_position_out_of_bounds;
+                    state.mavlink_mut().local_position = Some(LocalPositionNed {
+                        north_m: v.x as FloatType,
+                        east_m: v.y as FloatType,
+                        down_m: v.z as FloatType,
+                    });
+                }
                 if self
                     .local_position_out_of_bounds_cd
                     .update_and_has_changed_to(&local_position_out_of_bounds, &true)
@@ -521,7 +541,25 @@ impl DroneCoordinator {
                 }
                 save("LOCAL_POSITION_NED", logger, &v)?;
             }
+            // Both attitude messages carry the same attitude, and which one a
+            // flight controller streams varies, so whichever arrives is used.
+            // FLO asks for `ATTITUDE_QUATERNION` explicitly; `ATTITUDE` is in
+            // the default stream set of the controllers seen so far.
+            MavMessage::ATTITUDE(v) => {
+                self.local_flo_state.write().unwrap().mavlink_mut().attitude = Some(Attitude {
+                    roll_rad: v.roll as FloatType,
+                    pitch_rad: v.pitch as FloatType,
+                    yaw_rad: v.yaw as FloatType,
+                });
+            }
             MavMessage::ATTITUDE_QUATERNION(v) => {
+                self.local_flo_state.write().unwrap().mavlink_mut().attitude =
+                    Some(Attitude::from_quaternion(
+                        v.q1 as FloatType,
+                        v.q2 as FloatType,
+                        v.q3 as FloatType,
+                        v.q4 as FloatType,
+                    ));
                 save("ATTITUDE_QUATERNION", logger, &v)?;
             }
             MavMessage::ODOMETRY(v) => {

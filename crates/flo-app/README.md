@@ -46,6 +46,20 @@ standalone Strand Camera. The embedded camera BUI is mounted at
 `/camera/<camera_name>/` on FLO's HTTP server; it does not bind its configured
 per-camera HTTP address.
 
+### Detection is FLO's, and only FLO's
+
+The `imops` block above is the only control over the detection that feeds FLO,
+and it is read once at startup: turning detection off means `enabled: false`
+and a restart.
+
+Strand Camera has a detector of its own — a separate one, enabled from its
+browser UI and reporting over UDP, which FLO does not consume. Each embedded
+camera is therefore started with `disable_imops`, so that detector never runs
+and its **ImOps Detection** panel does not appear in the camera BUI. Both halves
+matter: it would otherwise be a second threshold-and-moments pass over every
+frame for nothing, behind a panel whose checkbox reads *unchecked* while FLO is
+tracking — which is exactly how it was once mistaken for FLO's own control.
+
 FLO camera commands use direct bounded channels in this binary. This includes
 recording start/stop and pre-trigger commands as well as the optional initial
 `mp4_max_framerate` and `mp4_codec` settings. Thus settings formerly sent as

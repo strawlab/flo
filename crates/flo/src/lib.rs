@@ -222,15 +222,34 @@ fn get_device_id() -> Result<flo_core::DeviceId> {
     Ok(device_id)
 }
 
-fn canonical_rtp_targets(targets: Vec<flo_core::RtpTarget>) -> Vec<flo_core::RtpTarget> {
+/// The streams camshow should be sending right now.
+///
+/// Camshow is given exactly what it should be sending, so a destination that is
+/// switched off — individually, or by the master switch — is simply absent.
+/// Both flags leave `state.rtp_targets` alone, which is what lets a stream be
+/// stopped and restarted without its address being retyped.
+fn rtp_targets_to_send(state: &flo_core::DeviceState) -> Vec<flo_core::RtpTarget> {
+    if !state.rtp_send_enabled {
+        return Vec::new();
+    }
+    canonical_rtp_targets(state.rtp_targets.clone())
+        .into_iter()
+        .filter(|config| config.enabled)
+        .map(|config| config.target)
+        .collect()
+}
+
+fn canonical_rtp_targets(
+    targets: Vec<flo_core::RtpTargetConfig>,
+) -> Vec<flo_core::RtpTargetConfig> {
     let mut unique = Vec::with_capacity(targets.len());
-    for target in targets {
-        if target.bitrate_kbps > 0
-            && !unique
-                .iter()
-                .any(|existing: &flo_core::RtpTarget| existing.addr == target.addr)
+    for config in targets {
+        if config.target.bitrate_kbps > 0
+            && !unique.iter().any(|existing: &flo_core::RtpTargetConfig| {
+                existing.target.addr == config.target.addr
+            })
         {
-            unique.push(target);
+            unique.push(config);
         }
     }
     unique
@@ -567,9 +586,10 @@ impl<'a> FloCoordinator<'a> {
         self.my_state.mode = self.tracking_state.mode; //my_state.mode is just a mirror of tracking_state.mode, make sure it's up to date
         // Reflect the writer's current pre-capture buffer fill.
         self.my_state.precapture_buffered_secs = *self.precapture_buffered_rx.borrow();
-        // Mirror the flight controller's local-position origin so the BUI can
-        // show it. flo-mavlink is the only writer.
-        self.my_state.gps_origin = self.local_flo_state.read().unwrap().gps_origin;
+        // Mirror what the flight controller has reported so the BUI can show
+        // it. flo-mavlink is the only writer, and leaves this `None` when there
+        // is no flight controller.
+        self.my_state.mavlink = self.local_flo_state.read().unwrap().mavlink.clone();
         // relay to HTTP server
         self.from_device_http_tx.send(self.my_state.clone())?;
         self.my_state.stereopsis_state = None; //a hack to skip failed stereopsis detections because of centroid packets not arriving promptly, as there are many
@@ -874,11 +894,19 @@ impl<'a> FloCoordinator<'a> {
                     .my_state
                     .rtp_targets
                     .iter()
-                    .any(|target| target.addr == addr)
+                    .any(|config| config.target.addr == addr)
                 {
                     self.my_state
                         .rtp_targets
-                        .push(flo_core::RtpTarget { addr, bitrate_kbps });
+                        .push(flo_core::RtpTargetConfig::new(flo_core::RtpTarget {
+                            addr,
+                            bitrate_kbps,
+                        }));
+                    // Adding a destination is a request to send to it, so it
+                    // takes effect even if sending was switched off. Otherwise
+                    // the new target would sit there doing nothing, looking like
+                    // the add had failed.
+                    self.my_state.rtp_send_enabled = true;
                     self.publish_rtp_targets()?;
                 }
             }
@@ -897,14 +925,14 @@ impl<'a> FloCoordinator<'a> {
                     tracing::warn!(%target, "ignoring zero RTP bitrate");
                     return Ok(());
                 }
-                if let Some(target) = self
+                if let Some(config) = self
                     .my_state
                     .rtp_targets
                     .iter_mut()
-                    .find(|target| target.addr == addr)
-                    && target.bitrate_kbps != bitrate_kbps
+                    .find(|config| config.target.addr == addr)
+                    && config.target.bitrate_kbps != bitrate_kbps
                 {
-                    target.bitrate_kbps = bitrate_kbps;
+                    config.target.bitrate_kbps = bitrate_kbps;
                     self.publish_rtp_targets()?;
                 }
             }
@@ -919,14 +947,54 @@ impl<'a> FloCoordinator<'a> {
                 let old_len = self.my_state.rtp_targets.len();
                 self.my_state
                     .rtp_targets
-                    .retain(|candidate| candidate.addr != target);
+                    .retain(|candidate| candidate.target.addr != target);
                 if self.my_state.rtp_targets.len() != old_len {
                     self.publish_rtp_targets()?;
                 }
             }
+            FloCommand::SetRtpTargetEnabled { target, enabled } => {
+                let addr = match target.parse() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(%target, "ignoring invalid RTP target: {e}");
+                        return Ok(());
+                    }
+                };
+                if let Some(config) = self
+                    .my_state
+                    .rtp_targets
+                    .iter_mut()
+                    .find(|config| config.target.addr == addr)
+                    && config.enabled != enabled
+                {
+                    config.enabled = enabled;
+                    self.publish_rtp_targets()?;
+                }
+            }
+            FloCommand::SetRtpSendEnabled(enable) => {
+                if self.my_state.rtp_send_enabled != enable {
+                    self.my_state.rtp_send_enabled = enable;
+                    self.publish_rtp_targets()?;
+                }
+            }
             FloCommand::SetRtpTargets(targets) => {
-                self.my_state.rtp_targets = canonical_rtp_targets(targets);
-                self.from_device_http_tx.send(self.my_state.clone())?;
+                // Camshow reports the streams it is sending, so they are all
+                // enabled by definition.
+                self.my_state.rtp_targets = canonical_rtp_targets(
+                    targets
+                        .into_iter()
+                        .map(flo_core::RtpTargetConfig::new)
+                        .collect(),
+                );
+                if self.my_state.rtp_send_enabled {
+                    self.from_device_http_tx.send(self.my_state.clone())?;
+                } else {
+                    // This is camshow reporting the destinations it started
+                    // with, which it does once per connection. With sending
+                    // switched off they have to be taken away from it again, or
+                    // a camshow restart would quietly resume streaming.
+                    self.publish_rtp_targets()?;
+                }
             }
             FloCommand::SetRecordingState(enable) => {
                 if enable {
@@ -969,9 +1037,15 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
+    /// Tell camshow which streams to send, and the BUI what FLO now holds.
+    ///
+    /// While sending is disabled camshow is given an empty list: it is the same
+    /// message it already understands, so nothing about the protocol or camshow
+    /// changes, and the destinations stay in `my_state` ready to be switched
+    /// back on.
     fn publish_rtp_targets(&self) -> Result<()> {
-        let targets = canonical_rtp_targets(self.my_state.rtp_targets.clone());
-        self.rtp_targets_tx.send(targets)?;
+        self.rtp_targets_tx
+            .send(rtp_targets_to_send(&self.my_state))?;
         self.from_device_http_tx.send(self.my_state.clone())?;
         Ok(())
     }
@@ -2230,23 +2304,74 @@ mod tests {
         assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
     }
 
+    fn target(addr: &str, bitrate_kbps: u32) -> flo_core::RtpTarget {
+        flo_core::RtpTarget {
+            addr: addr.parse().unwrap(),
+            bitrate_kbps,
+        }
+    }
+
+    fn state_with_targets(targets: Vec<flo_core::RtpTargetConfig>) -> flo_core::DeviceState {
+        let mut state =
+            flo_core::DeviceState::new(flo_core::DeviceId::new([0; flo_core::DEVICE_ID_LEN]));
+        state.rtp_targets = targets;
+        state
+    }
+
     #[test]
     fn rtp_targets_keep_the_first_occurrence_of_each_address() {
-        let first = flo_core::RtpTarget {
-            addr: "127.0.0.1:5600".parse().unwrap(),
-            bitrate_kbps: 4000,
-        };
-        let duplicate = flo_core::RtpTarget {
-            bitrate_kbps: 2000,
-            ..first
-        };
-        let second = flo_core::RtpTarget {
-            addr: "127.0.0.1:5601".parse().unwrap(),
-            bitrate_kbps: 2500,
-        };
+        let first = flo_core::RtpTargetConfig::new(target("127.0.0.1:5600", 4000));
+        let duplicate = flo_core::RtpTargetConfig::new(target("127.0.0.1:5600", 2000));
+        let second = flo_core::RtpTargetConfig::new(target("127.0.0.1:5601", 2500));
         assert_eq!(
             canonical_rtp_targets(vec![first, second, duplicate]),
             vec![first, second]
+        );
+    }
+
+    /// A destination is sent to as soon as it is added.
+    #[test]
+    fn a_new_destination_is_enabled() {
+        let config = flo_core::RtpTargetConfig::new(target("127.0.0.1:5600", 4000));
+        assert!(config.enabled);
+        let state = state_with_targets(vec![config]);
+        assert!(state.rtp_send_enabled, "sending is on by default");
+        assert_eq!(rtp_targets_to_send(&state), vec![config.target]);
+    }
+
+    /// Each destination has its own switch, and switching one off leaves the
+    /// others streaming.
+    #[test]
+    fn only_the_enabled_destinations_are_sent_to() {
+        let mut first = flo_core::RtpTargetConfig::new(target("127.0.0.1:5600", 4000));
+        let second = flo_core::RtpTargetConfig::new(target("127.0.0.1:5601", 2500));
+        first.enabled = false;
+
+        let state = state_with_targets(vec![first, second]);
+        assert_eq!(rtp_targets_to_send(&state), vec![second.target]);
+        // The disabled destination keeps its address and bitrate.
+        assert_eq!(state.rtp_targets[0], first);
+    }
+
+    /// The master switch stops every stream, and restores each destination's own
+    /// setting rather than turning them all back on.
+    #[test]
+    fn the_master_switch_covers_every_destination() {
+        let first = flo_core::RtpTargetConfig::new(target("127.0.0.1:5600", 4000));
+        let mut second = flo_core::RtpTargetConfig::new(target("127.0.0.1:5601", 2500));
+        second.enabled = false;
+
+        let mut state = state_with_targets(vec![first, second]);
+        assert_eq!(rtp_targets_to_send(&state), vec![first.target]);
+
+        state.rtp_send_enabled = false;
+        assert_eq!(rtp_targets_to_send(&state), vec![]);
+
+        state.rtp_send_enabled = true;
+        assert_eq!(
+            rtp_targets_to_send(&state),
+            vec![first.target],
+            "the destination that was switched off individually stays off"
         );
     }
 

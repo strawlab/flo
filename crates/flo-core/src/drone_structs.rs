@@ -28,6 +28,24 @@ pub enum GnssRtkMode {
     Ppp,
 }
 
+impl GnssRtkMode {
+    /// A label for the BUI. The OSD has only a few characters to spend and
+    /// abbreviates separately.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::NoGps => "no GPS",
+            Self::NoFix => "no fix",
+            Self::TwoDFix => "2D fix",
+            Self::ThreeDFix => "3D fix",
+            Self::DGps => "DGPS",
+            Self::RtkFloat => "RTK float",
+            Self::RtkFixed => "RTK fixed",
+            Self::Static => "static",
+            Self::Ppp => "PPP",
+        }
+    }
+}
+
 /// A flight controller's local-position origin, in MAVLink's own units.
 ///
 /// Both `SET_GPS_GLOBAL_ORIGIN` and `GPS_GLOBAL_ORIGIN` carry these integers,
@@ -136,6 +154,140 @@ impl GpsOriginStatus {
             Some(_) => GpsOriginCheck::Mismatched,
         };
         self.check
+    }
+}
+
+/// The drone's position in the flight controller's local NED frame, in meters,
+/// relative to the origin in [`GpsOriginStatus::reported`].
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Default)]
+pub struct LocalPositionNed {
+    pub north_m: FloatType,
+    pub east_m: FloatType,
+    /// Positive *downward*, as MAVLink defines it: a drone above its origin
+    /// reports a negative value here.
+    pub down_m: FloatType,
+}
+
+/// Below this horizontal offset no direction is reported. The compass point
+/// would be estimator noise rather than a bearing, and would spin while the
+/// drone sat still over its origin.
+const MIN_DIRECTIONAL_DISTANCE_M: FloatType = 0.5;
+
+/// The eight compass points, in bearing order from north, clockwise.
+const COMPASS_POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+impl LocalPositionNed {
+    /// Distance from the origin in the horizontal plane, ignoring height.
+    pub fn horizontal_distance_m(&self) -> FloatType {
+        self.north_m.hypot(self.east_m)
+    }
+
+    /// Which way the drone lies from the origin, to eight compass points, or
+    /// `None` when it is too close to the origin for a direction to mean
+    /// anything.
+    pub fn cardinal_8(&self) -> Option<&'static str> {
+        if self.horizontal_distance_m() < MIN_DIRECTIONAL_DISTANCE_M {
+            return None;
+        }
+        // `atan2(east, north)` is the compass convention — zero at north,
+        // increasing clockwise — which swaps the arguments of the mathematical
+        // one.
+        let bearing_deg = self.east_m.atan2(self.north_m).to_degrees();
+        let sector = (bearing_deg / 45.0).round() as i32;
+        Some(COMPASS_POINTS[sector.rem_euclid(8) as usize])
+    }
+
+    /// The horizontal offset the way an operator says it out loud, such as
+    /// `SW 200 m`. Directly over the origin there is no direction to give, so
+    /// only the distance is returned.
+    pub fn horizontal_offset_str(&self) -> String {
+        let distance = self.horizontal_distance_m();
+        match self.cardinal_8() {
+            Some(direction) => format!("{direction} {distance:.0} m"),
+            None => format!("{distance:.1} m"),
+        }
+    }
+}
+
+/// The drone's attitude, in radians.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Default)]
+pub struct Attitude {
+    pub roll_rad: FloatType,
+    pub pitch_rad: FloatType,
+    /// Rotation about the down axis, in MAVLink's -pi..pi.
+    pub yaw_rad: FloatType,
+}
+
+impl Attitude {
+    /// Recover roll, pitch and yaw from an `ATTITUDE_QUATERNION`.
+    ///
+    /// The arguments are that message's `q1..q4`, which is (w, x, y, z) of a
+    /// unit quaternion taking the NED earth frame to the body frame. This is
+    /// the standard yaw-pitch-roll extraction from it.
+    pub fn from_quaternion(w: FloatType, x: FloatType, y: FloatType, z: FloatType) -> Self {
+        Self {
+            roll_rad: (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y)),
+            // Clamped because a quaternion that is a hair off unit length —
+            // which is what arrives over the wire — can push this just past 1
+            // and make `asin` return NaN at straight up or straight down.
+            pitch_rad: (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin(),
+            yaw_rad: (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z)),
+        }
+    }
+
+    pub fn roll_deg(&self) -> FloatType {
+        self.roll_rad.to_degrees()
+    }
+
+    pub fn pitch_deg(&self) -> FloatType {
+        self.pitch_rad.to_degrees()
+    }
+
+    /// Yaw as a compass heading, 0..360 degrees, rather than MAVLink's signed
+    /// range: that is how a heading is read off any other instrument.
+    pub fn yaw_heading_deg(&self) -> FloatType {
+        self.yaw_rad.to_degrees().rem_euclid(360.0)
+    }
+}
+
+/// What the flight controller has told FLO, mirrored into
+/// [`crate::DeviceState`] for the BUI.
+///
+/// The fields are separately optional because their messages arrive
+/// independently, and a flight controller that streams one may not stream
+/// another.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Default)]
+pub struct MavlinkState {
+    /// The local-position origin FLO asked for and the one the flight
+    /// controller reports. Everything below is relative to the latter.
+    pub gps_origin: GpsOriginStatus,
+    pub local_position: Option<LocalPositionNed>,
+    pub attitude: Option<Attitude>,
+    /// `None` until the first `GPS_RAW_INT`, which is not the same as
+    /// [`GnssRtkMode::NoGps`]: that is the flight controller saying it has no
+    /// GPS, rather than FLO not yet knowing.
+    pub gnss_rtk_mode: Option<GnssRtkMode>,
+    /// `HEARTBEAT.custom_mode`, kept raw. See [`flight_mode_label`].
+    pub custom_mode: Option<u32>,
+}
+
+/// A label for a `HEARTBEAT.custom_mode`.
+///
+/// [`FlightMode`] enumerates PX4's values. A flight controller that numbers its
+/// modes differently — ArduPilot's are unrelated to PX4's, and ardupilotmega is
+/// the dialect FLO speaks — gets the raw value shown rather than a wrong name
+/// or a bare "other".
+pub fn flight_mode_label(custom_mode: u32) -> String {
+    match FlightMode::from(custom_mode) {
+        FlightMode::Manual => "manual".to_string(),
+        FlightMode::Altitude => "altitude".to_string(),
+        FlightMode::Position => "position".to_string(),
+        FlightMode::Hold => "hold".to_string(),
+        FlightMode::Return => "return".to_string(),
+        FlightMode::Offboard => "offboard".to_string(),
+        FlightMode::Takeoff => "takeoff".to_string(),
+        FlightMode::Land => "land".to_string(),
+        FlightMode::Other => format!("unrecognized (0x{custom_mode:08x})"),
     }
 }
 
@@ -426,6 +578,123 @@ impl FlightMode {
             let sub_mode = (fm >> 24) & 0xFF;
             Some((fm, main_mode as f32, sub_mode as f32))
         }
+    }
+}
+
+#[cfg(test)]
+mod mavlink_state_tests {
+    use super::{Attitude, LocalPositionNed, flight_mode_label};
+
+    fn at(north_m: f64, east_m: f64) -> LocalPositionNed {
+        LocalPositionNed {
+            north_m,
+            east_m,
+            down_m: 0.0,
+        }
+    }
+
+    #[test]
+    fn horizontal_distance_ignores_height() {
+        let position = LocalPositionNed {
+            north_m: 3.0,
+            east_m: 4.0,
+            down_m: -100.0,
+        };
+        assert!((position.horizontal_distance_m() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn each_axis_and_diagonal_gets_its_compass_point() {
+        assert_eq!(at(10.0, 0.0).cardinal_8(), Some("N"));
+        assert_eq!(at(10.0, 10.0).cardinal_8(), Some("NE"));
+        assert_eq!(at(0.0, 10.0).cardinal_8(), Some("E"));
+        assert_eq!(at(-10.0, 10.0).cardinal_8(), Some("SE"));
+        assert_eq!(at(-10.0, 0.0).cardinal_8(), Some("S"));
+        assert_eq!(at(-10.0, -10.0).cardinal_8(), Some("SW"));
+        assert_eq!(at(0.0, -10.0).cardinal_8(), Some("W"));
+        assert_eq!(at(10.0, -10.0).cardinal_8(), Some("NW"));
+    }
+
+    /// Each point covers 45 degrees, so the switch is at 22.5.
+    #[test]
+    fn a_bearing_takes_the_nearest_of_the_eight_points() {
+        let bearing = |deg: f64| {
+            let (sin, cos) = deg.to_radians().sin_cos();
+            at(100.0 * cos, 100.0 * sin).cardinal_8()
+        };
+        assert_eq!(bearing(22.4), Some("N"));
+        assert_eq!(bearing(22.6), Some("NE"));
+        // Wrapping the far side of north, where the sector index goes negative.
+        assert_eq!(bearing(-22.4), Some("N"));
+        assert_eq!(bearing(-22.6), Some("NW"));
+        assert_eq!(bearing(-170.0), Some("S"));
+    }
+
+    /// Over the origin the bearing is estimator noise, so no direction is given.
+    #[test]
+    fn no_direction_is_reported_from_on_top_of_the_origin() {
+        assert_eq!(at(0.0, 0.0).cardinal_8(), None);
+        assert_eq!(at(0.2, -0.2).cardinal_8(), None);
+        assert_eq!(at(0.0, 0.0).horizontal_offset_str(), "0.0 m");
+    }
+
+    #[test]
+    fn the_horizontal_offset_reads_as_a_direction_and_a_distance() {
+        let position = at(-141.421356, -141.421356);
+        assert_eq!(position.horizontal_offset_str(), "SW 200 m");
+    }
+
+    #[test]
+    fn a_level_northward_quaternion_is_all_zeros() {
+        let attitude = Attitude::from_quaternion(1.0, 0.0, 0.0, 0.0);
+        assert!(attitude.roll_deg().abs() < 1e-9);
+        assert!(attitude.pitch_deg().abs() < 1e-9);
+        assert!(attitude.yaw_heading_deg().abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_quaternion_round_trips_to_roll_pitch_and_yaw() {
+        // A quarter turn about the down axis is a heading of due east.
+        let half = std::f64::consts::FRAC_PI_4;
+        let yawed = Attitude::from_quaternion(half.cos(), 0.0, 0.0, half.sin());
+        assert!((yawed.yaw_heading_deg() - 90.0).abs() < 1e-6);
+
+        // 30 degrees of roll, about the forward axis.
+        let half = 15f64.to_radians();
+        let rolled = Attitude::from_quaternion(half.cos(), half.sin(), 0.0, 0.0);
+        assert!((rolled.roll_deg() - 30.0).abs() < 1e-6);
+        assert!(rolled.pitch_deg().abs() < 1e-6);
+    }
+
+    /// A quaternion arrives as four floats and need not be exactly unit length.
+    /// Straight up is where that pushes `asin` out of range.
+    #[test]
+    fn a_slightly_long_quaternion_pointing_up_is_not_nan() {
+        let attitude = Attitude::from_quaternion(0.7072, 0.0, 0.7072, 0.0);
+        assert!((attitude.pitch_deg() - 90.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn yaw_is_reported_as_a_heading_rather_than_a_signed_angle() {
+        let attitude = Attitude {
+            roll_rad: 0.0,
+            pitch_rad: 0.0,
+            yaw_rad: -std::f64::consts::FRAC_PI_2,
+        };
+        assert!((attitude.yaw_heading_deg() - 270.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_known_flight_mode_gets_its_name() {
+        assert_eq!(flight_mode_label(0x0003_0000), "position");
+        assert_eq!(flight_mode_label(0x0001_0000), "manual");
+    }
+
+    /// A controller numbering its modes differently — every ArduPilot one —
+    /// should show what it actually reported.
+    #[test]
+    fn an_unrecognized_flight_mode_shows_its_raw_value() {
+        assert_eq!(flight_mode_label(0x1234), "unrecognized (0x00001234)");
     }
 }
 

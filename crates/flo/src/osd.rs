@@ -188,7 +188,7 @@ pub(crate) async fn run_osd_loop(
                     let (gnss_rtk_mode, local_position_out_of_bounds) = {
                         let local_state = local_flo_state.read().unwrap();
                         (
-                            local_state.gnss_rtk_mode.clone(),
+                            local_state.gnss_rtk_mode(),
                             local_state.local_position_out_of_bounds,
                         )
                     };
