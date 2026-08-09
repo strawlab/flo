@@ -16,6 +16,9 @@ use std::{collections::BTreeMap, convert::Infallible, io::Write, net::SocketAddr
 use tokio::sync::watch;
 use tower_http::trace::TraceLayer;
 
+mod webcam_preview;
+pub use webcam_preview::WebcamPreview;
+
 use flo_core::{
     BuiEventData, DeviceState, EVENT_NAME, FLO_QUIT_EVENT_NAME, FloCommand, FloControllerConfig,
     FloEvent,
@@ -128,6 +131,46 @@ async fn events_handler(
     Sse::new(stream)
 }
 
+/// The standalone webcam preview page.
+///
+/// A separate window rather than a panel in the main UI: producing preview
+/// frames costs work in camshow and here, so it happens only while this page
+/// is open and polling.
+async fn webcam_preview_page_handler(
+    session_key: axum_token_auth::SessionKey,
+) -> impl IntoResponse {
+    session_key.is_present();
+    (
+        [(http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        webcam_preview::preview_page_html(),
+    )
+}
+
+/// The newest webcam preview image.
+///
+/// Fetching this is also what marks the preview as wanted, which is what makes
+/// the producer connect to camshow at all. `503` when nothing recent is in
+/// hand -- camshow absent, still connecting, or stopped sending -- which the
+/// page reports rather than showing a stale frame.
+async fn webcam_preview_image_handler(
+    State(app_state): State<AppState>,
+    session_key: axum_token_auth::SessionKey,
+) -> axum::response::Response {
+    session_key.is_present();
+    app_state.webcam_preview.note_demand();
+    match app_state.webcam_preview.snapshot() {
+        Some(jpeg) => (
+            [
+                (http::header::CONTENT_TYPE, "image/jpeg"),
+                (http::header::CACHE_CONTROL, "no-store"),
+            ],
+            jpeg.to_vec(),
+        )
+            .into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE, "no webcam frame").into_response(),
+    }
+}
+
 /// Returns the URLs (one per reachable network interface) at which this web UI
 /// can be reached, each carrying a freshly minted short-lived access token. The
 /// frontend turns these into QR codes for connecting another device.
@@ -189,6 +232,9 @@ struct AppState {
     /// The cookie/token secret, used to mint a fresh short-lived access token
     /// when a device-connection QR code is requested.
     persistent_secret: cookie::Key,
+    /// The newest webcam preview image, filled by whoever is reading camshow's
+    /// preview link. Empty, and left that way, when no camshow is configured.
+    webcam_preview: WebcamPreview,
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
 }
 
@@ -416,6 +462,7 @@ pub async fn main_loop(
     cfg: FloControllerConfig,
     user_commands_tx: tokio::sync::broadcast::Sender<FloEvent>,
     quit_rx: watch::Receiver<bool>,
+    webcam_preview: WebcamPreview,
 ) -> Result<(), anyhow::Error> {
     let bound_addr = tcp_listener.local_addr()?;
     let token_required = token_config.is_some();
@@ -426,6 +473,7 @@ pub async fn main_loop(
         quit_rx,
         bound_addr,
         token_required,
+        webcam_preview,
         persistent_secret: persistent_secret.clone(),
         strand_cam_proxy_info,
     };
@@ -463,7 +511,15 @@ pub async fn main_loop(
     let router = axum::Router::new()
         .route(&format!("/{}", flo_core::EVENTS_PATH), get(events_handler))
         .route("/callback", post(callback_handler))
-        .route("/device-connect-urls", get(device_connect_urls_handler));
+        .route("/device-connect-urls", get(device_connect_urls_handler))
+        .route(
+            &format!("/{}", flo_core::WEBCAM_PREVIEW_PATH),
+            get(webcam_preview_page_handler),
+        )
+        .route(
+            &format!("/{}", flo_core::WEBCAM_PREVIEW_IMAGE_PATH),
+            get(webcam_preview_image_handler),
+        );
     let router = nest_embedded_camera_routers(router, embedded_strand_cam_routers)
         .fallback_service(serve_dir)
         .layer(
