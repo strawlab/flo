@@ -331,17 +331,74 @@ impl Message for IncomingCommand {
     {
         use IncomingCommand::*;
 
+        /// Keep a payload we cannot interpret rather than dropping it.
+        ///
+        /// By the time this runs both the header checksum and the CRC have
+        /// been verified, so the bytes are exactly what the controller sent
+        /// and the only thing at fault is this crate's model of them --
+        /// typically a flags field carrying a bit no variant defines, which
+        /// `BitFlags::from_bits` rejects outright. Degrading to `RawMessage`
+        /// is what an unrecognised command id already does, and it keeps the
+        /// bytes for whoever wanted them.
+        ///
+        /// Returning an error instead costs far more than the packet: the
+        /// decoder treats it as lost framing and byte-walks to resynchronise,
+        /// so one undefined bit takes out the surrounding traffic too.
+        fn or_raw<T>(
+            id: u8,
+            bytes: &Bytes,
+            parsed: Result<T, PayloadParseError>,
+            understood: impl FnOnce(T) -> IncomingCommand,
+        ) -> IncomingCommand {
+            match parsed {
+                Ok(payload) => understood(payload),
+                Err(error) => {
+                    tracing::warn!(
+                        command_id = id,
+                        ?error,
+                        payload = ?&bytes[..],
+                        "SimpleBGC payload passed both checksums but was not understood; \
+                         keeping the raw bytes"
+                    );
+                    RawMessage(crate::RawMessage {
+                        typ: id,
+                        payload: bytes.clone(),
+                    })
+                }
+            }
+        }
+
+        // `bytes` is cloned per arm rather than moved: `Bytes` is refcounted,
+        // so this is a pointer bump, and it leaves the original for `or_raw`
+        // to keep when the typed parse fails.
         Ok(match id {
-            CMD_CONFIRM => CommandConfirm(Payload::from_bytes(bytes)?),
-            CMD_ERROR => CommandError(Payload::from_bytes(bytes)?),
-            CMD_BOARD_INFO => BoardInfo(Payload::from_bytes(bytes)?),
-            CMD_BOARD_INFO_3 => BoardInfo3(Payload::from_bytes(bytes)?),
-            CMD_GET_ANGLES => GetAngles(Payload::from_bytes(bytes)?),
-            CMD_READ_PARAMS => ReadParams(Payload::from_bytes(bytes)?),
-            CMD_READ_PARAMS_3 => ReadParams3(Payload::from_bytes(bytes)?),
-            CMD_READ_PARAMS_EXT => ReadParamsExt(Payload::from_bytes(bytes)?),
-            CMD_REALTIME_DATA_3 => RealtimeData3(Payload::from_bytes(bytes)?),
-            _ => IncomingCommand::RawMessage(crate::RawMessage {
+            CMD_CONFIRM => or_raw(
+                id,
+                &bytes,
+                Payload::from_bytes(bytes.clone()),
+                CommandConfirm,
+            ),
+            CMD_ERROR => or_raw(id, &bytes, Payload::from_bytes(bytes.clone()), CommandError),
+            CMD_BOARD_INFO => or_raw(id, &bytes, Payload::from_bytes(bytes.clone()), BoardInfo),
+            CMD_BOARD_INFO_3 => or_raw(id, &bytes, Payload::from_bytes(bytes.clone()), BoardInfo3),
+            CMD_GET_ANGLES => or_raw(id, &bytes, Payload::from_bytes(bytes.clone()), GetAngles),
+            CMD_READ_PARAMS => or_raw(id, &bytes, Payload::from_bytes(bytes.clone()), ReadParams),
+            CMD_READ_PARAMS_3 => {
+                or_raw(id, &bytes, Payload::from_bytes(bytes.clone()), ReadParams3)
+            }
+            CMD_READ_PARAMS_EXT => or_raw(
+                id,
+                &bytes,
+                Payload::from_bytes(bytes.clone()),
+                ReadParamsExt,
+            ),
+            CMD_REALTIME_DATA_3 => or_raw(
+                id,
+                &bytes,
+                Payload::from_bytes(bytes.clone()),
+                RealtimeData3,
+            ),
+            _ => RawMessage(crate::RawMessage {
                 typ: id,
                 payload: bytes,
             }),
@@ -462,6 +519,7 @@ impl Encoder<OutgoingCommand> for V2Codec {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{Message, OutgoingCommand, ParamsQuery};
     use std::error::Error;
 
@@ -477,5 +535,84 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// A real `CMD_BOARD_INFO` reply, captured off a board running firmware
+    /// 2.71b9, which this crate used to reject outright: its `STATE_FLAGS1` is
+    /// `44`, and bit 5 had no variant. Both checksums verify, so nothing about
+    /// these bytes is in doubt -- only our reading of them was.
+    const BOARD_INFO_2_71B9: [u8; 24] = [
+        0x24, 86, 18, 104, // '$', CMD_BOARD_INFO, payload len, cmd+len
+        36,  // BOARD_VER 3.6
+        159, 10, // FIRMWARE_VER 2719 -> 2.71b9
+        44, // STATE_FLAGS1: init steps 1 and 2, plus undocumented bit 5
+        191, 252, // BOARD_FEATURES
+        0,   // CONNECTION_FLAG
+        0, 0, 0, 0, // FRW_EXTRA_ID
+        149, 7, 4, 0, 15, 149, 10, // RESERVED
+        59, 130, // CRC16
+    ];
+
+    #[test]
+    fn a_board_info_reply_with_an_undocumented_state_bit_is_understood() {
+        let (msg, read) = IncomingCommand::from_bytes(&BOARD_INFO_2_71B9[..])
+            .expect("the packet verifies, so it must parse");
+        assert_eq!(read, BOARD_INFO_2_71B9.len());
+
+        let IncomingCommand::BoardInfo(info) = msg else {
+            panic!("expected BoardInfo, got {msg:?}");
+        };
+        assert_eq!(info.board_version, 36);
+        assert_eq!(info.firmware_version, 2719);
+        assert_eq!(
+            info.state.bits(),
+            44,
+            "the raw byte must survive intact, undocumented bit and all"
+        );
+        assert_eq!(info.board_features.bits(), 0xFCBF);
+    }
+
+    /// The general guarantee: a payload that verifies but cannot be modelled
+    /// keeps its bytes and costs nothing else. Before this, such a packet
+    /// raised an error, which the decoder read as lost framing.
+    #[test]
+    fn a_verified_but_unmodellable_payload_is_kept_raw() {
+        // A correctly sized CMD_REALTIME_DATA_3 whose RT_DATA_FLAGS byte (at
+        // offset 57 of 63) carries bit 1, which `RTDataFlags` does not define.
+        // The same shape as the CMD_BOARD_INFO failure above, in a command
+        // that arrives continuously rather than once.
+        let mut raw = vec![0u8; 63];
+        raw[57] = 0b10;
+        let payload = Bytes::from(raw);
+        let msg = IncomingCommand::from_payload_bytes(CMD_REALTIME_DATA_3, payload.clone())
+            .expect("an unmodellable payload must not become an error");
+        assert_eq!(
+            msg,
+            IncomingCommand::RawMessage(crate::RawMessage {
+                typ: CMD_REALTIME_DATA_3,
+                payload,
+            }),
+            "the bytes must be handed on rather than dropped"
+        );
+    }
+
+    /// The consequence that actually hurt: one unreadable packet used to take
+    /// the decoder's framing with it, so the *next* packets were lost too.
+    #[test]
+    fn an_unreadable_packet_does_not_cost_the_next_one() {
+        let mut codec = super::V2Codec::default();
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&BOARD_INFO_2_71B9);
+        buf.extend_from_slice(&BOARD_INFO_2_71B9);
+
+        for expected in 0..2 {
+            match codec.decode(&mut buf) {
+                Ok(Some(IncomingCommand::BoardInfo(info))) => {
+                    assert_eq!(info.firmware_version, 2719)
+                }
+                other => panic!("packet {expected} did not decode: {other:?}"),
+            }
+        }
+        assert!(buf.is_empty(), "both packets should be consumed");
     }
 }
