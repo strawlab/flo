@@ -614,7 +614,22 @@ impl<'a> FloCoordinator<'a> {
     /// cameras' MP4 recordings start here too, so one operator action saves
     /// every source — the same thing arming over MAVLink does.
     async fn start_recording(&mut self, include_precapture: bool) -> Result<()> {
-        let creation_time = chrono::Local::now();
+        // A pre-capture recording begins in the past, so date it from where its
+        // data actually starts rather than from the trigger. Every output takes
+        // its name from this one value, which keeps the `.floz` and the webcam
+        // MP4 named for the same instant.
+        //
+        // The buffered span, not the configured window: shortly after the
+        // window is set or enlarged the buffer holds less than was asked for.
+        // It is still an estimate — each writer keeps its own buffer, so their
+        // first record lands near this time rather than exactly on it.
+        let now = chrono::Local::now();
+        let creation_time = if include_precapture {
+            let buffered_secs = (*self.precapture_buffered_rx.borrow()).max(0.0);
+            now - chrono::TimeDelta::microseconds((buffered_secs * 1e6) as i64)
+        } else {
+            now
+        };
         let floz_dirname = creation_time.format(FLO_DIRNAME_TEMPLATE).to_string();
         if !FLO_DIRNAME_RE.is_match(&floz_dirname) {
             tracing::error!("new dirname does not match expected pattern");
