@@ -66,7 +66,7 @@ impl WirePixelFormat {
         }
     }
 
-    fn from_wire(byte: u8) -> Option<Self> {
+    pub(crate) fn from_wire(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Mono8),
             1 => Some(Self::Rgb8),

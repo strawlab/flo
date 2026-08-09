@@ -573,3 +573,11 @@ details summary {
     font-size: 1.15rem;
     overflow-wrap: break-word;
 }
+
+// Build provenance. Present for bug reports, not for reading at a glance.
+#footer {
+    margin-top: 1.5em;
+    font-size: 0.75rem;
+    opacity: 0.7;
+    overflow-wrap: break-word;
+}

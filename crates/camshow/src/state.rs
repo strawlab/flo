@@ -27,6 +27,9 @@ pub(crate) struct OsdSnapshot {
 pub(crate) enum RecordingCommand {
     Start(Box<RecordingStart>),
     Stop,
+    /// Resize the pre-capture ring buffer. Travels on this channel because the
+    /// buffer lives in the capture loop, next to the frames that fill it.
+    SetPreCaptureSeconds(f64),
 }
 
 /// One frame the GUI draws on the next repaint. Produced by the capture loop.

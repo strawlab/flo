@@ -13,6 +13,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, warn};
 
 use crate::{
+    preview::PreviewServer,
     state::{OsdSnapshot, RecordingCommand},
     video_link::LatestRelayedFrame,
 };
@@ -21,6 +22,7 @@ use crate::{
 pub(crate) struct Server {
     pub(crate) listen_addr: String,
     pub(crate) video_listen_addr: String,
+    pub(crate) preview_listen_addr: String,
     /// Where the video link deposits the newest relayed frame.
     pub(crate) relayed: LatestRelayedFrame,
     pub(crate) osd_tx: watch::Sender<Option<OsdSnapshot>>,
@@ -35,10 +37,14 @@ pub(crate) struct Server {
     /// is marked seen by `main`, so FLO's selection is never overwritten when
     /// a connection first opens.
     pub(crate) gui_display_source_rx: watch::Receiver<DisplaySource>,
+    /// Serves webcam frames to flo's browser preview. An `Option` only so
+    /// [`Server::run`] can take it without partially moving out of `self`,
+    /// which the control link's `&mut self` borrow would forbid.
+    pub(crate) preview_server: Option<PreviewServer>,
 }
 
 impl Server {
-    /// Serves both links until either one's listener fails to bind.
+    /// Serves all three links until any one's listener fails to bind.
     ///
     /// A bind failure is fatal because it cannot be recovered from in place:
     /// the caller shuts the process down so a supervisor can restart it or the
@@ -46,9 +52,20 @@ impl Server {
     /// retried inside each server.
     pub(crate) async fn run(mut self) -> Result<()> {
         let video = crate::video_link::serve(self.video_listen_addr.clone(), self.relayed.clone());
+        let preview_listen_addr = self.preview_listen_addr.clone();
+        let preview_server = self.preview_server.take();
+        let preview = async move {
+            match preview_server {
+                Some(server) => server.run(preview_listen_addr).await,
+                // Nothing constructs a `Server` without one; if that ever
+                // changes, the other two links carry on without a preview.
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             result = self.serve_control() => result,
             result = video => result,
+            result = preview => result,
         }
     }
 
@@ -164,6 +181,9 @@ impl Server {
                 }
                 FloToCamshow::StopRecording => {
                     recording_tx.send(RecordingCommand::Stop)?;
+                }
+                FloToCamshow::SetPreCaptureSeconds { secs } => {
+                    recording_tx.send(RecordingCommand::SetPreCaptureSeconds(secs))?;
                 }
                 FloToCamshow::SetRtpTargets { targets } => {
                     rtp_targets_tx.send(targets)?;

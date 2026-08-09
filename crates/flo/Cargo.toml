@@ -51,6 +51,10 @@ json-lines = { version = "0.1.1", features = ["codec"] }
 multiwii_serial_protocol_v2.workspace = true
 
 camshow-protocol.workspace = true
+convert-image.workspace = true
+machine-vision-formats.workspace = true
+strand-dynamic-frame = { workspace = true, features = ["convert-image"] }
+
 flo-core.workspace = true
 flo-mavlink.workspace = true
 flo-webserver = { path = "../flo-webserver", default-features = false }
@@ -67,6 +71,9 @@ strand-cam-remote-control.workspace = true
 [dev-dependencies]
 approx.workspace = true
 floz-parser.workspace = true
+# Decoding the preview JPEGs we produce, to check they carry the pixels they
+# were handed rather than merely being well-formed.
+image = { workspace = true, features = ["jpeg"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ansi_term = "0.12.1"

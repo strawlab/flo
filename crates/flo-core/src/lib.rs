@@ -29,6 +29,15 @@ pub mod utils;
 pub use utils::{ChangeDetector, MyTimestamp, Timestamped, elapsed, elapsed_by, now};
 
 pub const EVENTS_PATH: &str = "events";
+
+/// Standalone page showing camshow's webcam. Opened from the main UI in its
+/// own window rather than embedded: the whole preview path only runs while
+/// this page is open. See `flo_webserver::WebcamPreview`.
+pub const WEBCAM_PREVIEW_PATH: &str = "webcam-preview";
+
+/// The newest webcam preview image, as JPEG. Fetching it is also what tells
+/// FLO the preview is wanted, so nothing is produced until this is polled.
+pub const WEBCAM_PREVIEW_IMAGE_PATH: &str = "webcam-preview.jpg";
 /// URL path under which FLO reverse-proxies its configured Strand Cameras.
 /// This matches Braid's camera proxy API.
 pub const CAM_PROXY_PATH: &str = "camera";

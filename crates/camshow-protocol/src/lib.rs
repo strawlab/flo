@@ -8,12 +8,15 @@
 //! showing the camera regardless of whether flo is connected, so the link is
 //! best-effort.
 //!
-//! Relayed camera frames travel on a second, separate connection with its own
-//! binary framing — see [`video`].
+//! Two further connections carry pixels, each with its own binary framing and
+//! its own port: [`video`] relays tracking-camera frames from flo to camshow
+//! for the live view, and [`preview`] sends webcam frames back the other way
+//! so flo's browser UI can show what the FPV camera sees.
 
 use osd_utils::OsdCache;
 use serde::{Deserialize, Serialize};
 
+pub mod preview;
 pub mod video;
 
 /// Default address camshow listens on and flo connects to.
@@ -26,7 +29,9 @@ pub const DEFAULT_CAMSHOW_ADDR: &str = "127.0.0.1:2224";
 /// 3: made the control link bidirectional for GUI display-selection requests.
 /// 4: added dynamic H.264/RTP destination management.
 /// 5: made the bitrate independently configurable for every RTP target.
-pub const PROTOCOL_VERSION: u32 = 5;
+/// 6: added pre-capture (`SetPreCaptureSeconds` and
+///    `RecordingStart::include_precapture`).
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Parameters for a recording-start: the codec config, the output
 /// directory, and the timestamp used to derive the file name. Defined as a
@@ -37,6 +42,14 @@ pub struct RecordingStart {
     pub creation_time: chrono::DateTime<chrono::Local>,
     pub data_dir: camino::Utf8PathBuf,
     pub mp4_cfg: strand_cam_remote_control::RecordingConfig,
+    /// Whether to begin the file with camshow's pre-capture buffer, so the
+    /// recording starts before the operator triggered it. When false the
+    /// buffer is left alone and recording starts from the next frame.
+    ///
+    /// `creation_time` is flo's estimate of where such a recording begins:
+    /// camshow's buffer is its own, so the first frame written lands near
+    /// that time rather than exactly on it.
+    pub include_precapture: bool,
 }
 
 /// Messages flo sends to camshow.
@@ -56,6 +69,12 @@ pub enum FloToCamshow {
     StartRecording(Box<RecordingStart>),
     /// Stop recording, finalize the file.
     StopRecording,
+    /// Size camshow's pre-capture ring buffer, in seconds of video. Zero
+    /// disables it and frees whatever it holds.
+    ///
+    /// State, not an event: camshow forgets it when the link drops, so flo
+    /// resends this on every connection the way it does the display source.
+    SetPreCaptureSeconds { secs: f64 },
     /// Replace the complete set of independently configured H.264/RTP streams.
     SetRtpTargets { targets: Vec<flo_core::RtpTarget> },
     /// Choose what the display and RTP stream show. A non-webcam source needs
@@ -122,6 +141,7 @@ mod tests {
                 .unwrap(),
             data_dir: camino::Utf8PathBuf::from("/tmp/flo"),
             mp4_cfg: strand_cam_remote_control::RecordingConfig::default(),
+            include_precapture: true,
         };
         let msg = FloToCamshow::StartRecording(Box::new(start));
         let s = serde_json::to_string(&msg).unwrap();
@@ -130,9 +150,21 @@ mod tests {
         match roundtrip(&msg) {
             FloToCamshow::StartRecording(rt) => {
                 assert_eq!(rt.data_dir, camino::Utf8PathBuf::from("/tmp/flo"));
+                assert!(rt.include_precapture);
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn set_precapture_seconds_roundtrip() {
+        let msg = FloToCamshow::SetPreCaptureSeconds { secs: 12.5 };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert_eq!(s, r#"{"kind":"set_pre_capture_seconds","secs":12.5}"#);
+        assert!(matches!(
+            roundtrip(&msg),
+            FloToCamshow::SetPreCaptureSeconds { secs } if secs == 12.5
+        ));
     }
 
     #[test]
