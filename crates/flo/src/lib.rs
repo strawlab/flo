@@ -222,6 +222,20 @@ fn get_device_id() -> Result<flo_core::DeviceId> {
     Ok(device_id)
 }
 
+fn canonical_rtp_targets(targets: Vec<flo_core::RtpTarget>) -> Vec<flo_core::RtpTarget> {
+    let mut unique = Vec::with_capacity(targets.len());
+    for target in targets {
+        if target.bitrate_kbps > 0
+            && !unique
+                .iter()
+                .any(|existing: &flo_core::RtpTarget| existing.addr == target.addr)
+        {
+            unique.push(target);
+        }
+    }
+    unique
+}
+
 struct FloCoordinator<'a> {
     data_dir: &'a camino::Utf8Path,
     device_config: &'a mut FloControllerConfig,
@@ -241,7 +255,7 @@ struct FloCoordinator<'a> {
     flo_saver_tx: mpsc::UnboundedSender<SaveToDiskMsg>,
     osd_tx: Option<watch::Sender<OsdState>>,
     my_state: flo_core::DeviceState,
-    _local_flo_state: flo_core::LocalFloState,
+    local_flo_state: flo_core::LocalFloState,
     motors_tx: watch::Sender<MotorValueCache>,
     processing_feedback_tx: watch::Sender<ProcessingFeedback>,
     audio_stream: Option<&'a rodio::OutputStreamHandle>,
@@ -255,6 +269,8 @@ struct FloCoordinator<'a> {
     /// The operator's live-view selection. Read by the camshow link and by the
     /// camera host's frame relay; this is the only writer.
     display_source_tx: watch::Sender<DisplaySource>,
+    /// H.264/RTP destinations selected in the BUI, forwarded to camshow.
+    rtp_targets_tx: watch::Sender<Vec<flo_core::RtpTarget>>,
     highmag_visible_recorder: Option<h264_recorder::H264Recorder>,
     /// Seconds of data currently held in the writer's pre-capture buffer.
     precapture_buffered_rx: watch::Receiver<f64>,
@@ -267,7 +283,7 @@ impl<'a> FloCoordinator<'a> {
         flo_saver_tx: mpsc::UnboundedSender<SaveToDiskMsg>,
         osd_tx: Option<watch::Sender<OsdState>>,
         my_state: flo_core::DeviceState,
-        _local_flo_state: LocalFloState,
+        local_flo_state: LocalFloState,
         motors_tx: watch::Sender<MotorValueCache>,
         processing_feedback_tx: watch::Sender<ProcessingFeedback>,
         audio_stream: Option<&'a rodio::OutputStreamHandle>,
@@ -275,6 +291,7 @@ impl<'a> FloCoordinator<'a> {
         broadway: Broadway,
         camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
         display_source_tx: watch::Sender<DisplaySource>,
+        rtp_targets_tx: watch::Sender<Vec<flo_core::RtpTarget>>,
         data_dir: &'a camino::Utf8Path,
         precapture_buffered_rx: watch::Receiver<f64>,
         strand_cams: InitializedStrandCams,
@@ -305,7 +322,7 @@ impl<'a> FloCoordinator<'a> {
             flo_saver_tx,
             osd_tx,
             my_state,
-            _local_flo_state,
+            local_flo_state,
             motors_tx,
             processing_feedback_tx,
             audio_stream,
@@ -318,6 +335,7 @@ impl<'a> FloCoordinator<'a> {
                 .and_then(|camera| camera.expected_fps),
             camshow_recording_tx,
             display_source_tx,
+            rtp_targets_tx,
             highmag_visible_recorder: None,
             precapture_buffered_rx,
         }
@@ -549,6 +567,9 @@ impl<'a> FloCoordinator<'a> {
         self.my_state.mode = self.tracking_state.mode; //my_state.mode is just a mirror of tracking_state.mode, make sure it's up to date
         // Reflect the writer's current pre-capture buffer fill.
         self.my_state.precapture_buffered_secs = *self.precapture_buffered_rx.borrow();
+        // Mirror the flight controller's local-position origin so the BUI can
+        // show it. flo-mavlink is the only writer.
+        self.my_state.gps_origin = self.local_flo_state.read().unwrap().gps_origin;
         // relay to HTTP server
         self.from_device_http_tx.send(self.my_state.clone())?;
         self.my_state.stereopsis_state = None; //a hack to skip failed stereopsis detections because of centroid packets not arriving promptly, as there are many
@@ -568,7 +589,11 @@ impl<'a> FloCoordinator<'a> {
     /// When `include_precapture` is true, the writer flushes its pre-capture
     /// buffer into the new recording so it begins with the buffered window
     /// (the "post-trigger" behavior). A normal recording passes false.
-    fn start_recording(&mut self, include_precapture: bool) -> Result<()> {
+    ///
+    /// When [`DeviceState::record_tracking_cam_mp4`] is set, the tracking
+    /// cameras' MP4 recordings start here too, so one operator action saves
+    /// every source — the same thing arming over MAVLink does.
+    async fn start_recording(&mut self, include_precapture: bool) -> Result<()> {
         let creation_time = chrono::Local::now();
         let floz_dirname = creation_time.format(FLO_DIRNAME_TEMPLATE).to_string();
         if !FLO_DIRNAME_RE.is_match(&floz_dirname) {
@@ -632,11 +657,28 @@ impl<'a> FloCoordinator<'a> {
             // commands and forwards on reconnect.
             let _ = tx.send(camshow_cmd);
         }
+
+        if self.my_state.record_tracking_cam_mp4 {
+            // `PostTrigger` starts the MP4 with the camera's own buffered
+            // frames prepended, so the video begins in the past like the
+            // `.floz` does; a normal start just begins from now.
+            let arg = if include_precapture {
+                strand_cam_remote_control::CamArg::PostTrigger
+            } else {
+                strand_cam_remote_control::CamArg::SetIsRecordingMp4(true)
+            };
+            self.send_cam_arg_to_all(arg).await;
+        }
         Ok(())
     }
 
     /// Stop saving the current recording, finalizing all outputs.
-    fn stop_recording(&mut self) -> Result<()> {
+    ///
+    /// The tracking cameras are told to stop unconditionally, not only when
+    /// [`DeviceState::record_tracking_cam_mp4`] is set: whatever started those
+    /// MP4s — this coordinator, a post-trigger, or arming — leaving them
+    /// running writes an unbounded file that is never finalized.
+    async fn stop_recording(&mut self) -> Result<()> {
         self.my_state.floz_recording_path = None;
         self.my_state.webcam_recording_path = None;
 
@@ -657,6 +699,8 @@ impl<'a> FloCoordinator<'a> {
         if let Some(tx) = self.camshow_recording_tx.as_ref() {
             let _ = tx.send(camshow_client::Command::Stop);
         }
+        self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(false))
+            .await;
         Ok(())
     }
 
@@ -675,9 +719,14 @@ impl<'a> FloCoordinator<'a> {
     /// without a configured frame rate are skipped with a warning, since the
     /// seconds→frames conversion is impossible without it.
     async fn set_cam_precapture_buffer(&mut self, secs: f64) {
-        for (direct_tx, fps) in [
-            (&self.cam_control_main, self.cam_control_main_expected_fps),
+        for (role, direct_tx, fps) in [
             (
+                StrandCamRole::Main,
+                &self.cam_control_main,
+                self.cam_control_main_expected_fps,
+            ),
+            (
+                StrandCamRole::Secondary,
                 &self.cam_control_secondary,
                 self.cam_control_secondary_expected_fps,
             ),
@@ -692,9 +741,14 @@ impl<'a> FloCoordinator<'a> {
                     send_in_process_cam_arg(direct_tx, arg).await;
                 }
                 _ => {
+                    // Without a frame rate there is no seconds→frames
+                    // conversion, so this camera keeps a zero-length buffer and
+                    // its post-trigger video silently starts from now while the
+                    // `.floz` starts in the past.
                     tracing::warn!(
-                        "Cannot size Strand Cam pre-capture buffer: no `expected_fps` \
-                         configured for this camera"
+                        "The {role:?} tracking camera has no `expected_fps` in its \
+                         `flo-strand-cam` config, so its pre-capture buffer cannot be \
+                         sized: post-trigger will record no video from before the trigger."
                     );
                 }
             }
@@ -793,31 +847,106 @@ impl<'a> FloCoordinator<'a> {
                 // starts or stops sending that camera's frames. The recording is
                 // untouched by design — it is always the clean webcam.
                 tracing::info!("{src:?} selected display source {source:?}");
+                self.my_state.display_source = source;
                 if self.display_source_tx.send(source).is_err() {
                     tracing::warn!(
                         "nothing is listening for the display source; is camshow configured?"
                     );
                 }
+                self.from_device_http_tx.send(self.my_state.clone())?;
+            }
+            FloCommand::AddRtpTarget {
+                target,
+                bitrate_kbps,
+            } => {
+                let addr = match target.parse() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(%target, "ignoring invalid RTP target: {e}");
+                        return Ok(());
+                    }
+                };
+                if bitrate_kbps == 0 {
+                    tracing::warn!(%target, "ignoring zero RTP bitrate");
+                    return Ok(());
+                }
+                if !self
+                    .my_state
+                    .rtp_targets
+                    .iter()
+                    .any(|target| target.addr == addr)
+                {
+                    self.my_state
+                        .rtp_targets
+                        .push(flo_core::RtpTarget { addr, bitrate_kbps });
+                    self.publish_rtp_targets()?;
+                }
+            }
+            FloCommand::SetRtpTargetBitrate {
+                target,
+                bitrate_kbps,
+            } => {
+                let addr = match target.parse() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(%target, "ignoring invalid RTP target: {e}");
+                        return Ok(());
+                    }
+                };
+                if bitrate_kbps == 0 {
+                    tracing::warn!(%target, "ignoring zero RTP bitrate");
+                    return Ok(());
+                }
+                if let Some(target) = self
+                    .my_state
+                    .rtp_targets
+                    .iter_mut()
+                    .find(|target| target.addr == addr)
+                    && target.bitrate_kbps != bitrate_kbps
+                {
+                    target.bitrate_kbps = bitrate_kbps;
+                    self.publish_rtp_targets()?;
+                }
+            }
+            FloCommand::RemoveRtpTarget(target) => {
+                let target = match target.parse() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(%target, "ignoring invalid RTP target: {e}");
+                        return Ok(());
+                    }
+                };
+                let old_len = self.my_state.rtp_targets.len();
+                self.my_state
+                    .rtp_targets
+                    .retain(|candidate| candidate.addr != target);
+                if self.my_state.rtp_targets.len() != old_len {
+                    self.publish_rtp_targets()?;
+                }
+            }
+            FloCommand::SetRtpTargets(targets) => {
+                self.my_state.rtp_targets = canonical_rtp_targets(targets);
+                self.from_device_http_tx.send(self.my_state.clone())?;
             }
             FloCommand::SetRecordingState(enable) => {
                 if enable {
                     // Normal recording: start from now, ignoring the
                     // pre-capture buffer.
-                    self.start_recording(false)?;
+                    self.start_recording(false).await?;
                 } else {
-                    self.stop_recording()?;
+                    self.stop_recording().await?;
                 }
+            }
+            FloCommand::SetRecordTrackingCamMp4(enable) => {
+                self.my_state.record_tracking_cam_mp4 = enable;
+                self.from_device_http_tx.send(self.my_state.clone())?;
             }
             FloCommand::StartPreCaptureRecording => {
                 // Post-trigger: start a recording that also includes the
-                // buffered pre-capture window. Stopping uses the normal
+                // buffered pre-capture window, on the `.floz` and (if tied)
+                // on the tracking cameras' MP4s. Stopping uses the normal
                 // SetRecordingState(false) path.
-                self.start_recording(true)?;
-                // Have the tracking cameras flush their own post-trigger
-                // buffers into their MP4s too, so the recorded video also
-                // begins in the past.
-                self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::PostTrigger)
-                    .await;
+                self.start_recording(true).await?;
             }
             FloCommand::SetPreCaptureSeconds(secs) => {
                 let secs = secs.max(0.0);
@@ -840,6 +969,13 @@ impl<'a> FloCoordinator<'a> {
         Ok(())
     }
 
+    fn publish_rtp_targets(&self) -> Result<()> {
+        let targets = canonical_rtp_targets(self.my_state.rtp_targets.clone());
+        self.rtp_targets_tx.send(targets)?;
+        self.from_device_http_tx.send(self.my_state.clone())?;
+        Ok(())
+    }
+
     async fn handle_drone_event(&mut self, evt: DroneEvent) -> Result<()> {
         use DroneEvent as E;
         match evt {
@@ -853,11 +989,16 @@ impl<'a> FloCoordinator<'a> {
                     ))?;
                 }
 
-                // start/stop saving .mp4 file on tracking cameras
-                self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(
-                    want_recording,
-                ))
-                .await;
+                // Start/stop saving the .mp4 files on the tracking cameras.
+                // When they are tied to the `.floz`, the recording command
+                // above already owns them — and does it better, since a
+                // pre-capture window then starts the video in the past too.
+                if !self.my_state.record_tracking_cam_mp4 {
+                    self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(
+                        want_recording,
+                    ))
+                    .await;
+                }
             }
             _ => {}
         };
@@ -1216,6 +1357,10 @@ where
     for note in flo_core::migrate_config(&mut device_config)? {
         tracing::warn!("migrating config: {note}");
     }
+
+    // The operator can retie or untie the tracking cameras' MP4 recordings in
+    // the BUI; the config supplies only the value FLO starts with.
+    my_state.record_tracking_cam_mp4 = device_config.record_tracking_cam_mp4_with_floz;
 
     // Set the initial home from the motor neutral positions. The home
     // position can be updated by the operator.
@@ -1695,6 +1840,9 @@ async fn app_main(
     // the camera host, which only relays frames for the selected camera. Created
     // here so it exists before the host is spawned below.
     let (display_source_tx, display_source_rx) = watch::channel(DisplaySource::default());
+    // camshow reports its initial CLI destinations through the control link;
+    // after that, this channel carries BUI edits back to camshow.
+    let (rtp_targets_tx, rtp_targets_rx) = watch::channel(Vec::new());
 
     // The composed host owns the embedded Strand Camera servers and provides
     // their routers directly for FLO to mount under its authenticated UI.
@@ -1781,6 +1929,7 @@ async fn app_main(
             canvas_rx,
             rec_rx,
             display_source_rx,
+            rtp_targets_rx,
             broadway.flo_events.clone(),
         ));
         let task: Pin<Box<dyn Future<Output = _>>> = Box::pin(jh);
@@ -1854,6 +2003,9 @@ async fn app_main(
     let mut slow_tick = tokio::time::interval(std::time::Duration::from_millis(1000));
     slow_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Read before `device_config` is borrowed by the coordinator below.
+    let configured_precapture_window_secs = device_config.precapture_window_secs;
+
     let mut coordinator = FloCoordinator::new(
         &mut device_config,
         flo_saver_tx.clone(),
@@ -1867,10 +2019,22 @@ async fn app_main(
         broadway,
         camshow_recording_tx,
         display_source_tx,
+        rtp_targets_tx,
         data_dir,
         precapture_buffered_rx,
         strand_cams,
     );
+
+    // Arm the pre-capture buffer from the config before anything else runs, so
+    // a post-trigger works on a FLO nobody has opened a browser on yet.
+    if configured_precapture_window_secs > 0.0 {
+        coordinator
+            .handle_command(
+                FloCommand::SetPreCaptureSeconds(configured_precapture_window_secs),
+                CommandSource::Automation,
+            )
+            .await?;
+    }
 
     // No motor backend is spawned until after the coordinator exists. The
     // coordinator select loop below is the consumer of motor_position_rx.
@@ -2062,8 +2226,28 @@ mod tests {
 
     #[test]
     fn parse_cli_accepts_composition_arguments() {
-        let cli = parse_cli(["flo-strand-cam", "--config", "sim.yaml"]);
+        let cli = parse_cli(["flo", "--config", "sim.yaml"]);
         assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
+    }
+
+    #[test]
+    fn rtp_targets_keep_the_first_occurrence_of_each_address() {
+        let first = flo_core::RtpTarget {
+            addr: "127.0.0.1:5600".parse().unwrap(),
+            bitrate_kbps: 4000,
+        };
+        let duplicate = flo_core::RtpTarget {
+            bitrate_kbps: 2000,
+            ..first
+        };
+        let second = flo_core::RtpTarget {
+            addr: "127.0.0.1:5601".parse().unwrap(),
+            bitrate_kbps: 2500,
+        };
+        assert_eq!(
+            canonical_rtp_targets(vec![first, second, duplicate]),
+            vec![first, second]
+        );
     }
 
     #[test]

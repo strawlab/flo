@@ -2,7 +2,10 @@ use eyre::{Ok, Result, WrapErr};
 use flo_core::{
     Angle, Broadway, CommandSource, DeviceMode, DisplaySource, DroneChannelData, FloCommand,
     FloEvent, FloatType, LocalFloState, ModeChangeReason, MyTimestamp, SaveToDiskMsg, StampedJson,
-    drone_structs::{self, BatteryState, ChannelCondition, DroneEvent, FlightMode, GnssRtkMode},
+    drone_structs::{
+        self, BatteryState, ChannelCondition, DroneEvent, FlightMode, GnssRtkMode, GpsGlobalOrigin,
+        GpsOriginCheck,
+    },
     elapsed, now,
 };
 use mavlink::{
@@ -86,7 +89,25 @@ struct DroneCoordinator {
     sys_start: MyTimestamp,
     prev_time_boot_ms: u32,
     local_flo_state: LocalFloState,
+    /// The local-position origin the config asks for, if any.
+    requested_origin: Option<GpsGlobalOrigin>,
+    /// How many more times a mismatching origin will be re-sent before giving
+    /// up and leaving the mismatch standing for the operator to act on.
+    origin_retries_left: u8,
+    /// When the origin was requested, so silence can be complained about. None
+    /// once the request has been answered, or if none was made.
+    origin_requested_at: Option<MyTimestamp>,
 }
+
+/// How many times a `SET_GPS_GLOBAL_ORIGIN` that did not take hold is re-sent.
+///
+/// The flight controller streams `GPS_GLOBAL_ORIGIN` once a second, so this is
+/// also roughly how many seconds FLO spends insisting before it stops.
+const ORIGIN_SET_RETRIES: u8 = 5;
+
+/// How long to wait for any `GPS_GLOBAL_ORIGIN` before saying so. The message
+/// is requested at 1 Hz, so this is generous.
+const ORIGIN_REPLY_TIMEOUT_SECS: FloatType = 10.0;
 
 impl DroneCoordinator {
     async fn new(
@@ -116,7 +137,14 @@ impl DroneCoordinator {
             sys_start: now(),
             prev_time_boot_ms: 0,
             local_flo_state,
+            requested_origin: mavlink_cfg.requested_gps_global_origin(),
+            origin_retries_left: ORIGIN_SET_RETRIES,
+            origin_requested_at: None,
         };
+        {
+            let mut state = self_.local_flo_state.write().unwrap();
+            state.gps_origin.requested = self_.requested_origin;
+        }
 
         // Below is the old Self::init() method, now moved into the constructor.
 
@@ -147,24 +175,12 @@ impl DroneCoordinator {
         );
         self_.mavconn.tx.send((self_.my_header, data)).await?;
 
-        // Send GPS global origin to the drone.
-        if let Some(set_gps_global_origin) = &self_.mavlink_cfg.set_gps_global_origin {
-            let (lat, lon, alt) = (
-                set_gps_global_origin[0],
-                set_gps_global_origin[1],
-                set_gps_global_origin[2],
-            );
-            let data = mavlink::ardupilotmega::MavMessage::SET_GPS_GLOBAL_ORIGIN(
-                mavlink::ardupilotmega::SET_GPS_GLOBAL_ORIGIN_DATA {
-                    latitude: (lat * 1e7) as i32,
-                    longitude: (lon * 1e7) as i32,
-                    altitude: (alt * 1e3) as i32,
-                    target_system: 1,
-                },
-            );
-
-            self_.mavconn.tx.send((self_.my_header, data)).await?;
-            tracing::info!("Sent SET_GPS_GLOBAL_ORIGIN: lat: {lat}, lon: {lon}, alt: {alt}",);
+        // Send GPS global origin to the drone. Whether it took hold is checked
+        // against the GPS_GLOBAL_ORIGIN stream requested above.
+        if self_.requested_origin.is_some() {
+            self_.set_origin_status_check(GpsOriginCheck::Awaiting);
+            self_.origin_requested_at = Some(now());
+            self_.send_gps_global_origin().await?;
         }
 
         // Request the RC_CHANNELS message to be streamed at 4 msec interval.
@@ -239,6 +255,101 @@ impl DroneCoordinator {
         self_.mavconn.tx.send((self_.my_header, data)).await?;
 
         Ok(self_)
+    }
+
+    /// Ask the flight controller to use the configured local-position origin.
+    async fn send_gps_global_origin(&mut self) -> Result<()> {
+        let Some(origin) = self.requested_origin else {
+            return Ok(());
+        };
+        let data = mavlink::ardupilotmega::MavMessage::SET_GPS_GLOBAL_ORIGIN(
+            mavlink::ardupilotmega::SET_GPS_GLOBAL_ORIGIN_DATA {
+                latitude: origin.latitude_e7,
+                longitude: origin.longitude_e7,
+                altitude: origin.altitude_mm,
+                target_system: 1,
+            },
+        );
+        self.mavconn.tx.send((self.my_header, data)).await?;
+        tracing::info!("Sent SET_GPS_GLOBAL_ORIGIN: {origin}");
+        Ok(())
+    }
+
+    fn set_origin_status_check(&mut self, check: GpsOriginCheck) {
+        self.local_flo_state.write().unwrap().gps_origin.check = check;
+    }
+
+    /// Compare what the flight controller reports against what FLO asked for.
+    ///
+    /// A `SET_GPS_GLOBAL_ORIGIN` can be silently ignored — the flight
+    /// controller may refuse it while armed, or already have an origin from its
+    /// own first fix. Everything FLO computes from `LOCAL_POSITION_NED` is then
+    /// relative to the wrong point with nothing to show for it, so the request
+    /// is re-sent a bounded number of times and the mismatch is both logged and
+    /// published for the BUI.
+    async fn check_gps_global_origin(
+        &mut self,
+        reported: mavlink::ardupilotmega::GPS_GLOBAL_ORIGIN_DATA,
+    ) -> Result<()> {
+        let reported = GpsGlobalOrigin {
+            latitude_e7: reported.latitude,
+            longitude_e7: reported.longitude,
+            altitude_mm: reported.altitude,
+        };
+        self.origin_requested_at = None;
+        let (check, was) = {
+            let mut state = self.local_flo_state.write().unwrap();
+            let was = state.gps_origin.check;
+            (state.gps_origin.on_reported(reported), was)
+        };
+        match check {
+            GpsOriginCheck::Confirmed => {
+                if was != GpsOriginCheck::Confirmed {
+                    tracing::info!("flight controller confirmed GPS global origin {reported}");
+                }
+                self.origin_retries_left = ORIGIN_SET_RETRIES;
+            }
+            GpsOriginCheck::Mismatched => {
+                // `requested` is Some here: that is what makes a mismatch
+                // possible in the first place.
+                let requested = self.requested_origin.unwrap();
+                if self.origin_retries_left > 0 {
+                    self.origin_retries_left -= 1;
+                    tracing::warn!(
+                        "flight controller is using GPS global origin {reported}, not the \
+                         configured {requested}; re-sending SET_GPS_GLOBAL_ORIGIN \
+                         ({} attempt(s) left)",
+                        self.origin_retries_left
+                    );
+                    self.send_gps_global_origin().await?;
+                } else {
+                    tracing::error!(
+                        "flight controller kept GPS global origin {reported} despite \
+                         {ORIGIN_SET_RETRIES} attempts to set {requested}. Local positions \
+                         are relative to the wrong point."
+                    );
+                }
+            }
+            GpsOriginCheck::NotRequested | GpsOriginCheck::Awaiting => {}
+        }
+        Ok(())
+    }
+
+    /// Complain once if the flight controller never answers with a
+    /// `GPS_GLOBAL_ORIGIN`, which is the other way a request can fail to stick:
+    /// not contradicted, just ignored.
+    fn warn_if_origin_unanswered(&mut self) {
+        let Some(requested_at) = self.origin_requested_at else {
+            return;
+        };
+        if elapsed(requested_at) < ORIGIN_REPLY_TIMEOUT_SECS {
+            return;
+        }
+        self.origin_requested_at = None;
+        tracing::error!(
+            "no GPS_GLOBAL_ORIGIN from the flight controller {ORIGIN_REPLY_TIMEOUT_SECS} s after \
+             SET_GPS_GLOBAL_ORIGIN. Whether the configured origin took hold is unknown."
+        );
     }
 
     async fn send_heartbeat(&mut self) -> Result<()> {
@@ -417,8 +528,9 @@ impl DroneCoordinator {
                 save("ODOMETRY", logger, &v)?;
             }
             MavMessage::GPS_GLOBAL_ORIGIN(v) => {
-                tracing::info!("received GPS_GLOBAL_ORIGIN: {v:?}");
+                tracing::debug!("received GPS_GLOBAL_ORIGIN: {v:?}");
                 save("GPS_GLOBAL_ORIGIN", logger, &v)?;
+                self.check_gps_global_origin(v).await?;
             }
             msg => {
                 tracing::trace!("unknown mavlink message: {msg:?}");
@@ -668,6 +780,7 @@ async fn main_loop(
         tokio::select! {
             _ = send_heartbeat_interval.tick() => {
                 coordinator.send_heartbeat().await?;
+                coordinator.warn_if_origin_unanswered();
             },
             r = coordinator.mavconn.rx.recv() => {
                 let (header, msg) = r?;

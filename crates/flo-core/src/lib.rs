@@ -1,5 +1,6 @@
 use nalgebra as na;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::net::SocketAddr;
 
 pub mod math;
 pub use math::*;
@@ -8,7 +9,9 @@ pub mod events;
 pub use events::*;
 
 pub mod drone_structs;
-pub use drone_structs::{DroneChannelData, GnssRtkMode, RcConfig};
+pub use drone_structs::{
+    DroneChannelData, GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus, RcConfig,
+};
 
 mod eucm_camera;
 
@@ -28,6 +31,16 @@ pub const EVENTS_PATH: &str = "events";
 /// URL path under which FLO reverse-proxies its configured Strand Cameras.
 /// This matches Braid's camera proxy API.
 pub const CAM_PROXY_PATH: &str = "camera";
+
+/// Default bitrate offered when the operator adds an H.264/RTP stream.
+pub const DEFAULT_RTP_BITRATE_KBPS: u32 = 4000;
+
+/// One independently encoded H.264/RTP network stream.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+pub struct RtpTarget {
+    pub addr: SocketAddr,
+    pub bitrate_kbps: u32,
+}
 
 /// The role a connected Strand Camera has in FLO's tracking configuration.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
@@ -388,6 +401,14 @@ fn is_false(val: &bool) -> bool {
     !val
 }
 
+fn is_true(val: &bool) -> bool {
+    *val
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Current config schema version, written into [`FloControllerConfig::config_version`].
 ///
 /// Bump this only when the *meaning* of an existing field changes, so that an
@@ -595,6 +616,24 @@ pub struct FloControllerConfig {
     #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub highmag_visible_recorder: Option<HighmagVisbileRecorderConfig>,
 
+    /// Pre-capture ("post-trigger") window in seconds that FLO starts with.
+    ///
+    /// Zero, the default, means no buffering: the post-trigger button then has
+    /// nothing to flush and records from now, exactly like the normal record
+    /// button. Set this so the buffer is armed from launch rather than only
+    /// after an operator types a window into the BUI — an event worth
+    /// capturing may well happen before anyone has touched the browser.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub precapture_window_secs: FloatType,
+
+    /// Start and stop the tracking cameras' MP4 recordings together with the
+    /// `.floz` recording, so that every source is saved for exactly the span
+    /// the operator asked for. This is what arming over MAVLink already does;
+    /// with this set, the BUI record button and the post-trigger button do the
+    /// same. The BUI can turn it on and off while running.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub record_tracking_cam_mp4_with_floz: bool,
+
     #[serde(default, skip_serializing_if = "is_none_or_default")]
     pub rc_config: Option<RcConfig>,
 
@@ -752,6 +791,22 @@ pub struct DeviceState {
     pub stereopsis_state: Option<StereopsisState>,
     /// Is data from cameras stale.
     pub cam_stale: CamStaleBitmask,
+    /// What camshow is currently displaying and sending over RTP.
+    #[serde(default)]
+    pub display_source: DisplaySource,
+    /// H.264/RTP streams camshow is currently configured to send.
+    #[serde(default)]
+    pub rtp_targets: Vec<RtpTarget>,
+    /// Whether starting a `.floz` recording also starts the tracking cameras'
+    /// MP4 recordings. Initialized from
+    /// [`FloControllerConfig::record_tracking_cam_mp4_with_floz`].
+    #[serde(default)]
+    pub record_tracking_cam_mp4: bool,
+    /// The flight controller's local-position origin, as requested by FLO and
+    /// as reported back. Everything FLO derives from `LOCAL_POSITION_NED`
+    /// refers to this point, so the operator needs to see it.
+    #[serde(default)]
+    pub gps_origin: GpsOriginStatus,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -765,6 +820,11 @@ pub struct LocalFloStateInner {
     /// True when LOCAL_POSITION_NED is >=10km from global origin.
     #[serde(default)]
     pub local_position_out_of_bounds: bool,
+    /// The local-position origin FLO asked for and the one the flight
+    /// controller reports. Mirrored into [`DeviceState::gps_origin`] each slow
+    /// tick so the BUI can show it.
+    #[serde(default)]
+    pub gps_origin: GpsOriginStatus,
 }
 
 /// FLO state which is not shared with the BUI.
@@ -1188,6 +1248,8 @@ impl Default for FloControllerConfig {
             sounds_filenames: Default::default(),
             osd_config: None,
             highmag_visible_recorder: Default::default(),
+            precapture_window_secs: 0.0,
+            record_tracking_cam_mp4_with_floz: default_true(),
             rc_config: None,
             mavlink_config: None,
             extensions: serde_yaml::Mapping::new(),
@@ -1212,6 +1274,10 @@ impl DeviceState {
             precapture_buffered_secs: 0.0,
             stereopsis_state: Default::default(),
             cam_stale: Default::default(),
+            display_source: DisplaySource::default(),
+            rtp_targets: Vec::new(),
+            record_tracking_cam_mp4: default_true(),
+            gps_origin: GpsOriginStatus::default(),
         }
     }
 }

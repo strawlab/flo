@@ -23,11 +23,14 @@ $body-color-light: #404040;
         color: $body-color-dark;
     }
 
+    // The border matters: a modal's background is the same family of grays as
+    // an input's, so without an outline a field inside a modal is invisible.
     input[type="text"],
+    input[type="number"],
     textarea {
         background-color: $text-background-dark;
         color: $text-color-dark;
-        border: 0;
+        border: 1px solid $body-color-dark;
     }
 
     .modal-container {
@@ -62,11 +65,15 @@ $body-color-light: #404040;
         color: $body-color-light;
     }
 
+    // See the dark-scheme comment above: `$text-background-light` and
+    // `$modal-background-light` are the same gray, so the border is what makes
+    // a field inside a modal visible at all.
     input[type="text"],
+    input[type="number"],
     textarea {
         background-color: $text-background-light;
         color: $text-color-light;
-        border: 0;
+        border: 1px solid $body-color-light;
     }
 
     .modal-container {
@@ -143,6 +150,63 @@ input[type="checkbox"] {
     box-sizing: border-box;
     box-shadow: 0 2px 4px 0 rgba(223, 25, 25, 0.92),
         0 25px 50px 0 rgba(0, 255, 255, 0.91);
+}
+
+.rtp-target-modal {
+    height: auto;
+}
+
+.rtp-target-list {
+    padding-left: 1.5em;
+}
+
+.rtp-target-delete {
+    margin-left: 1em;
+}
+
+.rtp-target-bitrate {
+    margin-left: 1em;
+}
+
+.rtp-target-bitrate input {
+    width: 7em;
+}
+
+.rtp-target-address {
+    display: block;
+    margin: 0.5em 0;
+}
+
+.rtp-target-address input {
+    width: 18em;
+    margin-left: 0.5em;
+}
+
+.rtp-target-error {
+    color: #f66;
+}
+
+.gps-origin-ok {
+    color: #2a2;
+}
+
+.gps-origin-warn {
+    color: #c80;
+}
+
+.gps-origin-error {
+    color: #f66;
+    font-weight: bold;
+}
+
+.camshow-source-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1em;
+}
+
+.camshow-source-choice input {
+    margin-right: 0.35em;
 }
 
 // The connect-a-device modal grows with its content (a list of per-interface

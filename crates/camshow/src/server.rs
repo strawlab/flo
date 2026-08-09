@@ -25,7 +25,9 @@ pub(crate) struct Server {
     pub(crate) relayed: LatestRelayedFrame,
     pub(crate) osd_tx: watch::Sender<Option<OsdSnapshot>>,
     pub(crate) recording_tx: tokio::sync::mpsc::UnboundedSender<RecordingCommand>,
-    pub(crate) rtp_bitrate_tx: tokio::sync::mpsc::UnboundedSender<Option<u32>>,
+    /// The current complete RTP destination set, consumed by the capture
+    /// thread and reported to FLO whenever its control link connects.
+    pub(crate) rtp_targets_tx: watch::Sender<Vec<flo_core::RtpTarget>>,
     /// What the capture loop should display. A watch rather than a queue: only
     /// the operator's latest choice matters.
     pub(crate) display_source_tx: watch::Sender<DisplaySource>,
@@ -71,14 +73,14 @@ impl Server {
 
             let osd_tx = self.osd_tx.clone();
             let recording_tx = self.recording_tx.clone();
-            let rtp_bitrate_tx = self.rtp_bitrate_tx.clone();
+            let rtp_targets_tx = self.rtp_targets_tx.clone();
             let display_source_tx = self.display_source_tx.clone();
             if let Err(e) = Self::handle_client(
                 stream,
                 &mut self.gui_display_source_rx,
                 &osd_tx,
                 &recording_tx,
-                &rtp_bitrate_tx,
+                &rtp_targets_tx,
                 &display_source_tx,
             )
             .await
@@ -105,7 +107,7 @@ impl Server {
         gui_display_source_rx: &mut watch::Receiver<DisplaySource>,
         osd_tx: &watch::Sender<Option<OsdSnapshot>>,
         recording_tx: &tokio::sync::mpsc::UnboundedSender<RecordingCommand>,
-        rtp_bitrate_tx: &tokio::sync::mpsc::UnboundedSender<Option<u32>>,
+        rtp_targets_tx: &watch::Sender<Vec<flo_core::RtpTarget>>,
         display_source_tx: &watch::Sender<DisplaySource>,
     ) -> Result<()> {
         stream.set_nodelay(true).ok();
@@ -139,6 +141,11 @@ impl Server {
                         }
                         handshake_done = true;
                         debug!("handshake complete");
+                        requests
+                            .send(CamshowToFlo::RtpTargets {
+                                targets: rtp_targets_tx.borrow().clone(),
+                            })
+                            .await?;
                     }
                     other => eyre::bail!("client sent {other:?} before Hello"),
                 }
@@ -158,8 +165,8 @@ impl Server {
                 FloToCamshow::StopRecording => {
                     recording_tx.send(RecordingCommand::Stop)?;
                 }
-                FloToCamshow::SetRtpBitrateKbps(bitrate_kbps) => {
-                    rtp_bitrate_tx.send(bitrate_kbps)?;
+                FloToCamshow::SetRtpTargets { targets } => {
+                    rtp_targets_tx.send(targets)?;
                 }
                 FloToCamshow::SetDisplaySource { source } => {
                     // An error here means the capture loop is gone, which the

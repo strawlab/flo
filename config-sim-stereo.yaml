@@ -4,12 +4,18 @@
 # motor hardware. Drive it with `floz-replay-inprocess synth`, which projects a
 # virtual-insect trajectory through this same calibration:
 #
-#   floz-replay-inprocess synth --config config-sim-stereo.yaml \
+#   STRAND_CAM_SIM_SPEC=sim-cameras.toml \
+#     floz-replay-inprocess synth --config config-sim-stereo.yaml \
 #       --distance 3 --distance-amplitude 1 -- --config config-sim-stereo.yaml
 #
 # Notes:
+#   * The `sim` backend will not start without STRAND_CAM_SIM_SPEC pointing at
+#     a scenario; `sim-cameras.toml` in this directory is one.
+#   * That backend names its cameras `simcam0`, `simcam1`, ..., so the
+#     `camera_name` values below have to be those. `floz-replay-inprocess`
+#     reads them from here and attributes its synthetic centroids to the same
+#     cameras, so nothing has to be repeated on the command line.
 #   * ImOps is disabled because the in-process source supplies the centroids.
-#   * The camera names must match the synthetic source defaults.
 # Config schema version. Version 2 means kalman_filter_parameters holds
 # RMS values; version 1 (or a missing field) meant variances and is
 # auto-converted on load with a warning.
@@ -64,7 +70,10 @@ motor_timeconstant_secs: .001
 flo-strand-cam:
   main:
     backend: sim
-    camera_name: synth-primary
+    camera_name: simcam0
+    # Matches `fps` in sim-cameras.toml. This is what converts the pre-capture
+    # window from seconds into the camera's post-trigger buffer size.
+    expected_fps: 100.0
     imops:
       enabled: false
       threshold: 200
@@ -72,7 +81,8 @@ flo-strand-cam:
       center_y: 600
   secondary:
     backend: sim
-    camera_name: synth-secondary
+    camera_name: simcam1
+    expected_fps: 100.0
     imops:
       enabled: false
       threshold: 200

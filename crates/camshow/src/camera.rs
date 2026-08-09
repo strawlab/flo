@@ -25,7 +25,7 @@ use std::{
 };
 
 use eyre::{Result, WrapErr};
-use flo_core::DisplaySource;
+use flo_core::{DisplaySource, RtpTarget};
 use osd_overlay::OsdFonts;
 use srt_writer::BufferingSrtFrameWriter;
 use strand_dynamic_frame::DynamicFrameOwned;
@@ -37,7 +37,7 @@ use crate::{
     sink::{FrameSink, SinkConfig, Sinks},
     source::{FrameSource, WebcamSource},
     state::{Frame, OsdSnapshot, RecordingCommand, Timestamp},
-    video_link::LatestRelayedFrame,
+    video_link::{LatestRelayedFrame, RELAYED_FRAME_STALE_AFTER},
 };
 
 /// How long to keep showing the last received OSD canvas after flo stops
@@ -77,7 +77,8 @@ pub(crate) struct CameraTask {
     pub(crate) sinks: SinkConfig,
     pub(crate) osd_rx: watch::Receiver<Option<OsdSnapshot>>,
     pub(crate) recording_rx: mpsc::UnboundedReceiver<RecordingCommand>,
-    pub(crate) rtp_bitrate_rx: mpsc::UnboundedReceiver<Option<u32>>,
+    /// The complete set of RTP stream configurations, updated by FLO at runtime.
+    pub(crate) rtp_targets_rx: watch::Receiver<Vec<RtpTarget>>,
     /// What the display and stream should show: the `--display-source` value to
     /// begin with, then whatever flo selects at runtime. Affects neither the
     /// recording nor the frame watchdog.
@@ -98,6 +99,69 @@ struct ActiveRecording {
     mp4: bg_movie_writer::BgMovieWriter,
     srt: BufferingSrtFrameWriter,
     srt_t0: Timestamp,
+}
+
+/// Chooses relayed frames while hiding the transport delay of an IR-to-IR
+/// source switch. The old IR frame is held only for the normal stale-frame
+/// window; if the new camera does not arrive, webcam fallback still wins.
+struct RelayFrameSelector {
+    selected: DisplaySource,
+    last_relayed: Option<Frame>,
+    handover_started: Option<Instant>,
+}
+
+impl RelayFrameSelector {
+    fn new(selected: DisplaySource) -> Self {
+        Self {
+            selected,
+            last_relayed: None,
+            handover_started: None,
+        }
+    }
+
+    fn select(&mut self, selected: DisplaySource, fresh: Option<Frame>) -> Option<Frame> {
+        self.select_at(selected, fresh, Instant::now())
+    }
+
+    fn select_at(
+        &mut self,
+        selected: DisplaySource,
+        fresh: Option<Frame>,
+        now: Instant,
+    ) -> Option<Frame> {
+        if selected != self.selected {
+            let ir_to_ir =
+                self.selected.strand_cam_role().is_some() && selected.strand_cam_role().is_some();
+            self.handover_started = ir_to_ir.then_some(now);
+            if !ir_to_ir {
+                self.last_relayed = None;
+            }
+            self.selected = selected;
+        }
+
+        if selected == DisplaySource::Webcam {
+            self.last_relayed = None;
+            self.handover_started = None;
+            return None;
+        }
+
+        if let Some(frame) = fresh {
+            self.last_relayed = Some(Arc::clone(&frame));
+            self.handover_started = None;
+            return Some(frame);
+        }
+
+        if self
+            .handover_started
+            .is_some_and(|started| now.duration_since(started) < RELAYED_FRAME_STALE_AFTER)
+        {
+            return self.last_relayed.as_ref().map(Arc::clone);
+        }
+
+        self.last_relayed = None;
+        self.handover_started = None;
+        None
+    }
 }
 
 impl ActiveRecording {
@@ -160,7 +224,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         sinks,
         mut osd_rx,
         mut recording_rx,
-        mut rtp_bitrate_rx,
+        mut rtp_targets_rx,
         mut display_source_rx,
         relayed,
         mut shutdown_rx,
@@ -238,6 +302,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
     let mut active: Option<ActiveRecording> = None;
     let mut last_fallback_warn: Option<Instant> = None;
     let mut display_source = *display_source_rx.borrow_and_update();
+    let mut relay_selector = RelayFrameSelector::new(display_source);
 
     loop {
         if shutting_down.load(Ordering::Acquire) {
@@ -262,12 +327,9 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
             }
         }
 
-        // Same non-blocking, last-one-wins drain as recording commands
-        // above. A closed channel isn't a shutdown signal here: the
-        // recording-command drain above already handles that case for both
-        // channels, since the server task drops them together.
-        while let Ok(kbps) = rtp_bitrate_rx.try_recv() {
-            sinks.set_rtp_bitrate_kbps(kbps);
+        if matches!(rtp_targets_rx.has_changed(), Ok(true)) {
+            let targets = rtp_targets_rx.borrow_and_update().clone();
+            sinks.set_rtp_targets(targets);
         }
 
         // Latest-choice-wins, and cheap enough to consult every frame.
@@ -324,13 +386,20 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         // frame would put the tracking marks in the wrong place. When the
         // selected relay has nothing fresh — it is starting up, flo died, the
         // camera stalled — fall back to the webcam rather than freezing on the
-        // last frame. That is a display event, not a reason to stop: the frame
-        // watchdog is fed by the webcam pull above and only by that.
-        let relayed_frame = match display_source {
+        // last frame. The sole exception is a bounded IR-to-IR handoff, which
+        // holds the old IR frame until the new camera's first frame arrives so
+        // the webcam does not flash between them. This is a display event, not
+        // a reason to stop: the frame watchdog is fed by the webcam pull above
+        // and only by that.
+        let fresh_relayed = match display_source {
             DisplaySource::Webcam => None,
+            source => relayed.peek_fresh(source),
+        };
+        let relayed_frame = relay_selector.select(display_source, fresh_relayed);
+        match display_source {
+            DisplaySource::Webcam => {}
             source => {
-                let fresh = relayed.peek_fresh(source);
-                match &fresh {
+                match &relayed_frame {
                     // Rearm, so a later outage is reported straight away
                     // rather than waiting out the interval.
                     Some(_) => last_fallback_warn = None,
@@ -343,9 +412,8 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
                         }
                     }
                 }
-                fresh
             }
-        };
+        }
 
         let displayed_arc = match relayed_frame {
             Some(relayed_frame) => relayed_frame,
@@ -421,5 +489,95 @@ fn apply_command(cmd: RecordingCommand, active: &mut Option<ActiveRecording>) {
                 rec.finish();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use machine_vision_formats::{owned::OImage, pixel_format::RGB8};
+
+    use super::*;
+
+    fn test_frame(value: u8) -> Frame {
+        let image = OImage::<RGB8>::new(1, 1, 3, vec![value; 3]).unwrap();
+        Arc::new(DynamicFrameOwned::from_static(image))
+    }
+
+    #[test]
+    fn ir_to_ir_handoff_holds_the_old_frame_until_the_new_one_arrives() {
+        let started = Instant::now();
+        let main = test_frame(1);
+        let secondary = test_frame(2);
+        let mut selector = RelayFrameSelector::new(DisplaySource::StrandCamMain);
+
+        let selected = selector
+            .select_at(
+                DisplaySource::StrandCamMain,
+                Some(Arc::clone(&main)),
+                started,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&selected, &main));
+
+        let held = selector
+            .select_at(
+                DisplaySource::StrandCamSecondary,
+                None,
+                started + Duration::from_millis(1),
+            )
+            .expect("the old IR frame bridges the handoff");
+        assert!(Arc::ptr_eq(&held, &main));
+
+        let selected = selector
+            .select_at(
+                DisplaySource::StrandCamSecondary,
+                Some(Arc::clone(&secondary)),
+                started + Duration::from_millis(2),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&selected, &secondary));
+    }
+
+    #[test]
+    fn an_ir_handoff_still_falls_back_after_the_stale_window() {
+        let started = Instant::now();
+        let main = test_frame(1);
+        let mut selector = RelayFrameSelector::new(DisplaySource::StrandCamMain);
+        selector.select_at(DisplaySource::StrandCamMain, Some(main), started);
+
+        selector.select_at(
+            DisplaySource::StrandCamSecondary,
+            None,
+            started + Duration::from_millis(1),
+        );
+        assert!(
+            selector
+                .select_at(
+                    DisplaySource::StrandCamSecondary,
+                    None,
+                    started + RELAYED_FRAME_STALE_AFTER + Duration::from_millis(1),
+                )
+                .is_none(),
+            "a missing secondary camera must eventually use webcam fallback"
+        );
+    }
+
+    #[test]
+    fn webcam_transitions_never_hold_an_ir_frame() {
+        let started = Instant::now();
+        let mut selector = RelayFrameSelector::new(DisplaySource::StrandCamMain);
+        selector.select_at(DisplaySource::StrandCamMain, Some(test_frame(1)), started);
+
+        assert!(
+            selector
+                .select_at(DisplaySource::Webcam, None, started)
+                .is_none()
+        );
+        assert!(
+            selector
+                .select_at(DisplaySource::StrandCamSecondary, None, started)
+                .is_none(),
+            "switching from the webcam to IR must not resurrect an old IR frame"
+        );
     }
 }

@@ -1,0 +1,48 @@
+# Camera scenario for FLO's hardware-free simulation.
+#
+# The `sim` camera backend (Strand Camera's `ci2-sim`) renders synthetic images
+# from a `braid-sim` scenario, and it will not start without one: point
+# `STRAND_CAM_SIM_SPEC` at this file.
+#
+#     STRAND_CAM_SIM_SPEC=sim-cameras.toml flo --config config-sim-stereo.yaml
+#
+# The backend names its cameras `simcam0`, `simcam1`, ... in order, and those
+# are the names a `flo-strand-cam` config's `camera_name` fields must use. Two
+# cameras is what `config-sim-stereo.yaml` and `config-flo-strand-cam-sim.yaml`
+# expect; raising `count` only adds cameras nothing is configured to open.
+#
+# Nothing here has to resemble a FLO deployment. When FLO's own tracking is
+# driven by `floz-replay-inprocess`, ImOps is off and these frames are never
+# looked at; they exist so the acquisition, recording, and video-relay paths
+# have real frames to carry.
+
+# RNG seed driving all deterministic stochastic behavior.
+seed = 1
+# Frame rate. Keep this equal to the `expected_fps` of the cameras in the FLO
+# config: that is what sizes the post-trigger buffer in seconds.
+fps = 100.0
+
+[arena]
+min = [-0.15, -0.15, 0.0]
+max = [0.15, 0.15, 0.30]
+
+[cameras]
+count = 2
+radius_m = 0.6
+height_m = 0.7
+focal_length_px = 900.0
+image_width = 640
+image_height = 512
+
+[blob]
+peak = 160
+sigma = 1.5
+background = 0
+
+[[insects]]
+id = 1
+
+[insects.motion]
+freq_hz = [0.11, 0.13, 0.07]
+phase = [0.0, 1.0, 2.0]
+fill = 0.7

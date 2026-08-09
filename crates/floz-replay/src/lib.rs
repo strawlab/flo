@@ -11,7 +11,7 @@
 pub mod replay;
 pub mod synth;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{self, Result};
 use flo::Extension;
 use tokio::task::JoinHandle;
 
@@ -26,8 +26,28 @@ impl Extension for InProcessCentroidExtension {
         "floz-replay"
     }
 
-    fn spawn(self: Box<Self>, ctx: flo::ExtensionContext<'_>) -> Result<JoinHandle<Result<()>>> {
+    fn spawn(
+        mut self: Box<Self>,
+        ctx: flo::ExtensionContext<'_>,
+    ) -> Result<JoinHandle<Result<()>>> {
         let config = ctx.config.clone();
+        // A synthetic centroid is only useful if it is attributed to a camera
+        // the controller registered: an unknown name is treated as the primary
+        // camera, so a stereo pair never pairs and no distance is recovered.
+        // Take the names from the same config file the camera host reads
+        // rather than making the operator repeat them.
+        if let Self::Synth(args) = self.as_mut() {
+            let names = flo_app::configured_camera_names(args.config_path())?;
+            if args.is_stereo(&config) && names.secondary.is_none() {
+                eyre::bail!(
+                    "config has a `stereopsis_calib` but no `flo-strand-cam.secondary` camera, \
+                     so there is no camera to attribute stereo observations to. Add a secondary \
+                     camera, remove `stereopsis_calib`, or pass `--no-stereo`."
+                );
+            }
+            args.adopt_camera_names(&names);
+        }
+
         let centroid_tx = ctx.centroid_tx;
         Ok(ctx.handle.spawn(async move {
             tokio::task::spawn_blocking(move || match *self {

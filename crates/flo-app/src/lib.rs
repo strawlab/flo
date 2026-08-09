@@ -24,7 +24,13 @@ use tokio::sync::{mpsc, oneshot, watch};
 mod video_relay;
 use video_relay::{VideoRelay, VideoRelayConfig};
 
-const APP_NAME: &str = "flo-strand-cam";
+const APP_NAME: &str = "flo";
+/// The YAML section holding this application's camera-host settings. This is
+/// deliberately *not* `APP_NAME`: the executable was renamed back to `flo` for
+/// continuity with earlier releases, but renaming the config key would break
+/// every deployed configuration file for no gain. Keep in sync with the
+/// `#[serde(rename = ...)]` attributes that deserialize the section.
+const CONFIG_SECTION: &str = "flo-strand-cam";
 /// Cargo package version and the source revision that produced this binary.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (git ", env!("GIT_HASH"), ")");
 /// The lossless Strand Camera-to-FLO queue only absorbs scheduling jitter. A
@@ -492,6 +498,10 @@ struct CameraRuntime {
 }
 
 impl CameraRuntime {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "construction keeps each camera channel and frame path explicit"
+    )]
     fn new(
         config: CameraConfig,
         centroid_tx: flo::CentroidInputSender,
@@ -979,7 +989,7 @@ fn config_path_from_args(args: &[OsString]) -> Result<PathBuf> {
         if arg == "--config" {
             let path = args
                 .next()
-                .ok_or_else(|| eyre!("`flo-strand-cam` requires a path after `--config`"))?;
+                .ok_or_else(|| eyre!("`flo` requires a path after `--config`"))?;
             return Ok(PathBuf::from(path));
         }
         if let Some(path) = arg.to_str().and_then(|arg| arg.strip_prefix("--config=")) {
@@ -987,8 +997,41 @@ fn config_path_from_args(args: &[OsString]) -> Result<PathBuf> {
         }
     }
     Err(eyre!(
-        "`flo-strand-cam` requires `--config <path>` so it can configure its embedded camera host"
+        "`flo` requires `--config <path>` so it can configure its embedded camera host"
     ))
+}
+
+/// The `camera_name` values a config's `flo-strand-cam` section registers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraNames {
+    pub main: String,
+    pub secondary: Option<String>,
+}
+
+/// Read the camera names out of a composed configuration file.
+///
+/// A centroid source composed into this binary has to attribute its
+/// observations to the cameras FLO actually registered, or the controller sees
+/// an unknown camera and never pairs a stereo observation. This is what lets
+/// such a source take the names from the same config file rather than
+/// duplicating them on the command line.
+pub fn configured_camera_names(path: &Path) -> Result<CameraNames> {
+    #[derive(Deserialize)]
+    struct CameraSection {
+        // Must match `CONFIG_SECTION`; `serde(rename)` requires a literal.
+        #[serde(rename = "flo-strand-cam")]
+        camera_host: RawCameraHostConfig,
+    }
+
+    let yaml = std::fs::read_to_string(path)
+        .with_context(|| format!("opening configuration file {}", path.display()))?;
+    let section: CameraSection = serde_yaml::from_str(&yaml)
+        .with_context(|| format!("parsing flo-strand-cam configuration in {}", path.display()))?;
+    let camera_host = CameraHostConfig::resolve(section.camera_host)?;
+    Ok(CameraNames {
+        main: camera_host.main.camera_name,
+        secondary: camera_host.secondary.map(|camera| camera.camera_name),
+    })
 }
 
 fn load_composed_config(
@@ -1004,6 +1047,7 @@ fn load_composed_config(
 fn parse_composed_config(yaml: &str) -> Result<(CameraHostConfig, flo_core::FloControllerConfig)> {
     #[derive(Deserialize)]
     struct CameraSection {
+        // Must match `CONFIG_SECTION`; `serde(rename)` requires a literal.
         #[serde(rename = "flo-strand-cam")]
         camera_host: RawCameraHostConfig,
     }
@@ -1018,7 +1062,7 @@ fn parse_composed_config(yaml: &str) -> Result<(CameraHostConfig, flo_core::FloC
     let mut flo_config: flo_core::FloControllerConfig = serde_yaml::from_str(yaml)?;
     flo_config
         .extensions
-        .remove(serde_yaml::Value::String(APP_NAME.to_owned()));
+        .remove(serde_yaml::Value::String(CONFIG_SECTION.to_owned()));
     Ok((camera_host, flo_config))
 }
 
@@ -1062,7 +1106,7 @@ fn compose_options(
 ) -> Result<flo::AppOptions> {
     if options.camera_host.is_some() {
         return Err(eyre!(
-            "flo-strand-cam owns the first-class camera host; caller AppOptions.camera_host must be None"
+            "flo owns the first-class camera host; caller AppOptions.camera_host must be None"
         ));
     }
     options.camera_host = Some(Box::new(StrandCamHost {
@@ -1105,14 +1149,14 @@ mod tests {
     #[test]
     fn version_arguments_do_not_require_a_configuration_file() {
         assert!(is_version_request(&[
-            OsString::from("flo-strand-cam"),
+            OsString::from("flo"),
             OsString::from("--version"),
         ]));
         assert!(is_version_request(&[
-            OsString::from("flo-strand-cam"),
+            OsString::from("flo"),
             OsString::from("-V"),
         ]));
-        assert!(!is_version_request(&[OsString::from("flo-strand-cam")]));
+        assert!(!is_version_request(&[OsString::from("flo")]));
     }
 
     #[test]
@@ -1216,6 +1260,55 @@ mod tests {
         assert!(compose_options(composed, config).is_err());
     }
 
+    /// Every shipped `sim` configuration has to name its cameras the way the
+    /// `ci2-sim` backend does — it enumerates `simcam0`, `simcam1`, ... and
+    /// nothing else — or the camera never opens and the documented command
+    /// fails at startup. This is exactly how `config-sim-stereo.yaml` went
+    /// stale.
+    #[test]
+    fn every_shipped_sim_config_uses_the_backend_s_camera_names() {
+        for (name, yaml) in [
+            (
+                "config-flo-strand-cam-sim.yaml",
+                include_str!("../../../config-flo-strand-cam-sim.yaml"),
+            ),
+            (
+                "config-sim-stereo.yaml",
+                include_str!("../../../config-sim-stereo.yaml"),
+            ),
+        ] {
+            let (camera_host, _) = parse_composed_config(yaml).unwrap();
+            for camera in std::iter::once(&camera_host.main).chain(camera_host.secondary.as_ref()) {
+                if !matches!(camera.backend, CameraBackend::Sim) {
+                    continue;
+                }
+                assert!(
+                    camera
+                        .camera_name
+                        .strip_prefix("simcam")
+                        .is_some_and(|index| index.parse::<usize>().is_ok()),
+                    "{name} names a sim camera {:?}, which the ci2-sim backend never offers",
+                    camera.camera_name,
+                );
+            }
+        }
+    }
+
+    /// The stereo simulation drives its own centroids, so both cameras have to
+    /// be present (there is a `stereopsis_calib` to exercise) and both need an
+    /// `expected_fps` for the post-trigger buffer to be sizeable.
+    #[test]
+    fn the_stereo_sim_config_is_complete_enough_to_drive() {
+        let (camera_host, flo_config) =
+            parse_composed_config(include_str!("../../../config-sim-stereo.yaml")).unwrap();
+        assert!(flo_config.stereopsis_calib.is_some());
+        let secondary = camera_host
+            .secondary
+            .expect("a stereo config needs a secondary camera");
+        assert!(camera_host.main.expected_fps.is_some());
+        assert!(secondary.expected_fps.is_some());
+    }
+
     #[test]
     fn sim_example_config_is_extracted_before_flo_parses_its_config() {
         let (camera_host, flo_config) =
@@ -1251,7 +1344,7 @@ mod tests {
         assert!(
             !flo_config
                 .extensions
-                .contains_key(serde_yaml::Value::String(APP_NAME.to_owned()))
+                .contains_key(serde_yaml::Value::String(CONFIG_SECTION.to_owned()))
         );
     }
 
@@ -1275,10 +1368,10 @@ mod tests {
 
     #[test]
     fn config_path_is_required_and_accepts_both_clap_forms() {
-        assert!(config_path_from_args(&[OsString::from("flo-strand-cam")]).is_err());
+        assert!(config_path_from_args(&[OsString::from("flo")]).is_err());
         assert_eq!(
             config_path_from_args(&[
-                OsString::from("flo-strand-cam"),
+                OsString::from("flo"),
                 OsString::from("--config"),
                 OsString::from("config.yaml"),
             ])
@@ -1287,7 +1380,7 @@ mod tests {
         );
         assert_eq!(
             config_path_from_args(&[
-                OsString::from("flo-strand-cam"),
+                OsString::from("flo"),
                 OsString::from("--config=config.yaml"),
             ])
             .unwrap(),

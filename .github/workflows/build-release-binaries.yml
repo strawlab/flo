@@ -54,7 +54,7 @@ jobs:
       - name: Stage release artifacts
         run: |
           mkdir -p release-artifacts
-          cp target/release/flo-strand-cam release-artifacts/
+          cp target/release/flo release-artifacts/
           cp target/release/burn-osd release-artifacts/
           cp target/release/h264-recorder-cli release-artifacts/
           cp target/release/mavlink-dump release-artifacts/

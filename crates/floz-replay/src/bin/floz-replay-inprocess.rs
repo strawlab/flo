@@ -47,6 +47,6 @@ fn main() -> Result<()> {
         extensions: vec![Box::new(extension)],
         ..Default::default()
     };
-    let flo_args = std::iter::once(OsString::from("flo-strand-cam")).chain(flo_args);
-    flo_strand_cam::run_with_args(options, flo_args)
+    let flo_args = std::iter::once(OsString::from("flo")).chain(flo_args);
+    flo_app::run_with_args(options, flo_args)
 }

@@ -62,6 +62,10 @@ pub enum FloCommand {
     SetHomePosition((Option<Angle>, Option<Angle>, Option<RadialDistance>)),
     SetHomePositionFromCurrent,
     SetRecordingState(bool),
+    /// Tie the tracking cameras' MP4 recordings to the `.floz` recording, or
+    /// untie them. Changing this does not start or stop anything by itself; it
+    /// takes effect at the next recording start or stop.
+    SetRecordTrackingCamMp4(bool),
     /// Start a recording that also includes the buffered pre-capture window
     /// (the "post-trigger" button). Stopping uses `SetRecordingState(false)`.
     StartPreCaptureRecording,
@@ -77,6 +81,21 @@ pub enum FloCommand {
     /// Choose what the operator's live view shows. This affects the camshow
     /// display and its RTP stream only — the recording stays the clean webcam.
     SetDisplaySource(crate::DisplaySource),
+    /// Add an independently encoded H.264/RTP stream. The address must be
+    /// `host:port` and the bitrate must be nonzero.
+    AddRtpTarget {
+        target: String,
+        bitrate_kbps: u32,
+    },
+    /// Change one H.264/RTP stream's encoder bitrate.
+    SetRtpTargetBitrate {
+        target: String,
+        bitrate_kbps: u32,
+    },
+    /// Remove an H.264/RTP destination. The address must be `host:port`.
+    RemoveRtpTarget(String),
+    /// Synchronize the active H.264/RTP destinations reported by camshow.
+    SetRtpTargets(Vec<crate::RtpTarget>),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -84,6 +103,7 @@ pub enum CommandSource {
     Automation, //mode changes due to detected/lost
     Bui,
     DroneRC,
+    Camshow,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]

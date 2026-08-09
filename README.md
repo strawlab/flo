@@ -15,9 +15,9 @@ Vo-Doan TT, Titov VV, Harrap MJM, Lochner S, Straw AD. High Resolution Outdoor V
 
 ## What is in this repository
 
-The `flo-strand-cam` application is the FLO deployment in this repository. It
-combines FLO tracking and motor control with Strand Camera acquisition and the
-ImOps detector in one process. Images, detections, and camera controls travel
+The `flo` application is the FLO deployment in this repository. It combines FLO
+tracking and motor control with Strand Camera acquisition and the ImOps detector
+in one process. Images, detections, and camera controls travel
 through bounded Rust channels rather than a network socket.
 
 While FLO was originally designed as a generic camera tracking system for all
@@ -47,7 +47,7 @@ or SimpleBGC gimbal motors.
 
 ```
 +-------------+      HTTP      +----------------------+     USB     +-----------------+
-| FLO UI      |<-------------->| flo-strand-cam       |<---------->| rpipico-pantilt |
+| FLO UI      |<-------------->| flo                  |<---------->| rpipico-pantilt |
 | (browser)   |                 |                      |            | (RP Pico)       |
 +-------------+                 | camera + ImOps + FLO |            +--------+--------+
                                 | (one process)        |                     |
@@ -61,7 +61,7 @@ or SimpleBGC gimbal motors.
 
 ## Overview of top-level directories
 
-- `crates` Rust crates and application binaries, including `flo-strand-cam`
+- `crates` Rust crates and application binaries, including `flo`
 - `firmware/beamdriver` Firmware for IR LED source
 - `firmware/flo-tilta-dongle` Firmware for USB dongle to control Tilta motors.
 - `firmware/rpipico-pantilt` Firmware for RPi Pico to control PWM servo motors.
@@ -101,15 +101,62 @@ flo-strand-cam:
 
 Then run the composed executable:
 
-    flo-strand-cam --config config-mini.yaml --pwm-serial /dev/ttyACM0
+    flo --config config-mini.yaml --pwm-serial /dev/ttyACM0
+
+By default, starting a `.floz` recording — from the BUI record button, the
+post-trigger button, or arming over MAVLink — also starts each tracking
+camera's MP4, and stopping the recording stops them. The BUI has a checkbox to
+untie them while running, and the config file sets what FLO starts with:
+
+```yaml
+record_tracking_cam_mp4_with_floz: false   # default: true
+```
 
 Backends `pylon`, `vimba`, `webcam`, and `sim` are supported. Camera
 observations and recording controls (including MP4 codec, frame-rate, and
 pre-trigger commands) use bounded in-process channels. The optional `mp4_codec`
 accepts Strand Camera's `CodecSelection`; the simulated example includes its
-VAAPI `Ffmpeg` form. See [the crate
-README](crates/flo-strand-cam/README.md) and
+VAAPI `Ffmpeg` form. See [the crate README](crates/flo-app/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
+
+## GPS origin
+
+Everything FLO computes from `LOCAL_POSITION_NED` is relative to the flight
+controller's local-position origin. The BUI's Info block shows the origin the
+flight controller reports, alongside the one the config asks for:
+
+```yaml
+mavlink:
+  set_gps_global_origin: [48.0038, 7.8449, 278.0]   # lat °, lon °, alt m
+```
+
+A `SET_GPS_GLOBAL_ORIGIN` can be ignored — the flight controller may refuse it,
+or may already have an origin from its own first fix — so FLO checks that the
+request actually took hold. If the reported origin differs from the configured
+one by more than about a meter, FLO re-sends the request up to five times and
+then leaves an error in the log and a **DID NOT STICK** warning in the BUI. A
+flight controller that never reports an origin at all is logged as an error
+after ten seconds.
+
+## Post-trigger ("pre-capture") recording
+
+FLO can hold recent data in RAM so that a recording started *after* something
+interesting happens still contains it. Set the window in the config, so the
+buffer is armed from launch:
+
+```yaml
+precapture_window_secs: 20.0   # 0, the default, disables buffering
+```
+
+The BUI can change the window while running, and its "Post-trigger record"
+button starts a recording that begins with the buffered window. It is disabled
+when the window is zero, since there would be nothing to flush.
+
+Each tracking camera needs `expected_fps` in its `flo-strand-cam` section for
+its video to be pre-captured too: that is the only way seconds can be converted
+to the frame count Strand Camera's own post-trigger buffer takes. A camera
+without it logs a warning and records video only from the trigger onward, even
+though the `.floz` still begins in the past.
 
 ## Running without hardware (simulation / testing)
 
@@ -120,10 +167,19 @@ arguments come first and FLO arguments follow `--`. Pass the same configuration
 to the source and the host:
 
 ```
-cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
+STRAND_CAM_SIM_SPEC=sim-cameras.toml \
+  cargo run -r -p floz-replay --bin floz-replay-inprocess -- \
   synth --config config-sim-stereo.yaml --duration 30 -- \
   --config config-sim-stereo.yaml
 ```
+
+The `sim` camera backend renders synthetic images from a scenario file and will
+not start without `STRAND_CAM_SIM_SPEC` naming one; `sim-cameras.toml` is a
+two-camera scenario matching the configs below. That backend names its cameras
+`simcam0`, `simcam1`, ..., which is what a `sim` config's `camera_name` fields
+have to be; `floz-replay-inprocess` reads them from the config and attributes
+its synthetic centroids to the same cameras, so `--primary-cam` and
+`--secondary-cam` are only needed to override that.
 
 `config-sim-stereo.yaml` supplies simulated primary and secondary cameras, so
 stereo distance tracking is exercised. For a recording, replace the source
@@ -143,7 +199,7 @@ the clean (no-OSD) webcam video to disk on `flo`'s command happens regardless of
 which outputs are on.
 
 What is *displayed* is also selectable at runtime: the FPV webcam with its OSD,
-or a tracking camera relayed from `flo-strand-cam`. See [Switching the display
+or a tracking camera relayed from `flo`. See [Switching the display
 source](#switching-the-display-source).
 
 ### Build and run
@@ -173,15 +229,15 @@ Output options:
   nothing is streamed. Tuning (all optional, and only accepted alongside
   `--rtp-dest`): `--rtp-encoder <ffmpeg|openh264>`, `--rtp-bitrate-kbps`,
   `--rtp-fps`, `--rtp-mtu`, `--rtp-idr-interval`, `--rtp-dump-annexb <FILE>`.
-  `flo` can change the bitrate — or disable and re-enable the stream — while it
-  runs.
+  The flo BUI can add and remove destinations and change each
+  destination's bitrate independently while camshow runs.
 
 Other options:
 
 - `--listen <ADDR>` TCP listen address for `flo` connections.
   Default: `127.0.0.1:2224`.
 - `--video-listen <ADDR>` TCP listen address for the video link, over which
-  `flo-strand-cam` relays tracking-camera frames. Default: `127.0.0.1:2225`.
+  `flo` relays tracking-camera frames. Default: `127.0.0.1:2225`.
 - `--display-source <webcam|strand-cam-main|strand-cam-secondary>` What to
   display and stream at startup. Default: `webcam`. `flo` overrides this
   whenever the operator switches; mainly useful for bench testing.
@@ -232,9 +288,10 @@ into the recording directory selected by `flo`.
 
 ### Switching the display source
 
-While flying, the operator can switch what the local display and the RTP stream
-show between the FPV webcam and the main tracking (IR) camera. Configure an RC
-channel condition for it:
+The Cameras section of the flo BUI can switch what the local display
+and every RTP stream show between the FPV webcam and either configured tracking
+(IR) camera. An RC channel condition can also switch between the webcam and the
+main tracking camera:
 
 ```yaml
 mavlink_config:
@@ -252,7 +309,7 @@ trigger: while the condition holds, the tracking camera is displayed; leave it
 and the view returns to the webcam. Losing the RC link also returns it to the
 webcam.
 
-The frames come from `flo-strand-cam`, which relays them to `camshow` over the
+The frames come from `flo`, which relays them to `camshow` over the
 video link. This is on by default and needs no configuration; the section exists
 to change it:
 
