@@ -7,6 +7,19 @@ pub enum PayloadParseError {
     InvalidFlags { name: String },
     #[error("invalid enum value for {name}")]
     InvalidEnum { name: String },
+    /// A payload ended before a field this crate expects to find in it.
+    ///
+    /// Reachable from the wire, not just from a bug: the CRC covers the length
+    /// byte, so a controller whose firmware sends a shorter version of a
+    /// command than we model produces a packet that verifies and then runs out
+    /// mid-parse. Reported rather than panicked, which is what the generated
+    /// readers used to do, so the caller can keep the bytes and carry on.
+    #[error("{name} needs {needed} bytes but only {available} remain in the payload")]
+    InsufficientData {
+        name: String,
+        needed: usize,
+        available: usize,
+    },
 }
 
 pub trait Payload {

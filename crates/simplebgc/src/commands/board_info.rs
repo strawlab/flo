@@ -1,6 +1,20 @@
 use crate::{Payload, PayloadParseError};
 use enumflags2::{BitFlags, bitflags};
 
+/// `STATE_FLAGS1` from `CMD_BOARD_INFO`.
+///
+/// Every bit of the byte has a variant, including the ones the SimpleBGC
+/// documentation this crate was written from does not describe. That is not
+/// tidiness: `BitFlags::from_bits` refuses a value carrying any bit it does not
+/// know, and a `BitFlags` can only hold bits its enum defines. Leaving the top
+/// bits out therefore threw away whole `CMD_BOARD_INFO` replies and lost the
+/// raw byte with them -- boards running firmware 2.71b9 set bit 5, so FLO
+/// recorded no gimbal firmware version at all.
+///
+/// The undocumented bits are named for their position because inventing a
+/// meaning for them would be worse than admitting we do not know one. They
+/// still reach `state_flags_raw` in the recorded provenance, which is where a
+/// later reader can make sense of them.
 #[bitflags]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u8)]
@@ -10,6 +24,9 @@ pub enum StateFlags1 {
     InitStep1Done = 1 << 2,
     InitStep2Done = 1 << 3,
     StartupAutoRoutineDone = 1 << 4,
+    Undocumented5 = 1 << 5,
+    Undocumented6 = 1 << 6,
+    Undocumented7 = 1 << 7,
 }
 
 #[bitflags]
@@ -34,11 +51,21 @@ pub enum BoardFeatures {
     BigFlash = 1 << 15,
 }
 
+/// `CONNECTION_FLAG` from `CMD_BOARD_INFO`. Total for the same reason as
+/// [`StateFlags1`]: this field shares its packet, so a bit undefined here would
+/// discard the firmware version and board features alongside it.
 #[bitflags]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u8)]
 pub enum ConnectionFlag {
     USB = 1 << 0,
+    Undocumented1 = 1 << 1,
+    Undocumented2 = 1 << 2,
+    Undocumented3 = 1 << 3,
+    Undocumented4 = 1 << 4,
+    Undocumented5 = 1 << 5,
+    Undocumented6 = 1 << 6,
+    Undocumented7 = 1 << 7,
 }
 
 #[derive(BgcPayload, Copy, Clone, Debug, PartialEq)]

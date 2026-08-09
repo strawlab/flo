@@ -8,6 +8,14 @@ enum PayloadParseError {
     InvalidFlags { name: String },
     #[error("invalid enum value for {name}")]
     InvalidEnum { name: String },
+    // Mirrors the real error in `simplebgc`: the generated parser checks the
+    // buffer before each read and reports a shortfall through this.
+    #[error("{name} needs {needed} bytes but only {available} remain in the payload")]
+    InsufficientData {
+        name: String,
+        needed: usize,
+        available: usize,
+    },
 }
 
 #[expect(dead_code)]

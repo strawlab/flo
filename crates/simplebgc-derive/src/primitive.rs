@@ -41,6 +41,21 @@ impl Display for PrimitiveKind {
     }
 }
 
+impl PrimitiveKind {
+    /// Bytes this occupies on the wire, so the generated parser can check the
+    /// buffer holds them before reading.
+    pub fn size_bytes(&self) -> usize {
+        use PrimitiveKind::*;
+        match self {
+            I8 | U8 | Bool => 1,
+            I16 | U16 => 2,
+            I32 | U32 => 4,
+            I64 | U64 => 8,
+            I128 | U128 => 16,
+        }
+    }
+}
+
 impl IdentFragment for PrimitiveKind {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         Display::fmt(&self, f)

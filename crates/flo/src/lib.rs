@@ -1582,6 +1582,28 @@ where
     Cli::parse_from(args)
 }
 
+/// The help text clap would print for `args`, if `args` asks for help.
+///
+/// `Some` only for a genuine `--help`/`-h`; anything else is `None`, including
+/// a malformed command line, which the real parse further down reports in its
+/// own words.
+///
+/// Exists because a composed binary has to answer help before it can load a
+/// configuration file, while the flags being described live here. Rendering
+/// through clap rather than writing the text out again keeps one description of
+/// the command line, and passing the whole argument list rather than asking for
+/// the top-level page means `flo <command> --help` lands on the right one.
+pub fn cli_help<I, T>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    match Cli::try_parse_from(args) {
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp => Some(e.render().to_string()),
+        _ => None,
+    }
+}
+
 /// Create the tokio Runtime and call the main app loop.
 #[expect(clippy::too_many_arguments)]
 fn run_tokio_main(
@@ -2355,6 +2377,35 @@ mod tests {
     fn parse_cli_accepts_composition_arguments() {
         let cli = parse_cli(["flo", "--config", "sim.yaml"]);
         assert_eq!(cli.config.as_deref(), Some("sim.yaml"));
+    }
+
+    #[test]
+    fn help_is_rendered_only_when_it_is_asked_for() {
+        assert!(cli_help(["flo"]).is_none());
+        assert!(cli_help(["flo", "--config", "sim.yaml"]).is_none());
+        // Not help, and reported by the real parse rather than here.
+        assert!(cli_help(["flo", "--no-such-flag"]).is_none());
+
+        for flag in ["--help", "-h"] {
+            let help = cli_help(["flo", flag]).expect("clap should render help");
+            assert!(
+                help.contains("--config"),
+                "help must describe the flag it is usually read to find: {help}"
+            );
+        }
+    }
+
+    /// The whole argument list is handed to clap, so a subcommand's own help
+    /// reaches that subcommand's page rather than the top-level one.
+    #[test]
+    fn a_subcommands_help_is_its_own() {
+        let help = cli_help(["flo", "show-config"]);
+        assert!(help.is_none(), "no help was asked for");
+        let help = cli_help(["flo", "show-config", "--help"]).expect("clap should render help");
+        assert!(
+            help.contains("Show the configuration"),
+            "expected the subcommand's page, got: {help}"
+        );
     }
 
     fn target(addr: &str, bitrate_kbps: u32) -> flo_core::RtpTarget {
