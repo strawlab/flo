@@ -8,12 +8,15 @@
 //! showing the camera regardless of whether flo is connected, so the link is
 //! best-effort.
 //!
-//! Relayed camera frames travel on a second, separate connection with its own
-//! binary framing — see [`video`].
+//! Two further connections carry pixels, each with its own binary framing and
+//! its own port: [`video`] relays tracking-camera frames from flo to camshow
+//! for the live view, and [`preview`] sends webcam frames back the other way
+//! so flo's browser UI can show what the FPV camera sees.
 
 use osd_utils::OsdCache;
 use serde::{Deserialize, Serialize};
 
+pub mod preview;
 pub mod video;
 
 /// Default address camshow listens on and flo connects to.
