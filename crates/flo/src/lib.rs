@@ -290,6 +290,9 @@ struct FloCoordinator<'a> {
     display_source_tx: watch::Sender<DisplaySource>,
     /// H.264/RTP destinations selected in the BUI, forwarded to camshow.
     rtp_targets_tx: watch::Sender<Vec<flo_core::RtpTarget>>,
+    /// Pre-capture window mirrored to camshow, so its own frame buffer holds
+    /// the same span of video the `.floz` writer holds of data.
+    camshow_precapture_secs_tx: watch::Sender<f64>,
     highmag_visible_recorder: Option<h264_recorder::H264Recorder>,
     /// Seconds of data currently held in the writer's pre-capture buffer.
     precapture_buffered_rx: watch::Receiver<f64>,
@@ -311,6 +314,7 @@ impl<'a> FloCoordinator<'a> {
         camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
         display_source_tx: watch::Sender<DisplaySource>,
         rtp_targets_tx: watch::Sender<Vec<flo_core::RtpTarget>>,
+        camshow_precapture_secs_tx: watch::Sender<f64>,
         data_dir: &'a camino::Utf8Path,
         precapture_buffered_rx: watch::Receiver<f64>,
         strand_cams: InitializedStrandCams,
@@ -355,6 +359,7 @@ impl<'a> FloCoordinator<'a> {
             camshow_recording_tx,
             display_source_tx,
             rtp_targets_tx,
+            camshow_precapture_secs_tx,
             highmag_visible_recorder: None,
             precapture_buffered_rx,
         }
@@ -678,6 +683,7 @@ impl<'a> FloCoordinator<'a> {
                 creation_time,
                 data_dir: self.data_dir.to_path_buf(),
                 mp4_cfg,
+                include_precapture,
             }));
 
         self.flo_saver_tx
@@ -1047,6 +1053,10 @@ impl<'a> FloCoordinator<'a> {
                 // Mirror the window onto the tracking cameras' own post-trigger
                 // buffers so their video can be pre-captured too.
                 self.set_cam_precapture_buffer(secs).await;
+                // And onto camshow, which buffers webcam frames for the same
+                // reason. Ignore a send error: with no camshow configured
+                // nothing holds the receiver.
+                let _ = self.camshow_precapture_secs_tx.send(secs);
             }
         };
         Ok(())
@@ -2010,6 +2020,7 @@ async fn app_main(
         .osd_config
         .as_ref()
         .and_then(|c| c.camshow_addr.clone());
+    let (camshow_precapture_secs_tx, camshow_precapture_secs_rx) = watch::channel(0.0f64);
     let (canvas_tx, camshow_recording_tx, mut camshow_task) = if let Some(addr) = camshow_addr {
         let (canvas_tx, canvas_rx) = watch::channel(osd_utils::OsdCache::new(30, 16));
         let (rec_tx, rec_rx) = mpsc::unbounded_channel();
@@ -2019,6 +2030,7 @@ async fn app_main(
             rec_rx,
             display_source_rx,
             rtp_targets_rx,
+            camshow_precapture_secs_rx,
             broadway.flo_events.clone(),
         ));
         let task: Pin<Box<dyn Future<Output = _>>> = Box::pin(jh);
@@ -2109,6 +2121,7 @@ async fn app_main(
         camshow_recording_tx,
         display_source_tx,
         rtp_targets_tx,
+        camshow_precapture_secs_tx,
         data_dir,
         precapture_buffered_rx,
         strand_cams,

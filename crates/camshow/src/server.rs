@@ -165,6 +165,9 @@ impl Server {
                 FloToCamshow::StopRecording => {
                     recording_tx.send(RecordingCommand::Stop)?;
                 }
+                FloToCamshow::SetPreCaptureSeconds { secs } => {
+                    recording_tx.send(RecordingCommand::SetPreCaptureSeconds(secs))?;
+                }
                 FloToCamshow::SetRtpTargets { targets } => {
                     rtp_targets_tx.send(targets)?;
                 }

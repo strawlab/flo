@@ -98,7 +98,122 @@ struct SrtMsg {
 struct ActiveRecording {
     mp4: bg_movie_writer::BgMovieWriter,
     srt: BufferingSrtFrameWriter,
-    srt_t0: Timestamp,
+    /// Capture time of the first frame written, which the SRT cue times are
+    /// relative to. Set on that first write rather than from the requested
+    /// creation time: a pre-capture recording begins with a buffered frame
+    /// older than the trigger, and a cue time cannot be negative.
+    srt_t0: Option<Timestamp>,
+}
+
+/// A frame held for pre-capture, with everything needed to write it later.
+///
+/// The OSD canvas travels with the frame because the `.osd.srt` sidecar
+/// records what flo was showing *at capture time*; reusing the canvas current
+/// at trigger time for the whole buffered window would backdate telemetry that
+/// had not happened yet.
+struct BufferedFrame {
+    frame: Frame,
+    timestamp: Timestamp,
+    osd: osd_utils::OsdCache,
+}
+
+/// Ring buffer of recent frames, so a recording can begin before the operator
+/// triggered it ("pre-capture", flo's name for a post-trigger recording).
+///
+/// The window is the only bound, matching the tracking cameras' post-trigger
+/// buffers: what the operator asks for is what is held. These are decoded
+/// frames, so a long window at a high frame rate is a lot of memory — the
+/// window is the knob for that.
+struct PreCaptureBuffer {
+    window_secs: f64,
+    inner: std::collections::VecDeque<BufferedFrame>,
+}
+
+impl PreCaptureBuffer {
+    fn new() -> Self {
+        Self {
+            window_secs: 0.0,
+            inner: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Update the window. Zero (or negative) disables buffering and frees
+    /// whatever is held.
+    fn set_window_secs(&mut self, secs: f64) {
+        if secs > 0.0 {
+            self.window_secs = secs;
+            self.trim();
+        } else {
+            self.window_secs = 0.0;
+            self.clear();
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.window_secs > 0.0
+    }
+
+    fn push(&mut self, frame: Frame, timestamp: Timestamp, osd: osd_utils::OsdCache) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.inner.push_back(BufferedFrame {
+            frame,
+            timestamp,
+            osd,
+        });
+        self.trim();
+    }
+
+    /// Drop frames that have fallen outside the window, measured back from the
+    /// newest frame, so the buffer always holds the most recent video.
+    fn trim(&mut self) {
+        let Some(newest) = self.inner.back().map(|b| b.timestamp) else {
+            return;
+        };
+        while let Some(oldest) = self.inner.front() {
+            if secs_between(oldest.timestamp, newest) > self.window_secs {
+                self.inner.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Take everything held, leaving the buffer empty and ready to refill.
+    fn drain(&mut self) -> std::collections::VecDeque<BufferedFrame> {
+        std::mem::take(&mut self.inner)
+    }
+
+    fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
+/// Stamp our identity and the recording's creation time into the config's
+/// H.264 metadata SEI.
+///
+/// flo sends a bare codec config, whose metadata is `None`. Without this the
+/// file names no writing application and, because the metadata is the only
+/// place a UTC offset is recorded, readers such as `show-timestamps` display
+/// every capture time in UTC.
+fn with_h264_metadata(
+    cfg: &strand_cam_remote_control::RecordingConfig,
+    creation_time: Timestamp,
+) -> strand_cam_remote_control::RecordingConfig {
+    use strand_cam_remote_control::{H264Metadata, RecordingConfig};
+
+    let metadata = H264Metadata::new(APP_NAME, creation_time.into());
+    let mut cfg = cfg.clone();
+    match &mut cfg {
+        RecordingConfig::Mp4(c) => c.h264_metadata = Some(metadata),
+        RecordingConfig::Ffmpeg(c) => c.h264_metadata = Some(metadata),
+    }
+    cfg
+}
+
+fn secs_between(earlier: Timestamp, later: Timestamp) -> f64 {
+    (later - earlier).num_milliseconds() as f64 / 1000.0
 }
 
 /// Chooses relayed frames while hiding the transport delay of an IR-to-IR
@@ -169,6 +284,7 @@ impl ActiveRecording {
         creation_time: Timestamp,
         cfg: &strand_cam_remote_control::RecordingConfig,
         data_dir: &camino::Utf8Path,
+        queue_extra: usize,
     ) -> Result<Self> {
         let fname = creation_time.format(WEBCAM_MP4_TEMPLATE).to_string();
         let mp4_path = data_dir.join(&fname);
@@ -176,9 +292,12 @@ impl ActiveRecording {
         srt_path.set_extension("osd.srt");
 
         info!("starting webcam recording to {mp4_path}");
+        // Room for the pre-capture burst on top of the steady-state headroom:
+        // the buffered frames are handed over as fast as the writer will take
+        // them, and `BgMovieWriter::write` drops rather than blocks when full.
         let mp4 = bg_movie_writer::BgMovieWriter::new(
             with_h264_metadata(cfg, creation_time),
-            100,
+            queue_extra + 100,
             mp4_path.clone().into(),
         );
         let srt_fd = std::fs::File::create(&srt_path)
@@ -188,7 +307,7 @@ impl ActiveRecording {
         Ok(Self {
             mp4,
             srt,
-            srt_t0: creation_time,
+            srt_t0: None,
         })
     }
 
@@ -199,7 +318,8 @@ impl ActiveRecording {
         canvas: osd_utils::OsdCache,
     ) -> Result<()> {
         self.mp4.write(frame, timestamp)?;
-        let pts = timestamp.signed_duration_since(self.srt_t0).to_std()?;
+        let srt_t0 = *self.srt_t0.get_or_insert(timestamp);
+        let pts = timestamp.signed_duration_since(srt_t0).to_std()?;
         let msg = SrtMsg {
             timestamp,
             osd: canvas,
@@ -217,28 +337,6 @@ impl ActiveRecording {
         }
         info!("webcam recording closed");
     }
-}
-
-/// Stamp our identity and the recording's creation time into the config's
-/// H.264 metadata SEI.
-///
-/// flo sends a bare codec config, whose metadata is `None`. Without this the
-/// file names no writing application and, because that metadata is the only
-/// place a UTC offset is recorded, readers such as `show-timestamps` report
-/// every capture time in UTC rather than local time.
-fn with_h264_metadata(
-    cfg: &strand_cam_remote_control::RecordingConfig,
-    creation_time: Timestamp,
-) -> strand_cam_remote_control::RecordingConfig {
-    use strand_cam_remote_control::{H264Metadata, RecordingConfig};
-
-    let metadata = H264Metadata::new(APP_NAME, creation_time.into());
-    let mut cfg = cfg.clone();
-    match &mut cfg {
-        RecordingConfig::Mp4(c) => c.h264_metadata = Some(metadata),
-        RecordingConfig::Ffmpeg(c) => c.h264_metadata = Some(metadata),
-    }
-    cfg
 }
 
 /// Runs the capture loop until shutdown is requested or every output has gone
@@ -326,6 +424,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
     let mut webcam = WebcamSource::open(fpv_cam_human_name.as_deref())?;
 
     let mut active: Option<ActiveRecording> = None;
+    let mut precapture = PreCaptureBuffer::new();
     let mut last_fallback_warn: Option<Instant> = None;
     let mut display_source = *display_source_rx.borrow_and_update();
     let mut relay_selector = RelayFrameSelector::new(display_source);
@@ -339,7 +438,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         // last one to avoid getting stuck if commands queue up.
         loop {
             match recording_rx.try_recv() {
-                Ok(cmd) => apply_command(cmd, &mut active),
+                Ok(cmd) => apply_command(cmd, &mut active, &mut precapture),
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     debug!("recording command channel closed; capture loop shutting down");
@@ -458,21 +557,31 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         let recorded_arc = Arc::new(DynamicFrameOwned::from_static(recorded));
 
         let is_recording = active.is_some();
-        if let Some(rec) = active.as_mut() {
-            // Log the canvas flo is currently showing, whether or not it was
-            // stamped onto the displayed frame. The recording is the webcam, so
-            // its OSD record stays complete and replayable across a switch to a
-            // tracking camera — the operator's telemetry history must not have
-            // holes just because the live view was pointed elsewhere.
-            let canvas_for_recording = active_canvas
+        // Log the canvas flo is currently showing, whether or not it was
+        // stamped onto the displayed frame. The recording is the webcam, so
+        // its OSD record stays complete and replayable across a switch to a
+        // tracking camera — the operator's telemetry history must not have
+        // holes just because the live view was pointed elsewhere.
+        //
+        // Computed whether or not a recording is running: the pre-capture
+        // buffer needs the same canvas for frames that may be written later.
+        let canvas_for_recording = || {
+            active_canvas
                 .cloned()
-                .unwrap_or_else(|| osd_utils::OsdCache::new(30, 16));
-            if let Err(e) = rec.write(recorded_arc, timestamp, canvas_for_recording) {
-                error!("error writing recording frame, stopping recording: {e:?}");
-                if let Some(rec) = active.take() {
-                    rec.finish();
+                .unwrap_or_else(|| osd_utils::OsdCache::new(30, 16))
+        };
+        match active.as_mut() {
+            Some(rec) => {
+                if let Err(e) = rec.write(recorded_arc, timestamp, canvas_for_recording()) {
+                    error!("error writing recording frame, stopping recording: {e:?}");
+                    if let Some(rec) = active.take() {
+                        rec.finish();
+                    }
                 }
             }
+            // Not recording: hold the frame in case a pre-capture recording
+            // starts and wants the window leading up to it.
+            None => precapture.push(recorded_arc, timestamp, canvas_for_recording()),
         }
 
         // Always the webcam's capture time, even when the pixels came from a
@@ -498,22 +607,70 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
     Ok(())
 }
 
-fn apply_command(cmd: RecordingCommand, active: &mut Option<ActiveRecording>) {
+fn apply_command(
+    cmd: RecordingCommand,
+    active: &mut Option<ActiveRecording>,
+    precapture: &mut PreCaptureBuffer,
+) {
     match cmd {
         RecordingCommand::Start(start) => {
             if active.is_some() {
                 warn!("StartRecording received while already recording; ignoring");
                 return;
             }
-            match ActiveRecording::new(start.creation_time, &start.mp4_cfg, &start.data_dir) {
-                Ok(rec) => *active = Some(rec),
-                Err(e) => error!("failed to start recording: {e:?}"),
+            // Taken before the writer exists so the buffer is released either
+            // way: on a normal start these frames are stale the moment
+            // recording begins, and on a failed start holding them would pin
+            // the memory until the next trigger.
+            let buffered = if start.include_precapture {
+                precapture.drain()
+            } else {
+                precapture.clear();
+                Default::default()
+            };
+            let mut rec = match ActiveRecording::new(
+                start.creation_time,
+                &start.mp4_cfg,
+                &start.data_dir,
+                buffered.len(),
+            ) {
+                Ok(rec) => rec,
+                Err(e) => {
+                    error!("failed to start recording: {e:?}");
+                    return;
+                }
+            };
+            if !buffered.is_empty() {
+                let secs = match (buffered.front(), buffered.back()) {
+                    (Some(first), Some(last)) => secs_between(first.timestamp, last.timestamp),
+                    _ => 0.0,
+                };
+                info!(
+                    "writing {} pre-captured frames ({secs:.1}s) to recording",
+                    buffered.len()
+                );
+                for b in buffered {
+                    if let Err(e) = rec.write(b.frame, b.timestamp, b.osd) {
+                        // Abandon the recording rather than keep a file whose
+                        // pre-capture is half there: the operator asked for the
+                        // window before the trigger, and a partial one is worse
+                        // than an obvious failure.
+                        error!("error writing pre-captured frame, stopping recording: {e:?}");
+                        rec.finish();
+                        return;
+                    }
+                }
             }
+            *active = Some(rec);
         }
         RecordingCommand::Stop => {
             if let Some(rec) = active.take() {
                 rec.finish();
             }
+        }
+        RecordingCommand::SetPreCaptureSeconds(secs) => {
+            info!("setting pre-capture buffer to {secs} seconds");
+            precapture.set_window_secs(secs);
         }
     }
 }
@@ -605,5 +762,66 @@ mod tests {
                 .is_none(),
             "switching from the webcam to IR must not resurrect an old IR frame"
         );
+    }
+
+    /// A fixed instant plus `secs`. Built from a UTC timestamp rather than a
+    /// local wall-clock time so it is unambiguous in every timezone the tests
+    /// might run in.
+    fn at(secs: i64) -> Timestamp {
+        chrono::DateTime::from_timestamp(1_786_000_000, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            + chrono::TimeDelta::seconds(secs)
+    }
+
+    fn empty_osd() -> osd_utils::OsdCache {
+        osd_utils::OsdCache::new(30, 16)
+    }
+
+    #[test]
+    fn a_disabled_buffer_holds_nothing() {
+        let mut buf = PreCaptureBuffer::new();
+        buf.push(test_frame(1), at(0), empty_osd());
+        assert!(buf.drain().is_empty(), "the default window is zero");
+    }
+
+    #[test]
+    fn frames_older_than_the_window_are_dropped() {
+        let mut buf = PreCaptureBuffer::new();
+        buf.set_window_secs(10.0);
+        for secs in [0, 5, 9, 20] {
+            buf.push(test_frame(secs as u8), at(secs), empty_osd());
+        }
+
+        // Measured back from the newest frame (t=20), so only t=20 is inside a
+        // 10s window; the earlier three have aged out.
+        let held = buf.drain();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held.front().unwrap().timestamp, at(20));
+    }
+
+    #[test]
+    fn draining_leaves_the_buffer_ready_to_refill() {
+        let mut buf = PreCaptureBuffer::new();
+        buf.set_window_secs(60.0);
+        buf.push(test_frame(1), at(0), empty_osd());
+        assert_eq!(buf.drain().len(), 1);
+
+        assert!(buf.drain().is_empty(), "drain takes everything");
+        buf.push(test_frame(2), at(1), empty_osd());
+        assert_eq!(
+            buf.drain().len(),
+            1,
+            "the window survives a drain, so buffering resumes"
+        );
+    }
+
+    #[test]
+    fn zeroing_the_window_frees_what_is_held() {
+        let mut buf = PreCaptureBuffer::new();
+        buf.set_window_secs(60.0);
+        buf.push(test_frame(1), at(0), empty_osd());
+        buf.set_window_secs(0.0);
+        assert!(buf.drain().is_empty());
     }
 }

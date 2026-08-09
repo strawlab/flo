@@ -33,6 +33,7 @@ pub(crate) async fn run(
     mut command_rx: mpsc::UnboundedReceiver<Command>,
     mut display_source_rx: watch::Receiver<DisplaySource>,
     mut rtp_targets_rx: watch::Receiver<Vec<RtpTarget>>,
+    mut precapture_secs_rx: watch::Receiver<f64>,
     flo_events_tx: tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
     info!("camshow link target: {addr}");
@@ -46,6 +47,7 @@ pub(crate) async fn run(
                     &mut command_rx,
                     &mut display_source_rx,
                     &mut rtp_targets_rx,
+                    &mut precapture_secs_rx,
                     &flo_events_tx,
                 )
                 .await
@@ -69,6 +71,7 @@ async fn serve_connection(
     command_rx: &mut mpsc::UnboundedReceiver<Command>,
     display_source_rx: &mut watch::Receiver<DisplaySource>,
     rtp_targets_rx: &mut watch::Receiver<Vec<RtpTarget>>,
+    precapture_secs_rx: &mut watch::Receiver<f64>,
     flo_events_tx: &tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
@@ -91,6 +94,13 @@ async fn serve_connection(
     // for the IR view.
     let source = *display_source_rx.borrow_and_update();
     sink.send(FloToCamshow::SetDisplaySource { source }).await?;
+
+    // Also a state, and for the same reason: camshow's pre-capture buffer
+    // starts empty and disabled on every run, so a camshow restart would
+    // silently give the operator a recording with no pre-capture at all.
+    let secs = *precapture_secs_rx.borrow_and_update();
+    sink.send(FloToCamshow::SetPreCaptureSeconds { secs })
+        .await?;
 
     loop {
         tokio::select! {
@@ -117,6 +127,11 @@ async fn serve_connection(
                 res?;
                 let targets = rtp_targets_rx.borrow_and_update().clone();
                 sink.send(FloToCamshow::SetRtpTargets { targets }).await?;
+            }
+            res = precapture_secs_rx.changed() => {
+                res?;
+                let secs = *precapture_secs_rx.borrow_and_update();
+                sink.send(FloToCamshow::SetPreCaptureSeconds { secs }).await?;
             }
             res = canvas_rx.changed() => {
                 res?;
