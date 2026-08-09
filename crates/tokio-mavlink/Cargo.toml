@@ -15,3 +15,6 @@ tokio = { workspace = true, features = [
     "io-util",
 ] }
 tracing.workspace = true
+
+[dev-dependencies]
+mavlink = { workspace = true, features = ["common"] }

@@ -5,14 +5,6 @@ use std::{
 
 use mavlink::{MavHeader, MavlinkVersion, Message, error::MessageReadError};
 
-/// ensure that we never instantiate a NeverOk type
-macro_rules! assert_never {
-    ($never: expr_2021) => {{
-        let _: NeverOk = $never;
-        unreachable!("NeverOk was instantiated");
-    }};
-}
-
 pub struct MavlinkConnection<M: Message> {
     pub rx: MavlinkReceiver<M>,
     pub tx: MavlinkSender<M>,
@@ -114,20 +106,21 @@ impl<M: Message> std::fmt::Debug for SendError<M> {
     }
 }
 
-/// A zero-sized type which is never created to indicate that Ok(_) never
-/// happens.
-#[derive(Debug)]
-enum NeverOk {}
-
-/// Read loop, launched on own thread. Returns only on error.
+/// Read loop, launched on its own thread.
+///
+/// Closing the asynchronous receiver requests a clean exit.
 fn reader<M: Message + std::fmt::Debug>(
     mut rdr: impl Read,
     tx: tokio::sync::mpsc::Sender<Result<(MavHeader, M), RecvError>>,
     protocol_version: MavlinkVersion,
-) -> Result<NeverOk, RecvError> {
+) -> Result<(), RecvError> {
     loop {
         match mavlink::read_versioned_msg(&mut rdr, protocol_version) {
-            Ok(val) => tx.blocking_send(Ok(val)).unwrap(),
+            Ok(val) => {
+                if tx.blocking_send(Ok(val)).is_err() {
+                    return Ok(());
+                }
+            }
             Err(MessageReadError::Io(e)) => {
                 return Err(e.into());
             }
@@ -136,18 +129,18 @@ fn reader<M: Message + std::fmt::Debug>(
     }
 }
 
-/// Write loop, launched on own thread. Returns only on error.
+/// Write loop, launched on its own thread.
+///
+/// Closing all asynchronous senders requests a clean exit.
 fn writer<M: Message + std::fmt::Debug>(
     mut wtr: impl Write,
     mut rx: tokio::sync::mpsc::Receiver<(MavHeader, M)>,
     protocol_version: MavlinkVersion,
-) -> Result<NeverOk, SendError<M>> {
+) -> Result<(), SendError<M>> {
     loop {
         let (header, data) = match rx.blocking_recv() {
             Some(msg) => msg,
-            None => {
-                return Err(SendError::ReceiverClosed);
-            }
+            None => return Ok(()),
         };
         match mavlink::write_versioned_msg(&mut wtr, protocol_version, header, &data) {
             Ok(_sz) => {}
@@ -173,18 +166,24 @@ pub fn spawn_mavlink_threads<M: Message + Send + std::fmt::Debug + 'static>(
     let (read_thread_result_tx, read_thread_result_rx) = tokio::sync::oneshot::channel();
     // As below, we do not bother keeping the std::thread::JoinHandle<_> because
     // we use oneshot channels to signal that the thread has ended.
-    std::thread::spawn(move || match reader(rdr, reader_tx, protocol_version) {
-        Ok(never) => assert_never!(never),
-        Err(e) => read_thread_result_tx.send(e).unwrap(),
+    std::thread::spawn(move || {
+        if let Err(error) = reader(rdr, reader_tx, protocol_version) {
+            // The asynchronous receiver may already have been dropped during
+            // ordinary application shutdown.
+            let _ = read_thread_result_tx.send(error);
+        }
     });
 
     let (writer_tx, writer_rx) = tokio::sync::mpsc::channel(write_channel_size);
     let (write_thread_result_tx, write_thread_result_rx) = tokio::sync::oneshot::channel();
     // As above, we do not bother keeping the std::thread::JoinHandle<_> because
     // we use oneshot channels to signal that the thread has ended.
-    std::thread::spawn(move || match writer(wtr, writer_rx, protocol_version) {
-        Ok(never) => assert_never!(never),
-        Err(e) => write_thread_result_tx.send(e).unwrap(),
+    std::thread::spawn(move || {
+        if let Err(error) = writer(wtr, writer_rx, protocol_version) {
+            // The asynchronous receiver may already have been dropped during
+            // ordinary application shutdown.
+            let _ = write_thread_result_tx.send(error);
+        }
     });
 
     Ok(MavlinkConnection {
@@ -212,5 +211,43 @@ fn flatten2<M: Message>(
     match full {
         Ok(res) => res,
         Err(e) => e.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_exits_cleanly_when_receiver_is_dropped() {
+        let message =
+            mavlink::common::MavMessage::HEARTBEAT(mavlink::common::HEARTBEAT_DATA::default());
+        let header = MavHeader {
+            system_id: 1,
+            component_id: 1,
+            sequence: 0,
+        };
+        let mut bytes = Vec::new();
+        mavlink::write_versioned_msg(&mut bytes, MavlinkVersion::V1, header, &message).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+
+        let result = reader::<mavlink::common::MavMessage>(
+            std::io::Cursor::new(bytes),
+            tx,
+            MavlinkVersion::V1,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn writer_exits_cleanly_when_all_senders_are_dropped() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+
+        let result = writer::<mavlink::common::MavMessage>(Vec::new(), rx, MavlinkVersion::V1);
+
+        assert!(result.is_ok());
     }
 }

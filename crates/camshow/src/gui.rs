@@ -7,6 +7,7 @@ use std::{
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use eyre::Result;
+use flo_core::DisplaySource;
 use machine_vision_formats::{ImageData, pixel_format::RGB8};
 use tokio::sync::watch;
 use tracing::debug;
@@ -26,12 +27,15 @@ pub(crate) struct GuiSinkConfig {
 pub(crate) struct GuiHandles {
     display_rx: watch::Receiver<Option<DisplayFrame>>,
     egui_ctx_tx: std_mpsc::Sender<egui::Context>,
+    display_source_tx: watch::Sender<DisplaySource>,
 }
 
 /// Creates the channels connecting the capture thread to eframe on the main
 /// thread: frames go one way, the egui context (available only once eframe has
 /// built the app) comes back the other.
-pub(crate) fn channels() -> (GuiSinkConfig, GuiHandles) {
+pub(crate) fn channels(
+    display_source_tx: watch::Sender<DisplaySource>,
+) -> (GuiSinkConfig, GuiHandles) {
     let (display_tx, display_rx) = watch::channel::<Option<DisplayFrame>>(None);
     let (egui_ctx_tx, egui_ctx_rx) = std_mpsc::channel();
     (
@@ -42,6 +46,7 @@ pub(crate) fn channels() -> (GuiSinkConfig, GuiHandles) {
         GuiHandles {
             display_rx,
             egui_ctx_tx,
+            display_source_tx,
         },
     )
 }
@@ -71,6 +76,7 @@ pub(crate) fn run(handles: GuiHandles, windowed: bool) -> Result<()> {
             Ok(Box::new(CamshowApp::new(
                 handles.display_rx,
                 handles.egui_ctx_tx,
+                handles.display_source_tx,
             )))
         }),
     )
@@ -133,18 +139,21 @@ struct CamshowApp {
     egui_ctx_tx: Option<std_mpsc::Sender<egui::Context>>,
     texture: Option<TextureHandle>,
     last_recording: bool,
+    display_source_tx: watch::Sender<DisplaySource>,
 }
 
 impl CamshowApp {
     fn new(
         frame_rx: watch::Receiver<Option<DisplayFrame>>,
         egui_ctx_tx: std_mpsc::Sender<egui::Context>,
+        display_source_tx: watch::Sender<DisplaySource>,
     ) -> Self {
         Self {
             frame_rx,
             egui_ctx_tx: Some(egui_ctx_tx),
             texture: None,
             last_recording: false,
+            display_source_tx,
         }
     }
 
@@ -187,6 +196,10 @@ impl eframe::App for CamshowApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+
+        if let Some(source) = ctx.input(display_source_hotkey) {
+            let _ = self.display_source_tx.send(source);
+        }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && is_fullscreen {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -238,5 +251,45 @@ impl eframe::App for CamshowApp {
                     Color32::WHITE,
                 );
             });
+    }
+}
+
+fn display_source_hotkey(input: &egui::InputState) -> Option<DisplaySource> {
+    [
+        egui::Key::Num0,
+        egui::Key::Space,
+        egui::Key::Num1,
+        egui::Key::Num2,
+    ]
+    .into_iter()
+    .find(|&key| input.key_pressed(key))
+    .and_then(display_source_for_key)
+}
+
+fn display_source_for_key(key: egui::Key) -> Option<DisplaySource> {
+    match key {
+        egui::Key::Num0 | egui::Key::Space => Some(DisplaySource::Webcam),
+        egui::Key::Num1 => Some(DisplaySource::StrandCamMain),
+        egui::Key::Num2 => Some(DisplaySource::StrandCamSecondary),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_source_hotkeys_select_the_expected_views() {
+        let cases = [
+            (egui::Key::Num0, DisplaySource::Webcam),
+            (egui::Key::Space, DisplaySource::Webcam),
+            (egui::Key::Num1, DisplaySource::StrandCamMain),
+            (egui::Key::Num2, DisplaySource::StrandCamSecondary),
+        ];
+
+        for (key, expected) in cases {
+            assert_eq!(display_source_for_key(key), Some(expected));
+        }
     }
 }

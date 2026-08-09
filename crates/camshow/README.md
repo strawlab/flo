@@ -18,6 +18,10 @@ outputs the CLI enables, and both can run at the same time.
   groundstation. `flo` can retarget the bitrate, or disable and re-enable the
   stream, at runtime via `SetRtpBitrateKbps`.
 
+In the GUI, press `0` or Space for the webcam, `1` for the main tracking camera,
+and `2` for the secondary tracking camera. These keys ask FLO to switch the
+authoritative display source, so relaying and RTP follow the GUI selection.
+
 With neither flag, camshow still captures and still records on `flo`'s command;
 it just displays and streams nothing.
 

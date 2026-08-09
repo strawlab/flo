@@ -52,6 +52,7 @@ use state::OsdSnapshot;
 /// Used for the log file name and to name the threads this spawns (for
 /// `ps`/thread-dump readability).
 const APP_NAME: &str = "camshow";
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (git ", env!("GIT_HASH"), ")");
 
 /// How many raw frames may sit between the capture loop and the RTP encoder
 /// before frames get dropped rather than stalling capture.
@@ -77,7 +78,7 @@ impl From<DisplaySourceArg> for DisplaySource {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = VERSION, about, long_about = None)]
 struct Cli {
     /// TCP address to listen on for flo connections.
     #[arg(long, default_value = camshow_protocol::DEFAULT_CAMSHOW_ADDR)]
@@ -179,10 +180,6 @@ fn main() -> Result<()> {
     // down".
     let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel::<()>();
 
-    // The GUI half of the wiring only exists in GUI mode: the sink side goes
-    // to the camera thread, the handle side to eframe on this thread.
-    let (gui_sink_cfg, gui_handles) = cli.gui.then(gui::channels).unzip();
-
     let rtp_sink_cfg = cli.rtp_dest.map(|dest| RtpSinkConfig {
         params: RtpStreamParams {
             dest,
@@ -210,6 +207,17 @@ fn main() -> Result<()> {
     // The CLI value is the starting point; flo overrides it whenever the
     // operator switches.
     let (display_source_tx, display_source_rx) = watch::channel(display_source);
+    // This carries local GUI requests back to FLO. It is separate from
+    // `display_source_tx`, which carries FLO's authoritative state to the
+    // camera thread.
+    let (gui_display_source_tx, mut gui_display_source_rx) = watch::channel(display_source);
+    gui_display_source_rx.mark_unchanged();
+    // The GUI half of the wiring only exists in GUI mode: the sink side goes
+    // to the camera thread, the handle side to eframe on this thread.
+    let (gui_sink_cfg, gui_handles) = cli
+        .gui
+        .then(|| gui::channels(gui_display_source_tx.clone()))
+        .unzip();
 
     let relayed_for_camera = relayed.clone();
     let camera_handle = std::thread::Builder::new()
@@ -239,6 +247,7 @@ fn main() -> Result<()> {
         recording_tx,
         rtp_bitrate_tx,
         display_source_tx,
+        gui_display_source_rx,
     };
 
     let run_result = match gui_handles {
