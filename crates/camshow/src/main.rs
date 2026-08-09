@@ -162,13 +162,8 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    if std::env::var_os("RUST_LOG").is_none() {
-        // SAFETY: We ensure that this only happens in single-threaded code
-        // because this is immediately at the start of main() and no other
-        // threads have started.
-        unsafe { std::env::set_var("RUST_LOG", "info") };
-    }
-
+    // No `RUST_LOG` default is set here: `flo_tracing::init_tracing` applies it
+    // when building the filter, so it holds for every way in.
     color_eyre::install()?;
 
     let cli = Cli::parse();
