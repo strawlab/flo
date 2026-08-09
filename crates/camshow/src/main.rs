@@ -37,6 +37,7 @@ use tracing::{error, info, warn};
 mod bootstrap;
 mod camera;
 mod gui;
+mod preview;
 mod rtp;
 mod server;
 mod sink;
@@ -88,6 +89,12 @@ struct Cli {
     /// tracking-camera frames for the non-webcam display sources.
     #[arg(long, default_value = camshow_protocol::video::DEFAULT_CAMSHOW_VIDEO_ADDR)]
     video_listen: String,
+
+    /// TCP address to listen on for the preview link, over which flo reads
+    /// webcam frames to show in its browser UI. Nothing depends on it: with
+    /// nobody connected, no preview frames are produced at all.
+    #[arg(long, default_value = camshow_protocol::preview::DEFAULT_CAMSHOW_PREVIEW_ADDR)]
+    preview_listen: String,
 
     /// What the display and stream show. The recording is always the clean
     /// webcam whatever this is set to. Non-webcam sources need frames relayed
@@ -212,6 +219,7 @@ fn main() -> Result<()> {
 
     let listen_addr = cli.listen.clone();
     let video_listen_addr = cli.video_listen.clone();
+    let preview_listen_addr = cli.preview_listen.clone();
     let windowed = cli.windowed;
     let test_pattern = cli.test_pattern.then(osd_utils::test_pattern);
     let display_source = DisplaySource::from(cli.display_source);
@@ -237,6 +245,8 @@ fn main() -> Result<()> {
         .then(|| gui::channels(gui_display_source_tx.clone()))
         .unzip();
 
+    let (preview_sink, preview_server) = preview::channel();
+
     let relayed_for_camera = relayed.clone();
     let camera_handle = std::thread::Builder::new()
         .name(format!("{APP_NAME}-camera"))
@@ -253,6 +263,7 @@ fn main() -> Result<()> {
                 rtp_targets_rx,
                 display_source_rx,
                 relayed: relayed_for_camera,
+                preview: preview_sink,
                 shutdown_rx,
             })
         })?;
@@ -260,12 +271,14 @@ fn main() -> Result<()> {
     let server = server::Server {
         listen_addr,
         video_listen_addr,
+        preview_listen_addr,
         relayed,
         osd_tx,
         recording_tx,
         rtp_targets_tx,
         display_source_tx,
         gui_display_source_rx,
+        preview_server: Some(preview_server),
     };
 
     let run_result = match gui_handles {

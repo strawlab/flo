@@ -34,6 +34,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     APP_NAME,
+    preview::{PreviewFrame, PreviewSink, downscale_rgb8},
     sink::{FrameSink, SinkConfig, Sinks},
     source::{FrameSource, WebcamSource},
     state::{Frame, OsdSnapshot, RecordingCommand, Timestamp},
@@ -85,9 +86,16 @@ pub(crate) struct CameraTask {
     pub(crate) display_source_rx: watch::Receiver<DisplaySource>,
     /// Frames relayed from a tracking camera, for the non-webcam sources.
     pub(crate) relayed: LatestRelayedFrame,
+    /// Where webcam frames for flo's browser preview are handed over.
+    pub(crate) preview: PreviewSink,
     /// Fires (or closes) when the process should shut down.
     pub(crate) shutdown_rx: mpsc::UnboundedReceiver<()>,
 }
+
+/// How often a frame is offered to the preview link. Slow on purpose: this is
+/// a monitoring view in a browser, often at the far end of a radio link, and
+/// every frame sent costs a stamp, a downscale, and a JPEG encode on flo.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(serde::Serialize)]
 struct SrtMsg {
@@ -351,6 +359,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         mut rtp_targets_rx,
         mut display_source_rx,
         relayed,
+        preview,
         mut shutdown_rx,
     } = task;
 
@@ -425,6 +434,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
 
     let mut active: Option<ActiveRecording> = None;
     let mut precapture = PreCaptureBuffer::new();
+    let mut last_preview_at: Option<Instant> = None;
     let mut last_fallback_warn: Option<Instant> = None;
     let mut display_source = *display_source_rx.borrow_and_update();
     let mut relay_selector = RelayFrameSelector::new(display_source);
@@ -538,6 +548,29 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
                     }
                 }
             }
+        }
+
+        // Offer a frame to flo's browser preview. Always the webcam with the
+        // OSD stamped on, whatever the live view is currently showing: the
+        // point of the panel is to see the FPV camera from the browser.
+        //
+        // Skipped entirely while nobody is connected — this is the one output
+        // that exists purely for someone looking at a web page — and stamped
+        // before it is downscaled, because the OSD font is sized for a full
+        // frame and would swamp a 640-wide one.
+        if preview.wanted() && last_preview_at.is_none_or(|at| at.elapsed() >= PREVIEW_INTERVAL) {
+            let mut stamped = recorded.clone();
+            if let Some(canvas) = active_canvas
+                && let Err(e) =
+                    osd_overlay::stamp_canvas(&mut stamped, canvas, &fonts, &glyph_table)
+            {
+                warn!("OSD stamp failed for preview: {e}");
+            }
+            preview.send(PreviewFrame {
+                image: downscale_rgb8(&stamped),
+                timestamp,
+            });
+            last_preview_at = Some(Instant::now());
         }
 
         let displayed_arc = match relayed_frame {
