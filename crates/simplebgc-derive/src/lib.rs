@@ -229,22 +229,53 @@ fn dummy_const_trick<T: quote::ToTokens>(name: &Ident, exp: T) -> TokenStream2 {
 const ERR_RAW_PRIMITIVE: &str =
     "field must be primitive type, tuple of primitive types, or array of u8 for raw values";
 
+/// A guard emitted ahead of every read, turning what `bytes` would panic over
+/// into a [`PayloadParseError::InsufficientData`].
+///
+/// `Buf`'s readers -- `get_u16_le`, `copy_to_slice`, `split_to` -- panic when
+/// the buffer is short. That is not merely a guard against a bug here: the CRC
+/// covers the length byte, so a controller sending a shorter form of a command
+/// than this crate models yields a packet that verifies and then runs out
+/// mid-parse, and the panic took down the task doing the reading. Checking
+/// first costs a comparison per field and makes the shortfall reportable.
+fn ensure_remaining(name: &str, span: proc_macro2::Span, needed: TokenStream2) -> TokenStream2 {
+    quote_spanned! {span=>
+        {
+            let _needed: usize = #needed;
+            if Buf::remaining(&_b) < _needed {
+                return Err(PayloadParseError::InsufficientData {
+                    name: #name.into(),
+                    needed: _needed,
+                    available: Buf::remaining(&_b),
+                });
+            }
+        }
+    }
+}
+
 fn get_parser_for_field(info: &FieldInfo) -> Option<TokenStream2> {
     let var = &info.variable;
     let span = info.span;
     let name = &info.name;
 
     match &info.kind {
-        FieldKind::Payload { ty, size } => Some(quote_spanned! {span=>
-            let #var: #ty = Payload::from_bytes(_b.split_to(#size))?;
-        }),
+        FieldKind::Payload { ty, size } => {
+            let guard = ensure_remaining(name, span, quote! { #size });
+            Some(quote_spanned! {span=>
+                #guard
+                let #var: #ty = Payload::from_bytes(_b.split_to(#size))?;
+            })
+        }
         FieldKind::Flags { repr } => {
             let get_value = match repr {
                 PrimitiveKind::U8 | PrimitiveKind::I8 => format_ident!("get_{}", repr),
                 _ => format_ident!("get_{}_le", repr),
             };
+            let width = repr.size_bytes();
+            let guard = ensure_remaining(name, span, quote! { #width });
 
             Some(quote_spanned! {span=>
+                #guard
                 let #var = BitFlags::from_bits(_b.#get_value())
                     .or(Err(PayloadParseError::InvalidFlags { name: #name.into() }))?;
             })
@@ -256,8 +287,11 @@ fn get_parser_for_field(info: &FieldInfo) -> Option<TokenStream2> {
             };
 
             let from_value = format_ident!("from_{}", repr);
+            let width = repr.size_bytes();
+            let guard = ensure_remaining(name, span, quote! { #width });
 
             Some(quote_spanned! {span=>
+                #guard
                 let #var = FromPrimitive::#from_value(_b.#get_value())
                     .ok_or(PayloadParseError::InvalidEnum { name: #name.into() })?;
             })
@@ -265,21 +299,26 @@ fn get_parser_for_field(info: &FieldInfo) -> Option<TokenStream2> {
         FieldKind::Raw { ty } => {
             // if it is a primitive, this is simple
             if let Ok(repr) = PrimitiveKind::try_from(ty.clone()) {
+                let width = repr.size_bytes();
+                let guard = ensure_remaining(name, span, quote! { #width });
                 return Some(match repr {
                     PrimitiveKind::Bool => {
                         quote_spanned! {span=>
+                            #guard
                             let #var = _b.get_u8() != 0;
                         }
                     }
                     PrimitiveKind::U8 | PrimitiveKind::I8 => {
                         let get_value = format_ident!("get_{}", repr);
                         quote_spanned! {span=>
+                            #guard
                             let #var = _b.#get_value();
                         }
                     }
                     _ => {
                         let get_value = format_ident!("get_{}_le", repr);
                         quote_spanned! {span=>
+                            #guard
                             let #var = _b.#get_value();
                         }
                     }
@@ -290,8 +329,10 @@ fn get_parser_for_field(info: &FieldInfo) -> Option<TokenStream2> {
                 Type::Array(ty) => match PrimitiveKind::try_from(ty.elem.as_ref().clone()) {
                     Ok(PrimitiveKind::U8) => {
                         let len = &ty.len;
+                        let guard = ensure_remaining(name, span, quote! { #len });
 
                         Some(quote_spanned! {span=>
+                            #guard
                             let mut #var = [0u8; #len];
                             _b.copy_to_slice(&mut #var[..]);
                         })

@@ -596,6 +596,42 @@ mod tests {
         );
     }
 
+    /// A payload shorter than the struct we model used to panic inside the
+    /// derived reader -- `bytes` panics rather than erroring on a short buffer
+    /// -- which took down whatever task was decoding. It is reachable from the
+    /// wire, since the CRC covers the length byte: a controller sending a
+    /// shorter form of a command than we know produces exactly this.
+    #[test]
+    fn a_payload_that_runs_out_is_an_error_not_a_panic() {
+        // CMD_BOARD_INFO's payload is 18 bytes; hand over 6.
+        let short = Bytes::from_static(&[36, 159, 10, 44, 191, 252]);
+        let msg = IncomingCommand::from_payload_bytes(CMD_BOARD_INFO, short.clone())
+            .expect("a short payload must not become an error, let alone a panic");
+        assert_eq!(
+            msg,
+            IncomingCommand::RawMessage(crate::RawMessage {
+                typ: CMD_BOARD_INFO,
+                payload: short,
+            }),
+            "the bytes that did arrive must still be handed on"
+        );
+    }
+
+    /// The guard reports what was missing rather than merely refusing.
+    #[test]
+    fn running_out_says_which_field_and_by_how_much() {
+        let err = crate::BoardInfo::from_bytes(Bytes::from_static(&[36, 159]))
+            .expect_err("2 bytes cannot satisfy BoardInfo");
+        assert!(
+            matches!(
+                &err,
+                PayloadParseError::InsufficientData { needed, available, .. }
+                    if *needed > *available
+            ),
+            "expected a shortfall report, got {err:?}"
+        );
+    }
+
     /// The consequence that actually hurt: one unreadable packet used to take
     /// the decoder's framing with it, so the *next* packets were lost too.
     #[test]
