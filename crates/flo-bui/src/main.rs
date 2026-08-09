@@ -702,6 +702,35 @@ impl Component for App {
 }
 
 impl App {
+    /// The FPV webcam's entry in [`Self::camera_links`], or `None` when camshow
+    /// is not configured and there is therefore no webcam to preview.
+    ///
+    /// Opened in a new tab, unlike the tracking cameras: the preview costs work
+    /// in camshow and in flo for as long as the page is up, so it is something
+    /// the operator opens beside the main UI and closes again, not somewhere
+    /// they navigate to. A plain link rather than a scripted popup, so popup
+    /// blockers leave it alone and the window goes where they want it.
+    fn webcam_preview_link(&self) -> Option<Html> {
+        let configured = self
+            .cfg
+            .as_ref()
+            .and_then(|cfg| cfg.osd_config.as_ref())
+            .is_some_and(|osd| osd.camshow_addr.is_some());
+        if !configured {
+            return None;
+        }
+        Some(html! {
+            <li key="fpv-webcam">
+                <a
+                    href={format!("/{}", flo_core::WEBCAM_PREVIEW_PATH)}
+                    target="_blank"
+                    rel="noopener"
+                >{"FPV webcam"}</a>
+                {" (Preview)"}
+            </li>
+        })
+    }
+
     fn camshow_display_view(&self, ctx: &Context<Self>) -> Html {
         let selected = self
             .last_state
@@ -916,16 +945,25 @@ impl App {
         }
     }
 
+    /// Every camera the operator can go and look at: the tracking cameras, and
+    /// the FPV webcam alongside them.
+    ///
+    /// The webcam is reached by a different route — a standalone preview page
+    /// rather than a proxied strand-cam UI — but that is our plumbing, not
+    /// something the operator should have to think about. From their side it is
+    /// one more camera to open, so it is one more entry in this list rather
+    /// than a button styled differently from its neighbours.
     fn camera_links(&self) -> Html {
-        if self.strand_cameras.is_empty() {
-            return html! { <p>{"No cameras configured."}</p> };
-        }
-
         fn role_str(role: &StrandCamRole) -> &'static str {
             match role {
                 StrandCamRole::Main => " (Main)",
                 StrandCamRole::Secondary => " (Secondary)",
             }
+        }
+
+        let webcam_preview = self.webcam_preview_link();
+        if self.strand_cameras.is_empty() && webcam_preview.is_none() {
+            return html! { <p>{"No cameras configured."}</p> };
         }
 
         html! {
@@ -937,6 +975,7 @@ impl App {
                         </li>
                     }
                 }) }
+                { webcam_preview.unwrap_or_default() }
             </ul>
         }
     }
