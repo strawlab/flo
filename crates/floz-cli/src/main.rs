@@ -611,14 +611,6 @@ fn build_diagnosis(
 }
 
 fn init_tracing() -> Result<()> {
-    if std::env::var_os("RUST_LOG").is_none() {
-        let envstr = format!("{}=info,info", env!("CARGO_PKG_NAME")).replace('-', "_");
-        // SAFETY: called once at startup before any threads are spawned.
-        unsafe {
-            std::env::set_var("RUST_LOG", envstr);
-        }
-    }
-
     use tracing_subscriber::{fmt, layer::SubscriberExt};
     let console_layer = fmt::layer().with_file(true).with_line_number(true);
     let collector = tracing_subscriber::registry()
@@ -630,6 +622,13 @@ fn init_tracing() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    if std::env::var_os("RUST_LOG").is_none() {
+        // SAFETY: We ensure that this only happens in single-threaded code
+        // because this is immediately at the start of main() and no other
+        // threads have started.
+        unsafe { std::env::set_var("RUST_LOG", "info") };
+    }
+
     color_eyre::install()?;
     init_tracing()?;
 

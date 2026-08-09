@@ -380,8 +380,18 @@ impl Decoder for V2Codec {
             for i in 0..src.len() {
                 if src[i] == 0x24 {
                     found = i;
-                    tracing::debug!("got start");
                     break;
+                }
+            }
+            if found < src.len() {
+                if found == 0 {
+                    tracing::debug!("SimpleBGC v2 decoder acquired packet start");
+                } else {
+                    tracing::debug!(
+                        discarded_bytes = found,
+                        discarded_prefix = ?&src[..found.min(32)],
+                        "SimpleBGC v2 decoder resynchronized at packet start"
+                    );
                 }
             }
             src.advance(found);
@@ -403,6 +413,17 @@ impl Decoder for V2Codec {
                 Ok(None)
             }
             Err(e) => {
+                // Keep this bounded: this is the first bytes at which the decoder lost
+                // framing, and is sufficient to distinguish a stray serial byte from a
+                // corrupted SimpleBGC packet without dumping an unbounded receive buffer.
+                let preview_len = src.len().min(32);
+                tracing::debug!(
+                    error = ?e,
+                    was_in_sync = self.in_sync,
+                    buffered_bytes = src.len(),
+                    buffer_prefix = ?&src[..preview_len],
+                    "SimpleBGC v2 decoder rejected packet bytes"
+                );
                 src.advance(1); //to not get stuck
                 if self.in_sync {
                     //lost sync, error

@@ -29,6 +29,7 @@ members = [
   "crates/floz-retrack",
   "crates/floz-writer",
   "crates/floz-replay",
+  "crates/flo-strand-cam",
 ]
 exclude = [
   "firmware/beamdriver",
@@ -177,6 +178,7 @@ flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 zip = { version = "2.2.2", default-features = false, features = ["deflate", "time"] }
 
 camshow-protocol = { path = "crates/camshow-protocol" }
+flo = { path = ".", default-features = false }
 flo-core = { path = "crates/flo-core", default-features = false }
 flo-tracing = { path = "crates/flo-tracing" }
 osd-overlay = { path = "crates/osd-overlay" }
@@ -193,6 +195,7 @@ tokio-mavlink = { path = "crates/tokio-mavlink" }
 
 ads-webasm = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 bg-movie-writer = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
+build-util = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 ci2 = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 ci2-async = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }
 ci2-pylon = { git = "https://github.com/strawlab/strand-braid", rev = "74765b6093d5c6889649ad829571a7658d1d8cef" }

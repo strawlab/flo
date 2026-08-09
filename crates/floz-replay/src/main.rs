@@ -4,10 +4,9 @@
 //! CLI tool to drive a running FLO controller with centroid data over UDP,
 //! without any camera or motor hardware.
 //!
-//! Live FLO receives centroids over UDP from Strand Camera's `imops` module
-//! (see `on_image_centroid` in the `flo` crate). The wire payload is a
-//! [`flo_core::UdpMsg`] encoded as CBOR. This tool produces the same messages
-//! two ways:
+//! The legacy FLO UDP listener accepts [`flo_core::UdpMsg`] CBOR packets (see
+//! `on_image_centroid` in the `flo` crate). This compatibility CLI produces
+//! those messages two ways:
 //!
 //! * `replay` — re-emit the `centroid.csv` rows already saved inside a `.floz`
 //!   recording, reproducing the original arrival cadence.
@@ -15,17 +14,16 @@
 //!   projected through the controller's own calibration so the recovered angles
 //!   and stereopsis distance match the trajectory.
 //!
-//! Combined with FLO's existing no-motor path and optional `strand_cam_*`
-//! config, either mode lets a developer exercise the full controller pipeline
-//! (Kalman filter, tracking state machine, `.floz` recording, web UI) on a
-//! machine with no hardware: start `flo` with a suitable config and no motor
-//! flags, then point this tool at its `--udp-addr`.
-
-mod replay;
-mod synth;
+//! Combined with FLO's no-motor path, either mode lets a developer exercise the
+//! full controller pipeline (Kalman filter, tracking state machine, `.floz`
+//! recording, web UI) on a machine with no hardware: start `flo` with a
+//! suitable config and no motor flags, then point this tool at its
+//! `--udp-addr`. For new integrations prefer `floz-replay-inprocess`, which
+//! passes the same centroids through FLO's in-process input queue.
 
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
+use floz_replay::{replay, synth};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -43,13 +41,6 @@ enum Command {
 }
 
 fn init_tracing() -> Result<()> {
-    if std::env::var_os("RUST_LOG").is_none() {
-        let envstr = format!("{}=info,info", env!("CARGO_PKG_NAME")).replace('-', "_");
-        // SAFETY: called once at startup before any threads are spawned.
-        unsafe {
-            std::env::set_var("RUST_LOG", envstr);
-        }
-    }
     use tracing_subscriber::{fmt, layer::SubscriberExt};
     let console_layer = fmt::layer().with_file(true).with_line_number(true);
     let collector = tracing_subscriber::registry()
@@ -61,6 +52,12 @@ fn init_tracing() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    if std::env::var_os("RUST_LOG").is_none() {
+        // SAFETY: We ensure that this only happens in single-threaded code
+        // because this is immediately at the start of main() and no other
+        // threads have started.
+        unsafe { std::env::set_var("RUST_LOG", "info") };
+    }
     color_eyre::install()?;
     init_tracing()?;
     let cli = Cli::parse();

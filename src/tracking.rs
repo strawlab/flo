@@ -815,6 +815,12 @@ mod tests {
                 1000.0,
                 1e-4,
             ),
+            (
+                "config-flo-strand-cam-sim.yaml",
+                include_str!("../config-flo-strand-cam-sim.yaml"),
+                1000.0,
+                1e-4,
+            ),
         ];
         for (name, yaml, accel_var, obs_var) in cases {
             let mut cfg: FloControllerConfig = serde_yaml::from_str(yaml).expect(name);

@@ -251,20 +251,20 @@ fn moment_centroid(
     }
 }
 
-pub fn run(opt: SynthArgs) -> Result<()> {
+/// Produce synthetic centroids into `send` using an already-loaded FLO
+/// configuration. This is the transport-independent entry point used by both
+/// the legacy UDP CLI and the in-process FLO extension.
+pub fn run_with_sink(
+    opt: &SynthArgs,
+    cfg: &FloControllerConfig,
+    mut send: impl FnMut(MomentCentroid) -> Result<()>,
+) -> Result<()> {
     if opt.rate <= 0.0 {
         bail!("--rate must be positive, got {}", opt.rate);
     }
     if opt.duration <= 0.0 {
         bail!("--duration must be positive, got {}", opt.duration);
     }
-
-    let cfg: FloControllerConfig = {
-        let rdr = std::fs::File::open(&opt.config)
-            .with_context(|| format!("Opening config {}", opt.config.display()))?;
-        serde_yaml::from_reader(rdr)
-            .with_context(|| format!("Parsing config {}", opt.config.display()))?
-    };
 
     let stereo = if opt.no_stereo {
         None
@@ -286,15 +286,13 @@ pub fn run(opt: SynthArgs) -> Result<()> {
         );
     }
 
-    let socket = connect_udp(&opt.target)?;
     let n_samples = (opt.duration * opt.rate).round() as u64;
     let dt = Duration::from_secs_f64(1.0 / opt.rate);
     tracing::info!(
-        "Synthesizing {} samples at {} Hz ({:.1}s) to {}",
+        "Synthesizing {} samples at {} Hz ({:.1}s)",
         n_samples,
         opt.rate,
         opt.duration,
-        opt.target,
     );
 
     let mut framenumber: u32 = 0;
@@ -310,10 +308,10 @@ pub fn run(opt: SynthArgs) -> Result<()> {
                 std::thread::sleep(target - now);
             }
             let timestamp = chrono::Utc::now();
-            let sample = project(&opt, &cfg, stereo.as_ref(), t, framenumber, timestamp)?;
-            send_centroid(&socket, &sample.primary)?;
+            let sample = project(opt, cfg, stereo.as_ref(), t, framenumber, timestamp)?;
+            send(sample.primary)?;
             if let Some(secondary) = &sample.secondary {
-                send_centroid(&socket, secondary)?;
+                send(secondary.clone())?;
             }
             framenumber = framenumber.wrapping_add(1);
         }
@@ -326,6 +324,18 @@ pub fn run(opt: SynthArgs) -> Result<()> {
 
     tracing::info!("Done.");
     Ok(())
+}
+
+/// Run the legacy UDP transport adapter.
+pub fn run(opt: SynthArgs) -> Result<()> {
+    let cfg: FloControllerConfig = {
+        let rdr = std::fs::File::open(&opt.config)
+            .with_context(|| format!("Opening config {}", opt.config.display()))?;
+        serde_yaml::from_reader(rdr)
+            .with_context(|| format!("Parsing config {}", opt.config.display()))?
+    };
+    let socket = connect_udp(&opt.target)?;
+    run_with_sink(&opt, &cfg, |centroid| send_centroid(&socket, &centroid))
 }
 
 /// Bind a local UDP socket and connect it to `target` so `send` can be used.
@@ -343,4 +353,35 @@ pub fn send_centroid(socket: &UdpSocket, centroid: &MomentCentroid) -> Result<()
         .context("Encoding centroid")?;
     socket.send(&bytes).context("Sending UDP packet")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_process_source_validates_before_using_a_transport() {
+        let args = SynthArgs {
+            config: PathBuf::from("unused.yaml"),
+            target: "127.0.0.1:8080".into(),
+            rate: 0.0,
+            duration: 1.0,
+            r#loop: false,
+            period: 1.0,
+            azimuth_deg: 1.0,
+            elevation_deg: 1.0,
+            distance: 1.0,
+            distance_amplitude: 0.0,
+            distance_period: None,
+            center_x: 0,
+            center_y: 0,
+            mass: 1.0,
+            primary_cam: "primary".into(),
+            secondary_cam: "secondary".into(),
+            no_stereo: true,
+        };
+
+        let error = run_with_sink(&args, &FloControllerConfig::default(), |_| Ok(())).unwrap_err();
+        assert!(error.to_string().contains("--rate must be positive"));
+    }
 }

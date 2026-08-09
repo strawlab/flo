@@ -14,7 +14,15 @@ serde_yaml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-panic.workspace = true
+tokio.workspace = true
 
 # flo and strand-braid deps
 floz-parser.workspace = true
 flo-core.workspace = true
+flo.workspace = true
+
+[features]
+default = ["bundle_files"]
+
+bundle_files = ["flo/bundle_files"]
+serve_files = ["flo/serve_files"]
