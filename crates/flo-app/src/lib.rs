@@ -1087,8 +1087,15 @@ where
     T: Into<OsString> + Clone,
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    // Both of these are answered before a configuration file is required. Help
+    // especially: reading it is how someone finds out that `--config` exists
+    // and what it wants, so demanding one first would be circular.
     if is_version_request(&args) {
         println!("{APP_NAME} {VERSION}");
+        return Ok(());
+    }
+    if let Some(help) = flo::cli_help(&args) {
+        print!("{help}");
         return Ok(());
     }
     let config_path = config_path_from_args(&args)?;
@@ -1163,6 +1170,28 @@ mod tests {
             OsString::from("-V"),
         ]));
         assert!(!is_version_request(&[OsString::from("flo")]));
+    }
+
+    /// Reading the help is how someone learns that `--config` exists, so it
+    /// has to be answerable without one. Driven through `run_with_args` rather
+    /// than the helper alone, because the bug this covers was the ordering of
+    /// the two, not the rendering.
+    #[test]
+    fn help_arguments_do_not_require_a_configuration_file() {
+        for flag in ["--help", "-h"] {
+            run_with_args(
+                flo::AppOptions::default(),
+                [OsString::from("flo"), OsString::from(flag)],
+            )
+            .unwrap_or_else(|e| panic!("`flo {flag}` should print help and succeed, got: {e}"));
+        }
+    }
+
+    /// A command line that is merely wrong must not be mistaken for a request
+    /// for help; it still has to reach the error that explains what is missing.
+    #[test]
+    fn a_bare_invocation_still_demands_a_configuration_file() {
+        assert!(run_with_args(flo::AppOptions::default(), [OsString::from("flo")]).is_err());
     }
 
     #[test]
