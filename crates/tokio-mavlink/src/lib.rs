@@ -121,13 +121,12 @@ enum NeverOk {}
 
 /// Read loop, launched on own thread. Returns only on error.
 fn reader<M: Message + std::fmt::Debug>(
-    mut rdr: mavlink::peek_reader::PeekReader<impl Read>,
+    mut rdr: impl Read,
     tx: tokio::sync::mpsc::Sender<Result<(MavHeader, M), RecvError>>,
     protocol_version: MavlinkVersion,
 ) -> Result<NeverOk, RecvError> {
     loop {
-        match mavlink::read_versioned_msg(&mut rdr, mavlink::ReadVersion::Single(protocol_version))
-        {
+        match mavlink::read_versioned_msg(&mut rdr, protocol_version) {
             Ok(val) => tx.blocking_send(Ok(val)).unwrap(),
             Err(MessageReadError::Io(e)) => {
                 return Err(e.into());
@@ -152,9 +151,6 @@ fn writer<M: Message + std::fmt::Debug>(
         };
         match mavlink::write_versioned_msg(&mut wtr, protocol_version, header, &data) {
             Ok(_sz) => {}
-            Err(mavlink::error::MessageWriteError::MAVLink2Only) => {
-                return Err(SendError::MAVLink2Only);
-            }
             Err(mavlink::error::MessageWriteError::Io(e)) => {
                 return Err(e.into());
             }
@@ -177,7 +173,6 @@ pub fn spawn_mavlink_threads<M: Message + Send + std::fmt::Debug + 'static>(
     let (read_thread_result_tx, read_thread_result_rx) = tokio::sync::oneshot::channel();
     // As below, we do not bother keeping the std::thread::JoinHandle<_> because
     // we use oneshot channels to signal that the thread has ended.
-    let rdr = mavlink::peek_reader::PeekReader::new(rdr);
     std::thread::spawn(move || match reader(rdr, reader_tx, protocol_version) {
         Ok(never) => assert_never!(never),
         Err(e) => read_thread_result_tx.send(e).unwrap(),

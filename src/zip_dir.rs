@@ -1,21 +1,19 @@
 // modified from https://github.com/mvdnes/zip-rs/blob/master/examples/write_dir.rs
 
-use std::io::{Seek, Write};
-use zip::{ZipWriter, result::ZipResult, write::FileOptions};
-
 use std::fs::File;
+use std::io::{Seek, Write};
 use std::path::Path;
 
-pub(crate) fn zip_dir<T, P, FO>(
+use zip::result::ZipResult;
+
+pub(crate) fn zip_dir<T, P>(
     it: &mut dyn Iterator<Item = walkdir::DirEntry>,
     prefix: P,
-    mut zipw: &mut ZipWriter<T>,
-    options: FileOptions<FO>,
+    zipw: &mut floz_writer::FlozWriter<T>,
 ) -> ZipResult<()>
 where
     T: Write + Seek,
     P: AsRef<Path>,
-    FO: zip::write::FileOptionExtension + Clone,
 {
     for entry in it {
         let path = entry.path();
@@ -33,13 +31,13 @@ where
         // Write file or directory explicitly
         // Some unzip tools unzip files with directory paths correctly, some do not!
         if path.is_file() {
-            zipw.start_file(name_string, options.clone())?;
+            zipw.start_file(&name_string)?;
             let mut f = File::open(path)?;
-            std::io::copy(&mut f, &mut zipw)?;
+            std::io::copy(&mut f, &mut *zipw)?;
         } else if !name_string.is_empty() {
             // Only if not root! Avoids path spec / warning
             // and mapname conversion failed error on unzip
-            zipw.add_directory(name_string, options.clone())?; // Discussion about deprecation error at https://github.com/zip-rs/zip/issues/181
+            zipw.add_directory(&name_string)?;
         }
     }
     Result::Ok(())
@@ -48,6 +46,8 @@ where
 #[test]
 fn test_nested_names() -> color_eyre::eyre::Result<()> {
     let output_root = tempfile::tempdir().unwrap(); // will cleanup on drop
+    let readme = output_root.path().join(floz_writer::README_FNAME);
+    std::fs::write(readme, "read me")?;
     let file1 = output_root.path().join("file1.txt");
     std::fs::write(file1, "file 1 contents")?;
     let subdir1 = output_root.path().join("subdir1");
@@ -55,19 +55,16 @@ fn test_nested_names() -> color_eyre::eyre::Result<()> {
     let file2 = subdir1.join("file2.txt");
     std::fs::write(file2, "file 2 contents")?;
 
-    let mut zipw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let mut zipw = floz_writer::FlozWriter::new(std::io::Cursor::new(Vec::new()), None)?;
     let walkdir = walkdir::WalkDir::new(&output_root);
-    let mut file_iter = walkdir.into_iter().map(|x| x.unwrap());
-    zip_dir(
-        &mut file_iter,
-        output_root,
-        &mut zipw,
-        zip::write::SimpleFileOptions::default(),
-    )?;
+    let mut entries: Vec<_> = walkdir.into_iter().map(|x| x.unwrap()).collect();
+    entries.sort_by_key(|entry| entry.file_name() != floz_writer::README_FNAME);
+    zip_dir(&mut entries.into_iter(), output_root, &mut zipw)?;
 
     let buf = zipw.finish()?.into_inner();
     let zip_archive = zip::ZipArchive::new(std::io::Cursor::new(&buf[..]))?;
     let mut fnames: std::collections::BTreeSet<&str> = zip_archive.file_names().collect();
+    assert!(fnames.remove(floz_writer::README_FNAME));
     assert!(fnames.remove("file1.txt"));
     assert!(fnames.remove("subdir1/"));
     assert!(fnames.remove("subdir1/file2.txt"));

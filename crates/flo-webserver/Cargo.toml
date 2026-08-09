@@ -28,6 +28,9 @@ strand-bui-backend-session-types.workspace = true
 flo-core.workspace = true
 futures.workspace = true
 
+[dev-dependencies]
+cookie_store = "0.21.0"
+
 [features]
 default = ["bundle_files"]
 

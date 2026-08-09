@@ -190,7 +190,7 @@ struct FloCoordinator<'a> {
 
 impl<'a> FloCoordinator<'a> {
     #[expect(clippy::too_many_arguments)]
-    async fn new(
+    fn new(
         device_config: &'a mut FloControllerConfig,
         flo_saver_tx: mpsc::UnboundedSender<SaveToDiskMsg>,
         osd_tx: Option<watch::Sender<OsdState>>,
@@ -203,10 +203,14 @@ impl<'a> FloCoordinator<'a> {
         camshow_recording_tx: Option<mpsc::UnboundedSender<camshow_client::Command>>,
         data_dir: &'a camino::Utf8Path,
         precapture_buffered_rx: watch::Receiver<f64>,
-    ) -> Result<Self> {
-        let (cam_session_main, cam_session_secondary, secondary_cam_name) =
-            init_strand_cams(device_config).await?;
-        Ok(Self {
+        strand_cams: InitializedStrandCams,
+    ) -> Self {
+        let InitializedStrandCams {
+            main,
+            secondary,
+            secondary_cam_name,
+        } = strand_cams;
+        Self {
             data_dir,
             device_config,
             secondary_cam_name,
@@ -226,12 +230,12 @@ impl<'a> FloCoordinator<'a> {
             audio_stream,
             from_device_http_tx,
             broadway,
-            cam_session_main,
-            cam_session_secondary,
+            cam_session_main: main.map(|cam| cam.session),
+            cam_session_secondary: secondary.map(|cam| cam.session),
             camshow_recording_tx,
             highmag_visible_recorder: None,
             precapture_buffered_rx,
-        })
+        }
     }
 
     fn on_new_motor_position(&mut self, motor_position: MotorPositionResult) -> Result<()> {
@@ -943,9 +947,50 @@ async fn resolve_strand_cam(
     }
 }
 
-async fn init_strand_cams(
-    device_config: &FloControllerConfig,
-) -> Result<(Option<HttpSession>, Option<HttpSession>, Option<String>)> {
+struct NamedStrandCamSession {
+    name: String,
+    session: HttpSession,
+}
+
+struct InitializedStrandCams {
+    main: Option<NamedStrandCamSession>,
+    secondary: Option<NamedStrandCamSession>,
+    secondary_cam_name: Option<String>,
+}
+
+impl InitializedStrandCams {
+    fn proxy_sessions(&self) -> Result<flo_webserver::StrandCamSessions> {
+        let mut result = flo_webserver::StrandCamSessions::new();
+        for camera in [&self.main, &self.secondary].into_iter().flatten() {
+            if result
+                .insert(camera.name.clone(), camera.session.clone())
+                .is_some()
+            {
+                eyre::bail!(
+                    "multiple configured Strand Cameras reported the name {:?}",
+                    camera.name
+                );
+            }
+        }
+        Ok(result)
+    }
+
+    fn proxy_info(&self) -> Vec<flo_core::StrandCamProxyInfo> {
+        [
+            (&self.main, flo_core::StrandCamRole::Main),
+            (&self.secondary, flo_core::StrandCamRole::Secondary),
+        ]
+        .into_iter()
+        .filter_map(|(camera, role)| {
+            camera
+                .as_ref()
+                .map(|camera| flo_core::StrandCamProxyInfo::new(role, camera.name.clone()))
+        })
+        .collect()
+    }
+}
+
+async fn init_strand_cams(device_config: &FloControllerConfig) -> Result<InitializedStrandCams> {
     // Connect to strand-cam for main and secondary cameras.
     let jar: cookie_store::CookieStore =
         match Preferences::load(&flo_webserver::APP_INFO, STRAND_CAM_COOKIE_KEY) {
@@ -979,11 +1024,16 @@ async fn init_strand_cams(
     .await
     .transpose()?;
 
-    // The primary camera's name is not needed: any centroid not from the
-    // secondary camera is treated as primary.
-    let cam_session_main = main.and_then(|(session, _name)| session);
-    let (cam_session_secondary, mut secondary_cam_name) = match secondary {
-        Some((session, name)) => (session, Some(name)),
+    let main = main
+        .and_then(|(session, name)| session.map(|session| NamedStrandCamSession { name, session }));
+    let (secondary, mut secondary_cam_name) = match secondary {
+        Some((session, name)) => (
+            session.map(|session| NamedStrandCamSession {
+                name: name.clone(),
+                session,
+            }),
+            Some(name),
+        ),
         None => (None, None),
     };
 
@@ -1010,7 +1060,11 @@ async fn init_strand_cams(
         }
     }
 
-    Ok((cam_session_main, cam_session_secondary, secondary_cam_name))
+    Ok(InitializedStrandCams {
+        main,
+        secondary,
+        secondary_cam_name,
+    })
 }
 
 trait BroadwaySend {
@@ -1536,6 +1590,13 @@ async fn app_main(
     // Create a channel to send copies of our device state.
     let (from_device_http_tx, from_device_http_rx) = watch::channel(my_state.clone());
 
+    // Open each configured Strand Camera session once. The controller keeps
+    // the original handles while the web server gets clones for its Braid-style
+    // reverse proxy; all clones share the same authenticated cookie jar.
+    let strand_cams = init_strand_cams(&device_config).await?;
+    let strand_cam_proxy_sessions = strand_cams.proxy_sessions()?;
+    let strand_cam_proxy_info = strand_cams.proxy_info();
+
     // Channel used to tell the web server it is shutting down. It is flipped to
     // `true` once the main loop below exits (but before this task returns and
     // the runtime drops the server task), so every connected browser is told to
@@ -1562,6 +1623,8 @@ async fn app_main(
                 token_config,
                 persistent_secret,
                 trusted_networks,
+                strand_cam_proxy_sessions,
+                strand_cam_proxy_info,
                 from_device_http_rx,
                 device_config,
                 event_tx,
@@ -1676,8 +1739,8 @@ async fn app_main(
         camshow_recording_tx,
         data_dir,
         precapture_buffered_rx,
-    )
-    .await?;
+        strand_cams,
+    );
 
     // Main loop.
     loop {

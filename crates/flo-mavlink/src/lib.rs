@@ -154,10 +154,6 @@ impl DroneCoordinator {
                 set_gps_global_origin[1],
                 set_gps_global_origin[2],
             );
-            #[expect(
-                deprecated,
-                reason = "MAV_CMD_SET_GLOBAL_ORIGIN not yet in ardupilotmega dialect"
-            )]
             let data = mavlink::ardupilotmega::MavMessage::SET_GPS_GLOBAL_ORIGIN(
                 mavlink::ardupilotmega::SET_GPS_GLOBAL_ORIGIN_DATA {
                     latitude: (lat * 1e7) as i32,
@@ -226,6 +222,22 @@ impl DroneCoordinator {
             },
         );
         self_.mavconn.tx.send((self_.my_header, data)).await?;
+
+        // Request the ODOMETRY message to be streamed at 100 millisecond interval.
+        // This contains covariance of PX4 EKFs.
+        let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
+            mavlink::ardupilotmega::COMMAND_LONG_DATA {
+                command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                param1: mavlink::ardupilotmega::ODOMETRY_DATA::ID as f32, // Message ID to be streamed
+                param2: 100_000.0, // Interval in microseconds
+                target_system: 1,
+                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                confirmation: 0,
+                ..Default::default()
+            },
+        );
+        self_.mavconn.tx.send((self_.my_header, data)).await?;
+
         Ok(self_)
     }
 
@@ -401,6 +413,9 @@ impl DroneCoordinator {
             MavMessage::ATTITUDE_QUATERNION(v) => {
                 save("ATTITUDE_QUATERNION", logger, &v)?;
             }
+            MavMessage::ODOMETRY(v) => {
+                save("ODOMETRY", logger, &v)?;
+            }
             MavMessage::GPS_GLOBAL_ORIGIN(v) => {
                 tracing::info!("received GPS_GLOBAL_ORIGIN: {v:?}");
                 save("GPS_GLOBAL_ORIGIN", logger, &v)?;
@@ -526,10 +541,6 @@ impl DroneCoordinator {
         Ok(())
     }
 
-    async fn on_flight_setpoint(&mut self, sp: drone_structs::TrajectorySetpoint) -> Result<()> {
-        self.send_trajectory_setpoint(sp).await
-    }
-
     async fn on_flight_mode_request(&mut self, fm: FlightMode) -> Result<()> {
         if self.flight_mode_cd.old_value != Some(fm as u32) {
             self.switch_flight_mode(fm).await?;
@@ -652,7 +663,7 @@ async fn main_loop(
                 coordinator.handle_message_from_drone(header, msg).await?;
             }
             r = flight_setpoint_rx.recv() => {
-                coordinator.on_flight_setpoint(r.unwrap()).await?;
+                coordinator.send_trajectory_setpoint(r.unwrap()).await?;
             }
             r = flight_mode_request_rx.recv() => {
                 coordinator.on_flight_mode_request(r.unwrap()).await?;

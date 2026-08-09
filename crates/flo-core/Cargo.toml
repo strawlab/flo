@@ -30,6 +30,7 @@ num = "0.4.3"
 num-derive.workspace = true
 num-traits.workspace = true
 opencv-ros-camera.workspace = true
+percent-encoding.workspace = true
 cam-geom.workspace = true
 
 strand-cam-remote-control.workspace = true
