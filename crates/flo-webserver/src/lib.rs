@@ -108,10 +108,12 @@ async fn events_handler(
     let from_device_rx = app_state.from_device_rx.clone();
     let cfg = app_state.cfg.clone();
     let strand_cameras = app_state.strand_cam_proxy_info.clone();
+    let versions = app_state.component_versions.clone();
 
     let stream1 = stream::iter(vec![
         BuiEventData::Config(cfg),
         BuiEventData::StrandCameras(strand_cameras),
+        BuiEventData::Versions(versions),
     ]);
     let stream2 = WatchStream::from(from_device_rx).map(BuiEventData::DeviceState);
 
@@ -236,6 +238,9 @@ struct AppState {
     /// preview link. Empty, and left that way, when no camshow is configured.
     webcam_preview: WebcamPreview,
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
+    /// Fixed for the life of the process, so it is sent once when a browser
+    /// connects rather than repeated in every state update.
+    component_versions: Vec<flo_core::ComponentVersion>,
 }
 
 #[expect(dead_code)]
@@ -458,6 +463,7 @@ pub async fn main_loop(
     trusted_networks: Vec<axum_token_auth::CidrBlock>,
     embedded_strand_cam_routers: EmbeddedStrandCamRouters,
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
+    component_versions: Vec<flo_core::ComponentVersion>,
     from_device_rx: watch::Receiver<DeviceState>,
     cfg: FloControllerConfig,
     user_commands_tx: tokio::sync::broadcast::Sender<FloEvent>,
@@ -476,6 +482,7 @@ pub async fn main_loop(
         webcam_preview,
         persistent_secret: persistent_secret.clone(),
         strand_cam_proxy_info,
+        component_versions,
     };
 
     // `AuthConfig` is `#[non_exhaustive]`, so build it via `new` and set fields.

@@ -1306,6 +1306,73 @@ pub struct AppOptions {
     pub osd_overlays: Vec<Box<dyn OsdOverlay + Send + Sync>>,
     /// Capacity of the bounded in-process centroid input queue.
     pub centroid_input_capacity: usize,
+    /// What the binary composing FLO was built from, if it can say.
+    ///
+    /// A binary that composes FLO lives in its own repository, and the revision
+    /// baked into these crates was fixed when *they* were compiled: it
+    /// describes FLO's tree, not the one the operator built and is about to
+    /// fly. Only the composing crate can know its own, because a build script's
+    /// `cargo:rustc-env` reaches just the crate it belongs to, so this is
+    /// passed in rather than discovered here.
+    ///
+    /// It joins FLO's own entry and any the extensions report, and the list is
+    /// printed by `--version`, written into every `.floz` and shown in the web
+    /// UI's footer. `None` means only FLO and the extensions are described --
+    /// which for a recording is the difference between knowing what produced
+    /// it and guessing.
+    ///
+    /// ```no_run
+    /// // In the composing crate, whose build script sets GIT_HASH and GIT_DIRTY:
+    /// let options = flo::AppOptions {
+    ///     version: Some(flo_core::ComponentVersion {
+    ///         name: env!("CARGO_PKG_NAME").to_owned(),
+    ///         version: env!("CARGO_PKG_VERSION").to_owned(),
+    ///         git_revision: env!("GIT_HASH").to_owned(),
+    ///         dirty: match env!("GIT_DIRTY") {
+    ///             "true" => Some(true),
+    ///             "false" => Some(false),
+    ///             _ => None,
+    ///         },
+    ///     }),
+    ///     ..Default::default()
+    /// };
+    /// # let _ = options;
+    /// ```
+    pub version: Option<flo_core::ComponentVersion>,
+}
+
+/// FLO's own entry, from this crate's build script.
+pub fn flo_component_version() -> flo_core::ComponentVersion {
+    flo_core::ComponentVersion {
+        name: "flo".to_owned(),
+        // Not `CARGO_PKG_VERSION`: the build script appends the revision to
+        // that, and this type keeps the two apart.
+        version: env!("CARGO_PKG_VERSION")
+            .split('+')
+            .next()
+            .unwrap_or("unknown")
+            .to_owned(),
+        git_revision: env!("GIT_HASH").to_owned(),
+        dirty: match env!("GIT_DIRTY") {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+    }
+}
+
+/// Every software component in this process that can say what it was built
+/// from: FLO, the binary composing it, and any extension that reports one.
+///
+/// Order is deliberate and stable across runs, so the `.floz` record and the
+/// footer read the same way every time: the composing binary first, because
+/// that is the program the operator actually ran, then FLO, then extensions in
+/// registration order. With no composing binary, FLO leads.
+pub fn component_versions(options: &AppOptions) -> Vec<flo_core::ComponentVersion> {
+    let mut versions: Vec<_> = options.version.clone().into_iter().collect();
+    versions.push(flo_component_version());
+    versions.extend(options.extensions.iter().filter_map(|ext| ext.version()));
+    versions
 }
 
 impl Default for AppOptions {
@@ -1315,6 +1382,7 @@ impl Default for AppOptions {
             extensions: Vec::new(),
             osd_overlays: Vec::new(),
             centroid_input_capacity: DEFAULT_CENTROID_INPUT_CAPACITY,
+            version: None,
         }
     }
 }
@@ -1375,6 +1443,8 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let cli = parse_cli(args);
+    // Computed before `options` is handed on and its extensions consumed.
+    let component_versions = component_versions(&options);
     let (log_dir, data_dir) = if let Some(dd) = cli.data_dir.as_ref() {
         (dd.clone(), dd.clone())
     } else {
@@ -1566,6 +1636,7 @@ where
         my_state,
         device_config,
         raw_config_source,
+        component_versions,
         shutdown_rx,
         &data_dir,
         mavlink_port,
@@ -1611,6 +1682,7 @@ fn run_tokio_main(
     my_state: DeviceState,
     device_config: FloControllerConfig,
     raw_config_source: Option<String>,
+    component_versions: Vec<flo_core::ComponentVersion>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     data_dir: &camino::Utf8Path,
     mavlink_port: Option<flo_mavlink::MavlinkPort>,
@@ -1634,6 +1706,7 @@ fn run_tokio_main(
             my_state,
             device_config,
             raw_config_source,
+            component_versions,
             shutdown_rx,
             data_dir,
             mavlink_port,
@@ -1650,6 +1723,7 @@ async fn app_main(
     mut my_state: DeviceState,
     mut device_config: FloControllerConfig,
     raw_config_source: Option<String>,
+    component_versions: Vec<flo_core::ComponentVersion>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     data_dir: &camino::Utf8Path,
     mavlink_port: Option<flo_mavlink::MavlinkPort>,
@@ -1800,11 +1874,13 @@ async fn app_main(
         // Spawn task for saving data to disk
         let device_config = device_config.clone();
         let raw_config_source = raw_config_source.clone();
+        let component_versions = component_versions.clone();
         handle.spawn_blocking(move || {
             writing_state::writer_task_main(
                 flo_saver_rx,
                 &device_config,
                 raw_config_source.as_deref(),
+                &component_versions,
                 precapture_buffered_tx,
             )
         })
@@ -2014,6 +2090,7 @@ async fn app_main(
     let _http_server_join_handle = {
         let device_config = device_config.clone();
         let webcam_preview_for_server = webcam_preview.clone();
+        let component_versions_for_server = component_versions.clone();
         let event_tx = broadway.flo_events.clone();
         handle.spawn(async move {
             flo_webserver::main_loop(
@@ -2023,6 +2100,7 @@ async fn app_main(
                 trusted_networks,
                 embedded_strand_cam_routers,
                 strand_cam_proxy_info,
+                component_versions_for_server,
                 from_device_http_rx,
                 device_config,
                 event_tx,

@@ -159,6 +159,11 @@ pub const ENCODER_OFFSETS_FNAME: &str = "encoder_offsets.csv";
 pub const GIMBAL_PROVENANCE_FNAME: &str = "gimbal-provenance.yaml";
 /// Serialized [`FloControllerConfig`] saved alongside the recorded tables.
 pub const FLO_CONFIG_FNAME: &str = "flo-config.yaml";
+/// Identities of the software components that produced a recording.
+///
+/// See [`ComponentVersion`]. FLO is often flown as one component of a binary
+/// built somewhere else, so "which FLO" does not answer "what produced this".
+pub const VERSIONS_FNAME: &str = "versions.yaml";
 /// Newline-delimited JSON log of [`StampedBMsg`] events (detections, mode
 /// changes, commands) recorded during a session.
 pub const BROADWAY_FNAME: &str = "broadway.jsonl";
@@ -940,6 +945,60 @@ pub enum BuiEventData {
     DeviceState(DeviceState),
     Config(FloControllerConfig),
     StrandCameras(Vec<StrandCamProxyInfo>),
+    /// Sent once when a browser connects. Fixed for the life of the process,
+    /// so it rides at the head of the stream rather than in the state updates.
+    Versions(Vec<ComponentVersion>),
+}
+
+/// What one piece of software in a running FLO was built from.
+///
+/// FLO is frequently one component of a binary built in a different repository,
+/// with its own extensions -- so "which FLO" does not answer "what produced this
+/// recording". Each component that can say who it is contributes one of these,
+/// and the list is reported by `--version`, written into every `.floz`, and
+/// shown in the web UI's footer.
+///
+/// Kept structured rather than pre-formatted because the three readers want
+/// different things: a line of console output, a YAML document to be parsed
+/// years later, and a footer.
+///
+/// A component can only fill this in from its own build script -- Cargo's
+/// `rustc-env` reaches just the crate it belongs to -- so these values are
+/// passed in rather than discovered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentVersion {
+    /// Package name, e.g. `flo` or the name of a composing binary.
+    pub name: String,
+    /// Package version, e.g. `0.1.0`.
+    pub version: String,
+    /// Full git revision the component was built from, or `unknown` when the
+    /// build script could not determine one.
+    pub git_revision: String,
+    /// Whether the working tree had uncommitted changes at build time.
+    ///
+    /// Without this a revision is not the whole truth: a binary built from a
+    /// modified checkout reports the same hash as the commit it was modified
+    /// from, and nothing later can tell the two apart. `None` when the build
+    /// script did not check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+}
+
+impl std::fmt::Display for ComponentVersion {
+    /// One line, as `--version` and the web UI footer show it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} (git {}{})",
+            self.name,
+            self.version,
+            self.git_revision,
+            match self.dirty {
+                Some(true) => "-dirty",
+                _ => "",
+            }
+        )
+    }
 }
 
 // /// Configuration to convert an angle into PWM units

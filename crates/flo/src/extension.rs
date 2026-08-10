@@ -41,6 +41,18 @@ pub trait Extension: Send + 'static {
     /// (e.g. "extension" → `extension.jsonl`).
     fn name(&self) -> &'static str;
 
+    /// What this extension was built from, if it can say. The default is
+    /// `None`, so reporting one is opt-in.
+    ///
+    /// An extension usually lives outside this workspace, which is exactly why
+    /// it has to answer for itself: nothing here can work out the revision of a
+    /// crate compiled elsewhere. What is returned joins FLO's own entry in
+    /// `--version`, in every `.floz`, and in the web UI's footer, so an
+    /// extension that reports one is identifiable in data recorded months ago.
+    fn version(&self) -> Option<flo_core::ComponentVersion> {
+        None
+    }
+
     /// Optional companion OSD overlay. The default returns `None`. An
     /// extension that wants to render on the OSD constructs its overlay
     /// here using the supplied broadway and tokio handle; flo::run

@@ -581,3 +581,10 @@ details summary {
     opacity: 0.7;
     overflow-wrap: break-word;
 }
+
+// One line per software component. Stacked rather than run together: with a
+// composing binary and its extensions there can be several, and a wrapped
+// paragraph of revisions is unreadable.
+#footer .version-line {
+    display: block;
+}

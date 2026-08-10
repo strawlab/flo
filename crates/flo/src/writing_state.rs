@@ -9,6 +9,82 @@ use serde::{Deserialize, Serialize};
 
 use crate::json_lines_writer::JsonLinesWriter;
 
+/// A stand-in for what a real run records: FLO plus a composing binary, as an
+/// extension-bearing deployment would report.
+#[cfg(test)]
+fn test_versions() -> Vec<flo_core::ComponentVersion> {
+    vec![
+        flo_core::ComponentVersion {
+            name: "flo".to_owned(),
+            version: "0.1.0".to_owned(),
+            git_revision: "abc123".to_owned(),
+            dirty: Some(false),
+        },
+        flo_core::ComponentVersion {
+            name: "flo-extension-app".to_owned(),
+            version: "4.2.0".to_owned(),
+            git_revision: "def456".to_owned(),
+            dirty: Some(true),
+        },
+    ]
+}
+
+/// The recording has to say what produced it. FLO is usually one component of a
+/// binary built elsewhere, so without this a `.floz` cannot be traced back to
+/// the program that wrote it.
+#[test]
+fn test_component_versions_are_saved() -> Result<()> {
+    use chrono::TimeZone;
+    use std::io::Read as _;
+
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
+
+    let creation_time = chrono::FixedOffset::east_opt(0)
+        .expect("valid fixed offset")
+        .with_ymd_and_hms(2026, 5, 28, 12, 0, 0)
+        .single()
+        .expect("valid datetime");
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        creation_time.into(),
+        output_dir.clone(),
+        false,
+    ))))?;
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+    handle.join().expect("writer thread panicked")?;
+
+    let floz_path = output_dir.with_extension("floz");
+    let fd = std::fs::File::open(&floz_path)?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(fd))?;
+    let mut saved = String::new();
+    archive
+        .by_name(flo_core::VERSIONS_FNAME)?
+        .read_to_string(&mut saved)?;
+
+    let parsed: Vec<flo_core::ComponentVersion> = serde_yaml::from_str(&saved)?;
+    assert_eq!(parsed, test_versions(), "round trip must be lossless");
+    // The composing binary is the whole point: a record naming only FLO would
+    // not identify the program that ran.
+    assert!(parsed.iter().any(|c| c.name == "flo-extension-app"));
+    assert_eq!(
+        parsed[1].dirty,
+        Some(true),
+        "a build from a modified tree must stay distinguishable"
+    );
+
+    Ok(())
+}
+
 /// Test that StampedMomentCentroid contains all fields in MomentCentroid.
 #[test]
 fn test_stamped_is_superset() -> Result<()> {
@@ -47,7 +123,9 @@ fn test_writer_task_creates_floz_on_toggle_off() -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let config = FloControllerConfig::default();
     let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
-    let handle = std::thread::spawn(move || writer_task_main(rx, &config, None, buffered_secs_tx));
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
 
     let creation_time = chrono::FixedOffset::east_opt(0)
         .expect("valid fixed offset")
@@ -99,7 +177,13 @@ fn test_raw_config_source_is_saved_verbatim() -> Result<()> {
     let config = FloControllerConfig::default();
     let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
     let handle = std::thread::spawn(move || {
-        writer_task_main(rx, &config, Some(raw_config_source), buffered_secs_tx)
+        writer_task_main(
+            rx,
+            &config,
+            Some(raw_config_source),
+            &test_versions(),
+            buffered_secs_tx,
+        )
     });
 
     let creation_time = chrono::FixedOffset::east_opt(0)
@@ -143,7 +227,9 @@ fn test_precapture_buffer_is_written_to_recording() -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let config = FloControllerConfig::default();
     let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
-    let handle = std::thread::spawn(move || writer_task_main(rx, &config, None, buffered_secs_tx));
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
 
     // Enable a generous pre-capture window, then send a centroid while NOT
     // recording. It should be buffered in RAM.
@@ -204,7 +290,9 @@ fn test_normal_recording_excludes_precapture_buffer() -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let config = FloControllerConfig::default();
     let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
-    let handle = std::thread::spawn(move || writer_task_main(rx, &config, None, buffered_secs_tx));
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
 
     tx.send(SaveToDiskMsg::SetPreCaptureSeconds(60.0))?;
     let buffered_centroid = MomentCentroid {
@@ -306,6 +394,7 @@ pub(crate) fn writer_task_main(
     mut flo_write_rx: tokio::sync::mpsc::UnboundedReceiver<SaveToDiskMsg>,
     config: &FloControllerConfig,
     raw_config_source: Option<&str>,
+    component_versions: &[flo_core::ComponentVersion],
     buffered_secs_tx: tokio::sync::watch::Sender<f64>,
 ) -> Result<()> {
     use SaveToDiskMsg::*;
@@ -350,6 +439,7 @@ pub(crate) fn writer_task_main(
                             gimbal_provenance.as_deref(),
                             config,
                             raw_config_source,
+                            component_versions,
                         )?;
                         // For a pre-capture ("post-trigger") recording, flush
                         // the buffered window into the new recording first so
@@ -580,6 +670,11 @@ The archive typically contains:
   at connection time, with a fingerprint of the configuration. Comparing the
   fingerprint across recordings detects a re-calibration that left no other
   trace.
+- `versions.yaml` — the software that produced this recording: FLO, the binary
+  that composed it, and any extensions that report a version, each with the git
+  revision it was built from and whether that working tree was clean. FLO is
+  frequently one component of a binary built in another repository, so this is
+  what identifies the program that actually ran.
 - `broadway.jsonl` — line-delimited JSON log of FLO events and commands.
 
 Not every file is present in every recording; the exact set depends on the
@@ -598,6 +693,7 @@ impl WritingState {
         gimbal_provenance: Option<&GimbalProvenance>,
         config: &FloControllerConfig,
         raw_config_source: Option<&str>,
+        component_versions: &[flo_core::ComponentVersion],
     ) -> Result<Self> {
         let creation_time = creation_time_local.with_timezone(creation_time_local.offset());
         let git_revision = env!("GIT_HASH").to_string();
@@ -651,6 +747,17 @@ impl WritingState {
 
             let mut fd = std::fs::File::create(flo_config_source_path)?;
             fd.write_all(raw_config_source.as_bytes())?;
+        }
+
+        {
+            // What produced this recording. FLO is often one component of a
+            // binary built elsewhere, with extensions built elsewhere again, so
+            // this is the only place a later reader can learn which software
+            // actually flew -- the binary itself will be long gone.
+            let versions_path = output_dirname.join(flo_core::VERSIONS_FNAME);
+            let buf = serde_yaml::to_string(component_versions)?;
+            let mut fd = std::fs::File::create(versions_path)?;
+            fd.write_all(buf.as_bytes())?;
         }
 
         let centroid_wtr = {

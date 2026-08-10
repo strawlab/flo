@@ -1091,7 +1091,15 @@ where
     // especially: reading it is how someone finds out that `--config` exists
     // and what it wants, so demanding one first would be circular.
     if is_version_request(&args) {
-        println!("{APP_NAME} {VERSION}");
+        // Every component that can say what it was built from, not just this
+        // one: a FLO composed into another binary, with extensions from
+        // elsewhere again, is not described by any single revision. The list
+        // leads with the composing binary, so the first line names the program
+        // that was actually run -- printing FLO's own identity above it would
+        // be both redundant and, for a composed binary, wrong.
+        for component in flo::component_versions(&options) {
+            println!("{component}");
+        }
         return Ok(());
     }
     if let Some(help) = flo::cli_help(&args) {
@@ -1185,6 +1193,24 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("`flo {flag}` should print help and succeed, got: {e}"));
         }
+    }
+
+    /// A composed binary lives in its own repository, so it must be able to
+    /// report its own revision rather than the one baked into these crates.
+    #[test]
+    fn a_composing_binary_reports_its_own_version() {
+        let options = flo::AppOptions {
+            version: Some(flo_core::ComponentVersion {
+                name: "flo-extension-app".to_owned(),
+                version: "4.2.0".to_owned(),
+                git_revision: "deadbeef".to_owned(),
+                dirty: Some(false),
+            }),
+            ..Default::default()
+        };
+        // Answered before the configuration file is required, like FLO's own.
+        run_with_args(options, [OsString::from("x"), OsString::from("--version")])
+            .expect("--version must not need a config file");
     }
 
     /// A command line that is merely wrong must not be mistaken for a request

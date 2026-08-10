@@ -118,6 +118,10 @@ struct App {
     last_state: Option<flo_core::DeviceState>,
     cfg: Option<flo_core::FloControllerConfig>,
     strand_cameras: Vec<flo_core::StrandCamProxyInfo>,
+    /// What the running program was built from, sent once on connect. Empty
+    /// until it arrives, which is why the footer falls back to this frontend's
+    /// own build.
+    component_versions: Vec<flo_core::ComponentVersion>,
     es: EventSource,
     _listeners: Vec<EventListener>,
     query_gamepad_interval: Option<Interval>,
@@ -307,6 +311,7 @@ impl Component for App {
             last_state: None,
             cfg: None,
             strand_cameras: Vec::new(),
+            component_versions: Vec::new(),
             _listeners,
             query_gamepad_interval: None,
             last_gamepad_timestamp: 0.0,
@@ -582,6 +587,9 @@ impl Component for App {
                             BuiEventData::StrandCameras(cameras) => {
                                 self.strand_cameras = cameras;
                             }
+                            BuiEventData::Versions(versions) => {
+                                self.component_versions = versions;
+                            }
                         }
                     }
                     Err(e) => {
@@ -690,11 +698,7 @@ impl Component for App {
                     { self.view_state() }
                 </div>
                 <footer id="footer">
-                {format!(
-                    "FLO version: {} (revision {})",
-                    env!("CARGO_PKG_VERSION"),
-                    env!("GIT_HASH")
-                )}
+                    { self.versions_view() }
                 </footer>
             </div>
         }
@@ -710,6 +714,34 @@ impl App {
     /// the operator opens beside the main UI and closes again, not somewhere
     /// they navigate to. A plain link rather than a scripted popup, so popup
     /// blockers leave it alone and the window goes where they want it.
+    /// What the running program was built from, one line per component.
+    ///
+    /// Sent by the server rather than compiled in, because the interesting
+    /// answer is usually not this frontend's own build: FLO is often one
+    /// component of a binary built in another repository, with extensions from
+    /// elsewhere again, and only each of those can report its own revision.
+    /// Until that arrives, this frontend's build is all there is to show.
+    fn versions_view(&self) -> Html {
+        if self.component_versions.is_empty() {
+            return html! {
+                <span class="version-line">{format!(
+                    "FLO web UI {} (revision {})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("GIT_HASH"),
+                )}</span>
+            };
+        }
+        html! {
+            <>
+            { for self.component_versions.iter().map(|component| html! {
+                <span class="version-line" key={component.name.clone()}>
+                    { component.to_string() }
+                </span>
+            }) }
+            </>
+        }
+    }
+
     fn webcam_preview_link(&self) -> Option<Html> {
         let configured = self
             .cfg
