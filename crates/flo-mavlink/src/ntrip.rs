@@ -1,6 +1,8 @@
 use eyre::{Context, Result};
 use mavlink::MavHeader;
 
+use flo_core::SaveToDiskMsg;
+
 /// A zero-sized type which is never created to indicate that Ok(_) never
 /// happens.
 #[derive(Debug)]
@@ -77,9 +79,17 @@ fn fix_url(ntrip_url: &str) -> Result<String> {
 ///
 /// A robust connection to the NTRIP server is made. If the connection is lost,
 /// it will be re-established automatically. The function will run indefinitely.
+/// Stream RTCM3 corrections from an NTRIP caster to the flight controller,
+/// recording them on the way past.
+///
+/// The recording is the base station half of a post-processed kinematic (PPK)
+/// solution: the flight controller's own log can hold what the rover measured,
+/// but the corrections it was measured against exist only in this stream. See
+/// [`flo_core::NTRIP_RTCM_FNAME`].
 pub(crate) async fn ntrip_loop(
     ntrip_url: String,
     mavconn_tx: tokio::sync::mpsc::Sender<(MavHeader, mavlink::ardupilotmega::MavMessage)>,
+    floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     header: MavHeader,
 ) -> Result<NeverOk> {
     let fixed_url =
@@ -95,6 +105,12 @@ pub(crate) async fn ntrip_loop(
             tracing::error!("Received empty RTCM data from NTRIP server, skipping.");
             continue;
         }
+
+        // Record before the size check below, not after: a frame too large for
+        // MAVLink never reaches the flight controller, but it is still a valid
+        // base station observation and post-processing wants it.
+        floz_logger.send(SaveToDiskMsg::NtripRtcm(bytes.clone()))?;
+
         let n_frags = bytes.len().div_ceil(180);
         if n_frags > 4 {
             tracing::error!(

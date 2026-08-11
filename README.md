@@ -176,20 +176,33 @@ mavlink:
 emit RTCM3 MSM7 observations at 1 Hz and writes them to the `.ulg` as `gps_dump`.
 Because what is recorded is what the rover measured, it does not matter where the
 real-time corrections came from — NTRIP through FLO, or a local base station
-relayed by the ground station. The base station's own observations are *not* in
-the flight log either way, and PPK needs them: archive them wherever they are
-produced (the NTRIP provider's RINEX archive, or the base receiver's own
-logging).
+relayed by the ground station.
 
-To get the observations back out of a log:
+A PPK solution needs the base station's observations as well, and those are never
+in the flight controller's log. When FLO is the one fetching them, it keeps them:
+every RTCM3 frame it receives from the caster is also written verbatim to
+`ntrip.rtcm3` inside the `.floz`, so a recording carries both halves of the
+problem. Corrections that reach the flight controller by some other route — a
+local base station relayed by the ground station — pass FLO by, and have to be
+archived at whatever produced them.
+
+Putting a solution together therefore uses two files:
 
 ```
 ulog_extract_gps_dump flight.ulg          # writes flight_0_from_device.dat
-convbin -r rtcm3 -ts 2026/08/11 00:00:00 flight_0_from_device.dat
+convbin -r rtcm3 -ts 2026/08/11 00:00:00 flight_0_from_device.dat   # rover
+unzip -p session.floz ntrip.rtcm3 > base.rtcm3                      # base
+convbin -r rtcm3 -ts 2026/08/11 00:00:00 base.rtcm3
 ```
 
 The `-ts` is not optional: RTCM carries a time of week but not which week, so
 RTKLIB needs the date to place the observations in time.
+
+Note that `ntrip.rtcm3` spans the *recording*, while the rover observations span
+the flight controller's log — arm to disarm, or whatever `SDLOG_MODE` says. If a
+recording is shorter than the flight, only the overlap can be post-processed. A
+pre-capture window extends the correction stream backwards along with everything
+else.
 
 PX4 reads `GPS_DUMP_COMM` once, when its GPS driver starts, so storing a new
 value changes nothing about the flight in progress. FLO therefore reads the

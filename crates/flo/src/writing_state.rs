@@ -338,6 +338,105 @@ fn test_normal_recording_excludes_precapture_buffer() -> Result<()> {
     Ok(())
 }
 
+/// The correction stream is only usable for post-processing if it is byte-exact:
+/// a GNSS tool reads the file as RTCM3, so any framing, escaping or reordering
+/// this writer added would make it unreadable.
+#[test]
+fn test_ntrip_rtcm_is_recorded_verbatim_and_in_order() -> Result<()> {
+    use std::io::Read as _;
+
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
+
+    // Two frames buffered before the recording starts and two after it, so the
+    // pre-capture path and the live path have to concatenate into one stream.
+    // The payloads include a NUL and a 0xd3 (RTCM3's own preamble) because a
+    // text-shaped sink would mangle exactly those.
+    let frames: Vec<Vec<u8>> = vec![
+        vec![0xd3, 0x00, 0x13, 0x3e, 0xd0],
+        vec![0xd3, 0x00, 0x00, 0xff, 0x0a, 0x00],
+        vec![0xd3, 0x00, 0x08, 0x41],
+        vec![0xd3, 0x00, 0x7a, 0x00, 0x00, 0xd3],
+    ];
+
+    tx.send(SaveToDiskMsg::SetPreCaptureSeconds(60.0))?;
+    for frame in &frames[..2] {
+        tx.send(SaveToDiskMsg::NtripRtcm(frame.clone()))?;
+    }
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        chrono::Local::now(),
+        output_dir.clone(),
+        true,
+    ))))?;
+    for frame in &frames[2..] {
+        tx.send(SaveToDiskMsg::NtripRtcm(frame.clone()))?;
+    }
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+    handle.join().expect("writer thread panicked")?;
+
+    let floz_path = output_dir.with_extension("floz");
+    let fd = std::fs::File::open(&floz_path)?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(fd))?;
+    let mut saved = Vec::new();
+    archive
+        .by_name(flo_core::NTRIP_RTCM_FNAME)?
+        .read_to_end(&mut saved)?;
+
+    let expected: Vec<u8> = frames.concat();
+    assert_eq!(
+        saved, expected,
+        "the recorded stream must be the concatenated frames, byte for byte"
+    );
+
+    Ok(())
+}
+
+/// Without a recording in progress and no pre-capture window, corrections are
+/// relayed but not kept: there is no file to put them in.
+#[test]
+fn test_ntrip_rtcm_is_absent_when_nothing_arrived() -> Result<()> {
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        chrono::Local::now(),
+        output_dir.clone(),
+        false,
+    ))))?;
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+    handle.join().expect("writer thread panicked")?;
+
+    let floz_path = output_dir.with_extension("floz");
+    let fd = std::fs::File::open(&floz_path)?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(fd))?;
+    assert!(
+        archive.by_name(flo_core::NTRIP_RTCM_FNAME).is_err(),
+        "an empty correction file would suggest a caster was configured"
+    );
+
+    Ok(())
+}
+
 fn with_received_timestamp(
     mc: MomentCentroid,
     received_timestamp: chrono::DateTime<chrono::Local>,
@@ -614,6 +713,8 @@ struct WritingState {
     encoder_data_wtr: Option<csv::Writer<Box<dyn Write + Send>>>,
     mavlink_data_wtr: Option<JsonLinesWriter<Box<dyn Write + Send>>>,
     broadway_data_wtr: Option<JsonLinesWriter<Box<dyn Write + Send>>>,
+    /// Raw RTCM3, not a serializer: see [`flo_core::NTRIP_RTCM_FNAME`].
+    ntrip_rtcm_wtr: Option<Box<dyn Write + Send>>,
     /// One JSONL file per registered extension, opened lazily on the first
     /// record. Keyed by extension name (e.g. "extension" → `extension.jsonl`).
     extension_wtrs:
@@ -676,6 +777,13 @@ The archive typically contains:
   frequently one component of a binary built in another repository, so this is
   what identifies the program that actually ran.
 - `broadway.jsonl` — line-delimited JSON log of FLO events and commands.
+- `ntrip.rtcm3` — the RTCM3 correction stream FLO received from its NTRIP caster
+  and relayed to the flight controller, byte for byte in arrival order. These are
+  the *base station's* observations, which a post-processed kinematic (PPK)
+  solution needs alongside the rover observations in the flight controller's own
+  `.ulg`. GNSS post-processing tools read it directly, e.g. `convbin -r rtcm3
+  ntrip.rtcm3`. Present only when FLO was configured with an NTRIP source; if
+  corrections reached the flight controller by another route, they are not here.
 
 Not every file is present in every recording; the exact set depends on the
 hardware and configuration used.
@@ -791,6 +899,7 @@ impl WritingState {
             encoder_data_wtr: None,
             mavlink_data_wtr: None,
             broadway_data_wtr: None,
+            ntrip_rtcm_wtr: None,
             extension_wtrs: std::collections::BTreeMap::new(),
         };
 
@@ -829,6 +938,9 @@ impl WritingState {
             }
             MavlinkData(v) => {
                 self.save_mavlink_data(&v)?;
+            }
+            NtripRtcm(frame) => {
+                self.save_ntrip_rtcm(&frame)?;
             }
             BroadwaySaveToDiskMsg(msg) => {
                 self.save_broadway_msg(msg)?;
@@ -897,6 +1009,24 @@ impl WritingState {
         }
         let mavlink_data_wtr = self.mavlink_data_wtr.as_mut().unwrap();
         mavlink_data_wtr.serialize(mavlink_data)?;
+        Ok(())
+    }
+
+    /// Append one RTCM3 frame to the correction stream, byte for byte.
+    ///
+    /// Unlike every other sink here this writes no structure of its own: the file
+    /// is the RTCM3 stream, so a post-processing tool can be pointed straight at
+    /// it. A frame dropped from the pre-capture buffer therefore truncates the
+    /// start of the file, which costs nothing — RTCM3 readers resynchronize on
+    /// the next frame preamble.
+    fn save_ntrip_rtcm(&mut self, frame: &[u8]) -> Result<()> {
+        if self.ntrip_rtcm_wtr.is_none() {
+            let mut path = self.output_dirname.clone();
+            path.push(flo_core::NTRIP_RTCM_FNAME);
+            self.ntrip_rtcm_wtr = Some(Box::new(bufwriter(path)?));
+        }
+        let ntrip_rtcm_wtr = self.ntrip_rtcm_wtr.as_mut().unwrap();
+        ntrip_rtcm_wtr.write_all(frame)?;
         Ok(())
     }
 
@@ -969,6 +1099,10 @@ impl WritingState {
             .as_mut()
             .map(|x| x.flush())
             .transpose()?;
+        self.ntrip_rtcm_wtr
+            .as_mut()
+            .map(|x| x.flush())
+            .transpose()?;
         for wtr in self.extension_wtrs.values_mut() {
             wtr.flush()?;
         }
@@ -999,6 +1133,7 @@ impl Drop for WritingState {
             self.encoder_data_wtr = None;
             self.mavlink_data_wtr = None;
             self.broadway_data_wtr = None;
+            self.ntrip_rtcm_wtr = None;
             self.extension_wtrs.clear();
         }
 

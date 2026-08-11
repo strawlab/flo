@@ -828,11 +828,11 @@ fn save<T: serde::Serialize>(
 /// on the wire — every field, as encoded — rather than whatever the sender
 /// computed it from.
 ///
-/// One egress path is deliberately not recorded: NTRIP's `GPS_RTCM_DATA`, which
-/// holds its own cloned sender. It is a continuous stream of opaque correction
-/// bytes rather than a command, so recording it would cost far more space than
-/// the fact that RTCM is flowing is worth — and that fact is already visible in
-/// the GNSS fix type FLO logs from the receive side.
+/// One egress path does not come through here: NTRIP's `GPS_RTCM_DATA`, which
+/// holds its own cloned sender. Recording it as MAVLink would be the wrong shape
+/// — a stream of opaque correction bytes chopped into 180-byte fragments, when
+/// what a reader wants is the RTCM3 stream itself. [`ntrip::ntrip_loop`] records
+/// it instead, verbatim and unfragmented, to [`flo_core::NTRIP_RTCM_FNAME`].
 fn save_tx(
     logger: &tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     msg: &MavMessage,
@@ -857,6 +857,9 @@ async fn main_loop(
 ) -> eyre::Result<()> {
     // This is hacky, but we need to clone the mavconn sender for NTRIP.
     let mavconn_tx = mavconn.tx.hacky_clone_tx();
+    // NTRIP records the corrections it relays, so it needs the recording sink
+    // too. Cloned before the coordinator takes ownership of the original.
+    let ntrip_floz_logger = floz_logger.clone();
 
     let mut coordinator = DroneCoordinator::new(
         mavlink_cfg,
@@ -873,8 +876,9 @@ async fn main_loop(
     let mut ntrip_task: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> = {
         if let Some(ntrip_url) = &mavlink_cfg.ntrip_url {
             let ntrip_url = ntrip_url.clone();
-            let ntrip_join_handle =
-                handle.spawn(async move { ntrip::ntrip_loop(ntrip_url, mavconn_tx, header).await });
+            let ntrip_join_handle = handle.spawn(async move {
+                ntrip::ntrip_loop(ntrip_url, mavconn_tx, ntrip_floz_logger, header).await
+            });
             Box::pin(ntrip_join_handle)
         } else {
             Box::pin(std::future::pending())
