@@ -20,11 +20,21 @@
 //! not store the value, or will not reboot costs post-processing accuracy, and
 //! grounding FLO over that would be the worse trade. Every such outcome is
 //! logged at `error` or `warn` and startup continues.
+//!
+//! That extends to the link itself failing mid-exchange, which is not the same
+//! as this step failing. FLO's startup ends the whole process if the MAVLink task
+//! finishes inside its first 100 ms, so reporting an I/O error from here would
+//! both kill FLO earlier than it would otherwise die and pin the blame on the
+//! PPK step for a link that was already broken. Being the first code to *read*
+//! from the link does not make it the culprit. A link failure is therefore
+//! logged, the step gives up, and the main loop reports the failure as it always
+//! has. See [`Waited`].
 
 use std::time::Duration;
 
 use eyre::Result;
 use mavlink::ardupilotmega::{MavCmd, MavMessage, MavModeFlag, MavParamType, MavResult};
+use tokio_mavlink::RecvError;
 
 use crate::{AUTOPILOT_TARGET_COMPONENT, AUTOPILOT_TARGET_SYSTEM, DroneCoordinator, save};
 
@@ -99,6 +109,38 @@ fn param_value_as_i32(value: f32) -> i32 {
     value.to_bits() as i32
 }
 
+/// How a wait for a message from the flight controller ended.
+///
+/// The two ways of not getting one are worth keeping apart. A timeout means the
+/// flight controller is there but did not answer, which another attempt may fix.
+/// A failed link means nothing will ever arrive, so retrying only spins — and,
+/// more importantly, it is not this module's business: the main loop treats a
+/// dead link as fatal and reports it, and it did so before any of this existed.
+/// Turning a link failure into an error here would only move the blame for it
+/// into the PPK step and, because FLO's startup fails the whole process if the
+/// MAVLink task ends within its first 100 ms, would make this step the apparent
+/// cause of something it merely noticed first.
+enum Waited<T> {
+    /// The message arrived.
+    Got(T),
+    /// The wait ran out of time with the link still up.
+    TimedOut,
+    /// The link failed; nothing further will arrive on it.
+    LinkLost(RecvError),
+}
+
+/// What to say when the link dies mid-exchange.
+///
+/// Names the link as the thing that failed, and says explicitly that the main
+/// loop is where it will be dealt with, so a reader is not left thinking the PPK
+/// step broke something.
+fn link_lost_message(doing: &str, e: &RecvError) -> String {
+    format!(
+        "the MAVLink link failed while {doing} {GPS_DUMP_COMM}: {e}. Raw-GNSS logging is \
+         unchanged; the link failure itself is reported by the main MAVLink loop."
+    )
+}
+
 /// Whether a stored-but-not-yet-active parameter can be made to take effect now.
 #[derive(Debug, PartialEq, Eq)]
 enum RebootDecision {
@@ -137,11 +179,10 @@ impl DroneCoordinator {
         let wanted = cfg.gps_dump_comm.px4_value();
         let mode = cfg.gps_dump_comm;
 
+        // Each step below logs its own reason for giving up -- a silent flight
+        // controller and a failed link call for different words -- so a `None`
+        // here needs no further comment.
         let Some(current) = self.read_gps_dump_comm().await? else {
-            tracing::error!(
-                "flight controller never reported {GPS_DUMP_COMM}; leaving its raw-GNSS logging \
-                 as it is. Whether this flight can be post-processed is unknown."
-            );
             return Ok(());
         };
 
@@ -159,10 +200,6 @@ impl DroneCoordinator {
         );
 
         let Some(stored) = self.write_gps_dump_comm(wanted).await? else {
-            tracing::error!(
-                "flight controller never acknowledged {GPS_DUMP_COMM}={wanted}. Raw-GNSS logging \
-                 is probably still off."
-            );
             return Ok(());
         };
         if stored != wanted {
@@ -195,7 +232,7 @@ impl DroneCoordinator {
     }
 
     /// Ask for `GPS_DUMP_COMM` and return what the flight controller reports, or
-    /// `None` if it never answers.
+    /// `None` if it never answers. Logs its own reason for giving up.
     async fn read_gps_dump_comm(&mut self) -> Result<Option<i32>> {
         let param_id = param_id_bytes(GPS_DUMP_COMM)?;
         for attempt in 1..=PARAM_ATTEMPTS {
@@ -209,14 +246,23 @@ impl DroneCoordinator {
                     param_id,
                 });
             self.send_to_autopilot(data).await?;
-            if let Some(value) = self.await_param_value(GPS_DUMP_COMM).await? {
-                return Ok(Some(value));
+            match self.await_param_value(GPS_DUMP_COMM).await? {
+                Waited::Got(value) => return Ok(Some(value)),
+                Waited::LinkLost(e) => {
+                    tracing::error!("{}", link_lost_message("reading", &e));
+                    return Ok(None);
+                }
+                Waited::TimedOut => tracing::warn!(
+                    "no {GPS_DUMP_COMM} from the flight controller within \
+                     {PARAM_REPLY_TIMEOUT:?} (attempt {attempt} of {PARAM_ATTEMPTS})"
+                ),
             }
-            tracing::warn!(
-                "no {GPS_DUMP_COMM} from the flight controller within \
-                 {PARAM_REPLY_TIMEOUT:?} (attempt {attempt} of {PARAM_ATTEMPTS})"
-            );
         }
+        tracing::error!(
+            "flight controller did not answer {PARAM_ATTEMPTS} requests for {GPS_DUMP_COMM}; \
+             leaving its raw-GNSS logging as it is. Whether this flight can be post-processed is \
+             unknown."
+        );
         Ok(None)
     }
 
@@ -239,14 +285,22 @@ impl DroneCoordinator {
                 param_type: MavParamType::MAV_PARAM_TYPE_INT32,
             });
             self.send_to_autopilot(data).await?;
-            if let Some(stored) = self.await_param_value(GPS_DUMP_COMM).await? {
-                return Ok(Some(stored));
+            match self.await_param_value(GPS_DUMP_COMM).await? {
+                Waited::Got(stored) => return Ok(Some(stored)),
+                Waited::LinkLost(e) => {
+                    tracing::error!("{}", link_lost_message("writing", &e));
+                    return Ok(None);
+                }
+                Waited::TimedOut => tracing::warn!(
+                    "flight controller did not acknowledge {GPS_DUMP_COMM}={value} within \
+                     {PARAM_REPLY_TIMEOUT:?} (attempt {attempt} of {PARAM_ATTEMPTS})"
+                ),
             }
-            tracing::warn!(
-                "flight controller did not acknowledge {GPS_DUMP_COMM}={value} within \
-                 {PARAM_REPLY_TIMEOUT:?} (attempt {attempt} of {PARAM_ATTEMPTS})"
-            );
         }
+        tracing::error!(
+            "flight controller never acknowledged {GPS_DUMP_COMM}={value} in {PARAM_ATTEMPTS} \
+             attempts. Raw-GNSS logging is probably still off."
+        );
         Ok(None)
     }
 
@@ -272,15 +326,35 @@ impl DroneCoordinator {
         // it is the one place a refusal — a board built without reset support,
         // say — announces itself.
         let mut ack = None;
-        self.recv_until(REBOOT_QUIET, |msg| -> Option<()> {
-            if let MavMessage::COMMAND_ACK(data) = msg
-                && data.command == MavCmd::MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
-            {
-                ack = Some(data.result);
-            }
-            None
-        })
-        .await?;
+        let quiet = self
+            .recv_until(REBOOT_QUIET, |msg| -> Option<()> {
+                if let MavMessage::COMMAND_ACK(data) = msg
+                    && data.command == MavCmd::MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
+                {
+                    ack = Some(data.result);
+                }
+                None
+            })
+            .await;
+
+        // A link that drops here is the documented hazard of a USB connection to
+        // the flight controller: the reboot takes the device node with it. FLO
+        // asked for this reboot, so the failure is expected rather than
+        // mysterious, and saying so beats leaving the main loop's bare I/O error
+        // to be puzzled over.
+        if let Waited::LinkLost(e) = quiet {
+            tracing::error!(
+                "the MAVLink link failed while the flight controller was rebooting: {e}. \
+                 {GPS_DUMP_COMM}={} is stored and will take effect, but FLO cannot reach the \
+                 flight controller any more -- expected if it is connected over USB, since the \
+                 reboot removes the device node. Restart FLO once it is back.",
+                self.mavlink_cfg
+                    .ppk_logging
+                    .as_ref()
+                    .map_or(0, |cfg| cfg.gps_dump_comm.px4_value())
+            );
+            return Ok(());
+        }
 
         if let Some(result) = ack {
             if result != MavResult::MAV_RESULT_ACCEPTED {
@@ -293,54 +367,58 @@ impl DroneCoordinator {
             tracing::debug!("flight controller accepted the reboot request");
         }
 
-        if self.await_heartbeat(REBOOT_TIMEOUT).await? {
-            // The flight controller's clock restarted with it, so the
-            // monotonicity check on `SYSTEM_TIME` must not read the step back as
-            // a fault: this is the one reset FLO asked for.
-            self.prev_time_boot_ms = 0;
-            tokio::time::sleep(POST_REBOOT_SETTLE).await;
-            tracing::info!("flight controller is back up, logging raw GNSS data");
-        } else {
-            tracing::error!(
+        match self.await_heartbeat(REBOOT_TIMEOUT).await {
+            Waited::Got(()) => {
+                // The flight controller's clock restarted with it, so the
+                // monotonicity check on `SYSTEM_TIME` must not read the step back
+                // as a fault: this is the one reset FLO asked for.
+                self.prev_time_boot_ms = 0;
+                tokio::time::sleep(POST_REBOOT_SETTLE).await;
+                tracing::info!("flight controller is back up, logging raw GNSS data");
+            }
+            Waited::TimedOut => tracing::error!(
                 "no heartbeat from the flight controller {REBOOT_TIMEOUT:?} after it was asked to \
                  reboot. FLO will carry on, but the link may be down."
-            );
+            ),
+            Waited::LinkLost(e) => tracing::error!(
+                "the MAVLink link failed while waiting for the flight controller to come back \
+                 from the reboot FLO asked for: {e}. Expected if it is connected over USB. \
+                 Restart FLO once it is back."
+            ),
         }
         Ok(())
     }
 
     /// Wait for the flight controller's `PARAM_VALUE` for `name`, and record it.
-    async fn await_param_value(&mut self, name: &str) -> Result<Option<i32>> {
-        let value = self
+    async fn await_param_value(&mut self, name: &str) -> Result<Waited<i32>> {
+        let waited = self
             .recv_until(PARAM_REPLY_TIMEOUT, |msg| match msg {
                 MavMessage::PARAM_VALUE(data) if param_id_matches(&data.param_id, name) => {
                     Some(data.clone())
                 }
                 _ => None,
             })
-            .await?;
-        match value {
+            .await;
+        Ok(match waited {
             // Worth recording rather than only logging: what the flight
             // controller said about `GPS_DUMP_COMM` is the provenance of every
             // raw observation in the flight log this run is about to produce.
-            Some(data) => {
+            Waited::Got(data) => {
                 save("PARAM_VALUE", &self.floz_logger, &data)?;
-                Ok(Some(param_value_as_i32(data.param_value)))
+                Waited::Got(param_value_as_i32(data.param_value))
             }
-            None => Ok(None),
-        }
+            Waited::TimedOut => Waited::TimedOut,
+            Waited::LinkLost(e) => Waited::LinkLost(e),
+        })
     }
 
-    /// Wait for one heartbeat from the flight controller. `false` if none
-    /// arrives in time.
-    async fn await_heartbeat(&mut self, timeout: Duration) -> Result<bool> {
-        Ok(self
-            .recv_until(timeout, |msg| match msg {
-                MavMessage::HEARTBEAT(_) => Some(()),
-                _ => None,
-            })
-            .await?
-            .is_some())
+    /// Wait for one heartbeat from the flight controller.
+    async fn await_heartbeat(&mut self, timeout: Duration) -> Waited<()> {
+        self.recv_until(timeout, |msg| match msg {
+            MavMessage::HEARTBEAT(_) => Some(()),
+            _ => None,
+        })
+        .await
     }
 
     /// Receive from the flight controller until `want` accepts a message or
@@ -355,12 +433,13 @@ impl DroneCoordinator {
         &mut self,
         timeout: Duration,
         mut want: impl FnMut(&MavMessage) -> Option<T>,
-    ) -> Result<Option<T>> {
+    ) -> Waited<T> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let received = match tokio::time::timeout_at(deadline, self.mavconn.rx.recv()).await {
-                Err(_elapsed) => return Ok(None),
-                core::result::Result::Ok(received) => received?,
+                Err(_elapsed) => return Waited::TimedOut,
+                core::result::Result::Ok(core::result::Result::Ok(received)) => received,
+                core::result::Result::Ok(Err(e)) => return Waited::LinkLost(e),
             };
             let (header, msg) = received;
             if header.system_id != AUTOPILOT_TARGET_SYSTEM
@@ -375,7 +454,7 @@ impl DroneCoordinator {
                 );
             }
             if let Some(found) = want(&msg) {
-                return Ok(Some(found));
+                return Waited::Got(found);
             }
         }
     }
@@ -437,6 +516,27 @@ mod tests {
     #[test]
     fn an_unknown_armed_state_is_treated_as_armed() {
         assert_eq!(reboot_decision(true, None), RebootDecision::Unsafe);
+    }
+
+    /// A timeout and a dead link are both "no answer", but only one is worth
+    /// retrying -- and neither may be turned into an error that ends the process.
+    #[test]
+    fn a_link_failure_is_distinguishable_from_a_timeout() {
+        let timed_out: Waited<i32> = Waited::TimedOut;
+        let link_lost: Waited<i32> = Waited::LinkLost(RecvError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        )));
+        assert!(matches!(timed_out, Waited::TimedOut));
+        let Waited::LinkLost(e) = link_lost else {
+            panic!("expected a lost link");
+        };
+        // The operator has to be able to tell which of the two happened from the
+        // log alone, and that the PPK step is not the thing that broke.
+        let msg = link_lost_message("reading", &e);
+        assert!(msg.contains("MAVLink link failed"), "{msg}");
+        assert!(msg.contains("broken pipe"), "{msg}");
+        assert!(msg.contains("reported by the main MAVLink loop"), "{msg}");
     }
 
     #[test]
