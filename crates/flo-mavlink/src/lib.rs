@@ -14,6 +14,7 @@ use mavlink::{
 };
 
 mod ntrip;
+mod ppk;
 
 /// The `mavlink` crate this was built against.
 ///
@@ -183,6 +184,15 @@ struct DroneCoordinator {
     last_message_timestamp: Option<MyTimestamp>,
     prev_time_boot_ms: u32,
     local_flo_state: LocalFloState,
+    /// The armed flag from the most recent heartbeat, `None` until the first one
+    /// arrives.
+    ///
+    /// `armed_cd` cannot answer this: it starts out asserting `false`, which is
+    /// what makes the first heartbeat register as a change, so it cannot tell a
+    /// disarmed flight controller from one that has not been heard from at all.
+    /// Anything that must not act on that guess — asking for a reboot, say —
+    /// needs the distinction.
+    last_reported_armed: Option<bool>,
     /// The local-position origin the config asks for, if any.
     requested_origin: Option<GpsGlobalOrigin>,
     /// How many more times a mismatching origin will be re-sent before giving
@@ -230,6 +240,7 @@ impl DroneCoordinator {
             last_message_timestamp: Default::default(),
             prev_time_boot_ms: 0,
             local_flo_state,
+            last_reported_armed: None,
             requested_origin: mavlink_cfg.requested_gps_global_origin(),
             origin_retries_left: ORIGIN_SET_RETRIES,
             origin_requested_at: None,
@@ -251,6 +262,11 @@ impl DroneCoordinator {
                 self_.rc_program_state.tilt_ng.params = knob_cfg.noise_gate.clone();
             }
         }
+
+        // Bring the flight controller's raw-GNSS logging in line with the
+        // config. This goes first because it can end in a reboot, which would
+        // discard the stream requests below and the global origin with them.
+        self_.apply_ppk_logging_config().await?;
 
         // Below is the old Self::request_streams() method, now moved into the constructor.
 
@@ -510,6 +526,7 @@ impl DroneCoordinator {
                 let armed = msg
                     .base_mode
                     .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
+                self.last_reported_armed = Some(armed);
                 if self.armed_cd.update(&armed) {
                     self.broadway.drone_events.send(if armed {
                         DroneEvent::Armed

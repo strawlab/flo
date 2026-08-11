@@ -326,6 +326,78 @@ pub struct BatteryState {
     pub batt_percent: FloatType,
 }
 
+/// Which GNSS receiver traffic the flight controller records in its own flight
+/// log: the value FLO writes to PX4's `GPS_DUMP_COMM` parameter.
+///
+/// PX4 logs no raw GNSS data by default, so a flight log holds only the
+/// real-time fix. Turning this on puts the observations a post-processed
+/// kinematic (PPK) solution is computed from into the `.ulg`, where they are
+/// recovered with `pyulog`'s `ulog_extract_gps_dump` and converted to RINEX with
+/// RTKLIB's `convbin`.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GpsDumpComm {
+    /// `GPS_DUMP_COMM=0`: log nothing. PX4's default.
+    #[default]
+    Disabled,
+    /// `GPS_DUMP_COMM=1`: log every byte in both directions, which includes the
+    /// RTCM corrections FLO and the ground station inject.
+    ///
+    /// This does not by itself ask the receiver for raw observations, so it is
+    /// not enough for PPK on its own: it captures what the base sent, not what
+    /// the rover measured. PX4 ≥ 1.18 can add the rover's observations to this
+    /// mode through a second parameter, `GPS_UBX_PPK`, which FLO does not set.
+    FullCommunication,
+    /// `GPS_DUMP_COMM=2`: configure the main receiver to emit RTCM3 MSM7
+    /// observations at 1 Hz, and log those.
+    ///
+    /// This is the PPK mode. The log then holds the rover's own carrier-phase
+    /// observations, and it holds them regardless of where the corrections came
+    /// from — NTRIP through FLO, or a local base station relayed by the ground
+    /// station — because what is recorded is what the receiver measured, not
+    /// what it was told. Only the receive direction is logged, so base station
+    /// observations are *not* in the flight log and have to be archived at
+    /// whatever produced them.
+    RtcmOutput,
+}
+
+impl GpsDumpComm {
+    /// The value PX4 expects in `GPS_DUMP_COMM`.
+    pub fn px4_value(self) -> i32 {
+        match self {
+            Self::Disabled => 0,
+            Self::FullCommunication => 1,
+            Self::RtcmOutput => 2,
+        }
+    }
+}
+
+/// What FLO should make of the flight controller's raw-GNSS logging at startup.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PpkLoggingConfig {
+    /// What the flight controller should log.
+    pub gps_dump_comm: GpsDumpComm,
+
+    /// Whether FLO may reboot the flight controller to make a changed value take
+    /// effect.
+    ///
+    /// PX4 reads `GPS_DUMP_COMM` once, when its GPS driver starts, so storing a
+    /// new value changes nothing about the flight in progress. With this on, FLO
+    /// reboots — but only when the value actually had to change, and only while
+    /// disarmed, so every startup after the first is a read and nothing more.
+    /// With it off, a newly configured value first takes effect on whatever boot
+    /// comes next.
+    ///
+    /// Turn this off if FLO reaches the flight controller over USB: the reboot
+    /// takes the USB serial device away, and FLO cannot reopen it.
+    #[serde(
+        default = "default_reboot_to_apply",
+        skip_serializing_if = "is_default_reboot_to_apply"
+    )]
+    pub reboot_to_apply: bool,
+}
+
 /// MAVLink configuration
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -358,6 +430,11 @@ pub struct MavlinkConfig {
 
     #[serde(default, skip_serializing_if = "is_default")]
     pub ntrip_url: Option<String>,
+
+    /// Raw-GNSS logging on the flight controller, for post-processed kinematics.
+    /// Left alone entirely when absent.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub ppk_logging: Option<PpkLoggingConfig>,
 }
 
 impl MavlinkConfig {
@@ -393,6 +470,17 @@ fn is_default_mavlink_batt_s(val: &u8) -> bool {
     *val == default_mavlink_batt_s()
 }
 
+fn default_reboot_to_apply() -> bool {
+    // Without a reboot, configuring raw-GNSS logging does nothing until the
+    // flight controller is next power-cycled, which is rarely what someone
+    // switching it on meant.
+    true
+}
+
+fn is_default_reboot_to_apply(val: &bool) -> bool {
+    *val == default_reboot_to_apply()
+}
+
 impl Default for MavlinkConfig {
     fn default() -> Self {
         Self {
@@ -402,6 +490,7 @@ impl Default for MavlinkConfig {
             batt_s: default_mavlink_batt_s(),
             set_gps_global_origin: Default::default(),
             ntrip_url: Default::default(),
+            ppk_logging: Default::default(),
         }
     }
 }
@@ -693,6 +782,58 @@ mod mavlink_state_tests {
     #[test]
     fn an_unrecognized_flight_mode_shows_its_raw_value() {
         assert_eq!(flight_mode_label(0x1234), "unrecognized (0x00001234)");
+    }
+}
+
+#[cfg(test)]
+mod ppk_logging_config_tests {
+    use super::{GpsDumpComm, MavlinkConfig, PpkLoggingConfig};
+
+    /// A config that says nothing about PPK leaves the flight controller's
+    /// logging alone.
+    #[test]
+    fn ppk_logging_is_absent_by_default() {
+        let cfg: MavlinkConfig = serde_yaml::from_str("port_path: serial:/dev/ttyUSB0:57600")
+            .expect("minimal MAVLink config should parse");
+        assert_eq!(cfg.ppk_logging, None);
+    }
+
+    /// Asking for PPK logging should not also require deciding about reboots:
+    /// storing a value that never takes effect is not what the ask means.
+    #[test]
+    fn rebooting_to_apply_is_the_default() {
+        let cfg: MavlinkConfig = serde_yaml::from_str(
+            "port_path: serial:/dev/ttyUSB0:57600\n\
+             ppk_logging:\n  gps_dump_comm: rtcm_output\n",
+        )
+        .expect("PPK config should parse");
+        assert_eq!(
+            cfg.ppk_logging,
+            Some(PpkLoggingConfig {
+                gps_dump_comm: GpsDumpComm::RtcmOutput,
+                reboot_to_apply: true,
+            })
+        );
+    }
+
+    #[test]
+    fn rebooting_to_apply_can_be_declined() {
+        let cfg: MavlinkConfig = serde_yaml::from_str(
+            "port_path: serial:/dev/ttyUSB0:57600\n\
+             ppk_logging:\n  gps_dump_comm: full_communication\n  reboot_to_apply: false\n",
+        )
+        .expect("PPK config should parse");
+        let ppk = cfg.ppk_logging.expect("configured");
+        assert_eq!(ppk.gps_dump_comm, GpsDumpComm::FullCommunication);
+        assert!(!ppk.reboot_to_apply);
+    }
+
+    /// The numbers are PX4's, not ours: they are what lands in `GPS_DUMP_COMM`.
+    #[test]
+    fn modes_map_to_the_px4_parameter_values() {
+        assert_eq!(GpsDumpComm::Disabled.px4_value(), 0);
+        assert_eq!(GpsDumpComm::FullCommunication.px4_value(), 1);
+        assert_eq!(GpsDumpComm::RtcmOutput.px4_value(), 2);
     }
 }
 

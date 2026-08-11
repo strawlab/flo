@@ -158,6 +158,48 @@ then leaves an error in the log and a **DID NOT STICK** warning in the BUI. A
 flight controller that never reports an origin at all is logged as an error
 after ten seconds.
 
+## Raw GNSS logging for PPK
+
+A real-time RTK fix is only as good as the corrections that reached the aircraft
+while it was flying. For a solution computed afterwards instead — post-processed
+kinematics, PPK — the flight controller has to have recorded what its GNSS
+receiver actually measured, and PX4 does not do that by default:
+
+```yaml
+mavlink:
+  ppk_logging:
+    gps_dump_comm: rtcm_output   # the PPK mode; also disabled, full_communication
+    reboot_to_apply: true        # the default
+```
+
+`rtcm_output` sets PX4's `GPS_DUMP_COMM=2`, which configures the main receiver to
+emit RTCM3 MSM7 observations at 1 Hz and writes them to the `.ulg` as `gps_dump`.
+Because what is recorded is what the rover measured, it does not matter where the
+real-time corrections came from — NTRIP through FLO, or a local base station
+relayed by the ground station. The base station's own observations are *not* in
+the flight log either way, and PPK needs them: archive them wherever they are
+produced (the NTRIP provider's RINEX archive, or the base receiver's own
+logging).
+
+To get the observations back out of a log:
+
+```
+ulog_extract_gps_dump flight.ulg          # writes flight_0_from_device.dat
+convbin -r rtcm3 -ts 2026/08/11 00:00:00 flight_0_from_device.dat
+```
+
+The `-ts` is not optional: RTCM carries a time of week but not which week, so
+RTKLIB needs the date to place the observations in time.
+
+PX4 reads `GPS_DUMP_COMM` once, when its GPS driver starts, so storing a new
+value changes nothing about the flight in progress. FLO therefore reads the
+parameter at startup, writes it only if it differs, and then reboots the flight
+controller — which it will only do while it can see that the vehicle is disarmed.
+Every startup after the first is a read and nothing more. Set
+`reboot_to_apply: false` to have a changed value wait for the next boot instead;
+do that if FLO reaches the flight controller over USB, since the reboot takes the
+USB serial device away and FLO cannot reopen it.
+
 ## Post-trigger ("pre-capture") recording
 
 FLO can hold recent data in RAM so that a recording started *after* something
