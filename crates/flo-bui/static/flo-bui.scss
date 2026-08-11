@@ -174,6 +174,21 @@ input[type="radio"] {
     font-size: 0.9rem;
 }
 
+// Which machine's FLO this is, beside the title. Lighter than the title so the
+// two read as one heading rather than competing. Deliberately laid out as text
+// rather than as flex items: the space between the two has to be a real space
+// (see `app_title`), and a long host name should wrap or break rather than push
+// the header's controls off a phone screen.
+.app-title {
+    min-width: 0;
+}
+
+.app-title-host {
+    font-weight: normal;
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+}
+
 .app-header-status {
     font-size: 0.9rem;
     white-space: nowrap;

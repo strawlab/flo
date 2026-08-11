@@ -955,6 +955,16 @@ pub enum BuiEventData {
     /// Sent once when a browser connects. Fixed for the life of the process,
     /// so it rides at the head of the stream rather than in the state updates.
     Versions(Vec<ComponentVersion>),
+    /// The host name of the machine FLO is running on, which the UI shows in
+    /// its title so that one browser with several FLOs open can tell them
+    /// apart.
+    ///
+    /// It has to come from the server: the name in the address bar is whatever
+    /// route the browser took — an IP address, an overlay network's name for
+    /// the machine, `localhost` — and none of those is what the machine calls
+    /// itself. Sent once at the head of the stream, and absent when the server
+    /// cannot determine a name.
+    Hostname(String),
 }
 
 /// What one piece of software in a running FLO was built from.

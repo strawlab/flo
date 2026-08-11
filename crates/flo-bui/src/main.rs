@@ -161,6 +161,9 @@ struct App {
     /// Whether the phone view is showing, from the URL fragment. See
     /// [`MOBILE_HASH`].
     mobile: bool,
+    /// What the machine running FLO calls itself, sent once on connect. `None`
+    /// until it arrives, or when the server could not determine a name.
+    hostname: Option<String>,
 }
 
 enum Msg {
@@ -353,6 +356,7 @@ impl Component for App {
             focus_new_rtp_target: false,
             rtp_target_pending_removal: None,
             mobile: mobile_hash_is_set(),
+            hostname: None,
         }
     }
 
@@ -616,6 +620,13 @@ impl Component for App {
                             BuiEventData::Versions(versions) => {
                                 self.component_versions = versions;
                             }
+                            BuiEventData::Hostname(hostname) => {
+                                // The tab's title, not only the heading: it is
+                                // how a tab is picked out of a row of them, and
+                                // what a bookmark of this FLO is called.
+                                gloo_utils::document().set_title(&page_title(Some(&hostname)));
+                                self.hostname = Some(hostname);
+                            }
                         }
                     }
                     Err(e) => {
@@ -641,7 +652,7 @@ impl Component for App {
             <div>
                 {self.disconnected_dialog()}
                 <header class="app-header">
-                    <h1>{"FLO"}</h1>
+                    { self.app_title() }
                     { self.browser_info() }
                     <span class="app-header-connect">
                         // Same page, different view: the fragment is picked up
@@ -740,6 +751,26 @@ impl Component for App {
 }
 
 impl App {
+    /// The heading both views carry: FLO, and which machine's FLO this is.
+    ///
+    /// The name is the machine's own, reported by the server (see
+    /// [`BuiEventData::Hostname`]); with several FLOs around, "FLO" alone does
+    /// not say which one this browser is driving. Until it arrives, and on a
+    /// machine that reports no name, the heading is just FLO.
+    fn app_title(&self) -> Html {
+        html! {
+            <h1 class="app-title">
+                // The space is a text node rather than a gap between two boxes
+                // so that the heading is still "FLO strawbot" when it is read
+                // aloud or copied, not "FLOstrawbot".
+                {"FLO "}
+                if let Some(hostname) = &self.hostname {
+                    <span class="app-title-host">{hostname}</span>
+                }
+            </h1>
+        }
+    }
+
     /// The FPV webcam's entry in [`Self::camera_links`], or `None` when camshow
     /// is not configured and there is therefore no webcam to preview.
     ///
@@ -1491,6 +1522,19 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 /// Shown in place of a value the flight controller has not reported yet.
 const NO_DATA: &str = "—";
 
+/// The document title for a FLO running on `hostname`.
+///
+/// The same in both views: which machine this is does not change with how it is
+/// being looked at, and a title that did would make a row of tabs harder to
+/// read, not easier. Matches the `<title>` in `index.html` when there is no
+/// name, so nothing flickers on connect.
+fn page_title(hostname: Option<&str>) -> String {
+    match hostname {
+        Some(hostname) => format!("FLO {hostname}"),
+        None => "FLO".to_string(),
+    }
+}
+
 /// The URL fragment that selects the phone view (see [`mobile`]).
 ///
 /// A fragment rather than a path: it needs no route on the server, and the
@@ -1664,7 +1708,16 @@ impl From<u16> for ReadyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kbps, is_mobile_hash, map_urls, parse_new_rtp_target};
+    use super::{Kbps, is_mobile_hash, map_urls, page_title, parse_new_rtp_target};
+
+    #[test]
+    fn the_title_names_the_machine_flo_runs_on() {
+        assert_eq!(page_title(Some("strawbot")), "FLO strawbot");
+        // Before the server has said, and on a machine with no name to report,
+        // the title is the one `index.html` already carries — so a connect
+        // neither blanks it nor leaves a dangling separator.
+        assert_eq!(page_title(None), "FLO");
+    }
 
     #[test]
     fn the_phone_view_is_selected_by_its_own_fragment_only() {

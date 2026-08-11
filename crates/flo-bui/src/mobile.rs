@@ -30,7 +30,7 @@ impl App {
             <div class="mobile">
                 {self.disconnected_dialog()}
                 <header class="app-header">
-                    <h1>{"FLO"}</h1>
+                    { self.app_title() }
                     { self.mobile_status() }
                     <a class="btn app-header-connect" href="#">{"Full UI"}</a>
                 </header>

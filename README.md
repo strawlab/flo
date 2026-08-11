@@ -126,6 +126,17 @@ accepts Strand Camera's `CodecSelection`; the simulated example includes its
 VAAPI `Ffmpeg` form. See [the crate README](crates/flo-app/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
+## Which machine am I looking at?
+
+The heading and the browser tab both read `FLO <hostname>` — for example `FLO
+strawbot` — naming the machine FLO is running on. Both views show it.
+
+The name comes from the server rather than from the address bar, because the
+address is whatever route the browser took to get there (an IP address, an
+overlay network's name for the machine, `localhost`) and none of those is what
+the machine calls itself. With two FLOs open in one browser, the tab titles are
+what tell them apart. A machine that reports no name leaves both reading `FLO`.
+
 ## Phone view
 
 The **Phone** button at the top right of the BUI switches to a stripped-down view
