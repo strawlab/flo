@@ -179,8 +179,21 @@ input[type="radio"] {
     white-space: nowrap;
 }
 
+// The right-hand end of the header: whatever buttons live there, side by side.
 .app-header-connect {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
     margin-left: auto;
+}
+
+// A link that is meant to be pressed like a button: not underlined, not in the
+// link color, and box-shaped like the buttons beside it.
+.app-header a.btn {
+    display: inline-flex;
+    align-items: center;
+    color: inherit;
+    text-decoration: none;
 }
 
 .modal-container {
@@ -496,6 +509,79 @@ input[type="radio"] {
 
 .precapture-status {
     font-size: 0.9rem;
+}
+
+// ---- the phone view ---------------------------------------------------------
+
+// Everything on this view is meant to be hit with a thumb without looking, so
+// the controls are wider and taller than their equivalents in the full UI.
+.mobile .mode-actions .btn {
+    flex: 1 1 6em;
+    min-height: 3.6em;
+}
+
+.mobile-status {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.15;
+    font-size: 0.85rem;
+    min-width: 0;
+}
+
+.mobile-mode {
+    font-weight: bold;
+}
+
+// The one control that writes to disk, so it spans the width and is the largest
+// thing on the page.
+.mobile-record .btn {
+    flex: 1 1 100%;
+    min-height: 3.6em;
+    font-size: 1.2rem;
+    font-weight: bold;
+}
+
+// Recording: unmistakable at arm's length, and its own color rather than
+// `.btn-active`, which is a shade of the background gray.
+.mobile-recording .btn {
+    background: #a22;
+    color: #fff;
+    animation: mobile-recording 1.6s ease-in-out infinite;
+}
+
+@keyframes mobile-recording {
+    50% {
+        background: #611;
+    }
+}
+
+// Small deliberately: it is here to confirm where FLO is pointing, not to be
+// watched, and it must not push the buttons above it off a phone screen.
+.mobile-preview {
+    max-width: 22rem;
+}
+
+// The two faces of `CamPreview`: the canvas once frames arrive, and the box
+// standing in for it until they do. The canvas carries its own aspect ratio,
+// set from the image actually drawn, so it always bounds the camera view
+// exactly; the placeholder is given the camera's nominal ratio so that the
+// first frame does not change the layout.
+.cam-preview-canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 4px;
+}
+
+.cam-preview-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    border-radius: 4px;
+    box-sizing: border-box;
+    font-size: 0.85rem;
+    opacity: 0.6;
 }
 
 .camera-list {

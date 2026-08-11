@@ -126,6 +126,24 @@ accepts Strand Camera's `CodecSelection`; the simulated example includes its
 VAAPI `Ffmpeg` form. See [the crate README](crates/flo-app/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
+## Phone view
+
+The **Phone** button at the top right of the BUI switches to a stripped-down view
+for use on a phone in the field. It has the controls that get reached for while
+standing next to FLO and nothing else:
+
+- **Save FLOZ**, which starts and stops a recording, with the checkbox for the
+  tracking cameras' MP4s beside it. That checkbox is the same setting the full
+  UI carries and defaults to on.
+- **Set Home**, **Go Home** and **Track**.
+- A small live view of the main tracking camera.
+- The current mode, with the same liveness dot the full UI's Info block has.
+
+**Full UI** switches back, as does the browser's Back button: the view is
+selected by the `#mobile` fragment of the same page, so switching costs no page
+load and nothing reconnects. The camera view exists only while the phone view is
+on screen — leaving it stops the camera producing preview frames.
+
 ## MAVLINK block
 
 When a flight controller is configured, the BUI grows a **MAVLINK** block
