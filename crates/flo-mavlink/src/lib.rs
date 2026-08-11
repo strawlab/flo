@@ -3,8 +3,8 @@ use flo_core::{
     Angle, Broadway, CommandSource, DeviceMode, DisplaySource, DroneChannelData, FloCommand,
     FloEvent, FloatType, LocalFloState, ModeChangeReason, MyTimestamp, SaveToDiskMsg, StampedJson,
     drone_structs::{
-        self, Attitude, BatteryState, ChannelCondition, DroneEvent, FlightMode, GnssRtkMode,
-        GpsGlobalOrigin, GpsOriginCheck, LocalPositionNed,
+        self, Attitude, BatteryState, ChannelCondition, DroneEvent, GnssRtkMode, GpsGlobalOrigin,
+        GpsOriginCheck, LocalPositionNed,
     },
     elapsed, now,
 };
@@ -14,6 +14,101 @@ use mavlink::{
 };
 
 mod ntrip;
+
+/// The `mavlink` crate this was built against.
+///
+/// [`AutopilotLink::send`] takes an [`ardupilotmega::MavMessage`], so anything
+/// composing a message has to name types from this crate. Reaching them through
+/// here rather than declaring a second `mavlink` dependency is what makes it
+/// impossible to end up holding a `MavMessage` from a different, silently
+/// incompatible resolution of the same crate — a mistake that would otherwise
+/// surface as a type error with two identically-spelled types in it.
+///
+/// [`ardupilotmega::MavMessage`]: mavlink::ardupilotmega::MavMessage
+pub use mavlink;
+
+/// MAVLink system ID of the flight controller FLO talks to.
+///
+/// Every message FLO addresses to the autopilot carries this as
+/// `target_system`, and messages arriving from any other system are ignored.
+/// MAVLink reserves no value for "the autopilot", so this is a convention: 1 is
+/// what both ArduPilot and PX4 default to, and FLO has never been deployed
+/// beside a flight controller configured otherwise. It is named rather than
+/// repeated so an extension composing its own messages addresses the same
+/// system FLO does, and so a future deployment that needs a different ID has one
+/// place to look.
+pub const AUTOPILOT_TARGET_SYSTEM: u8 = 1;
+
+/// MAVLink component ID of the flight controller's autopilot component.
+///
+/// The companion to [`AUTOPILOT_TARGET_SYSTEM`] for `target_component`. Note
+/// that `MAV_COMP_ID_AUTOPILOT1` is itself 1, so this and the system ID happen
+/// to share a value; they are distinct fields and are kept as distinct
+/// constants.
+pub const AUTOPILOT_TARGET_COMPONENT: u8 = MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8;
+
+/// Egress to the flight controller for code outside the MAVLink task.
+///
+/// [`spawn_mavlink`] returns one of these alongside the task's join handle. It
+/// is cheap to clone and can be shared freely: sends go onto the same bounded
+/// queue the MAVLink task writes to, so messages from every holder interleave on
+/// the one serial link without any of them owning it.
+///
+/// The point of handing this out rather than a setpoint-shaped channel is that
+/// the decisions a `SET_POSITION_TARGET_LOCAL_NED` encodes — which coordinate
+/// frame, which fields the type mask ignores — belong to whoever computed the
+/// trajectory, not to the transport. A holder composes the whole message and is
+/// answerable for it.
+///
+/// One obligation comes with that, and it is not enforced here: address the
+/// autopilot with [`AUTOPILOT_TARGET_SYSTEM`] and [`AUTOPILOT_TARGET_COMPONENT`]
+/// for the `target_*` fields.
+///
+/// Recording, by contrast, is not the holder's job. [`Self::send`] writes every
+/// message it queues into the `.floz`, so what actually reached the flight
+/// controller is on record whether or not the sender thought about it.
+#[derive(Clone)]
+pub struct AutopilotLink {
+    /// Cloned from the MAVLink task's sender, which means it does not carry that
+    /// sender's write-error channel: a dead writer thread surfaces here as a
+    /// closed queue rather than the underlying I/O error. That is tolerable
+    /// because the MAVLink task still holds the real error, logs it, and exits —
+    /// bringing the process down — so the specific cause is never lost, only
+    /// unavailable at this particular call site.
+    tx: tokio::sync::mpsc::Sender<(MavHeader, MavMessage)>,
+    header: MavHeader,
+    sys_start: MyTimestamp,
+    floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
+}
+
+impl AutopilotLink {
+    /// Send one message to the flight controller, stamped with FLO's own
+    /// system and component ID, and record it.
+    ///
+    /// Awaits a slot if the writer is behind. The queue is short, so this is
+    /// backpressure on a slow serial link rather than an unbounded backlog:
+    /// a caller publishing setpoints faster than the link drains them will be
+    /// held here, which is the honest outcome.
+    ///
+    /// The message is recorded before it is queued, so a send that fails still
+    /// leaves evidence of what was attempted.
+    pub async fn send(&self, msg: MavMessage) -> Result<()> {
+        save_tx(&self.floz_logger, &msg)?;
+        self.tx
+            .send((self.header, msg))
+            .await
+            .map_err(|_| eyre::eyre!("MAVLink writer is gone; cannot reach the flight controller"))
+    }
+
+    /// Milliseconds since the MAVLink connection was opened, for the
+    /// `time_boot_ms` field several MAVLink messages carry.
+    ///
+    /// This shares FLO's time base rather than starting its own, so every
+    /// message leaving under FLO's system ID agrees about when boot was.
+    pub fn time_boot_ms(&self) -> u32 {
+        (elapsed(self.sys_start) * 1000.0) as u32
+    }
+}
 
 pub struct MavlinkPort {
     port: Box<dyn serialport::SerialPort>,
@@ -86,7 +181,6 @@ struct DroneCoordinator {
     flight_mode_cd: flo_core::utils::ChangeDetector<u32>,
     local_position_out_of_bounds_cd: flo_core::utils::ChangeDetector<bool>,
     last_message_timestamp: Option<MyTimestamp>,
-    sys_start: MyTimestamp,
     prev_time_boot_ms: u32,
     local_flo_state: LocalFloState,
     /// The local-position origin the config asks for, if any.
@@ -134,7 +228,6 @@ impl DroneCoordinator {
             local_position_out_of_bounds_cd:
                 flo_core::utils::ChangeDetector::new_with_initial_state(&false),
             last_message_timestamp: Default::default(),
-            sys_start: now(),
             prev_time_boot_ms: 0,
             local_flo_state,
             requested_origin: mavlink_cfg.requested_gps_global_origin(),
@@ -169,13 +262,13 @@ impl DroneCoordinator {
                 command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                 param1: mavlink::ardupilotmega::GPS_GLOBAL_ORIGIN_DATA::ID as f32, // Message ID to be streamed
                 param2: 1_000_000.0, // Interval in microseconds
-                target_system: 1,
-                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
                 confirmation: 0,
                 ..Default::default()
             },
         );
-        self_.mavconn.tx.send((self_.my_header, data)).await?;
+        self_.send_to_autopilot(data).await?;
 
         // Send GPS global origin to the drone. Whether it took hold is checked
         // against the GPS_GLOBAL_ORIGIN stream requested above.
@@ -191,13 +284,13 @@ impl DroneCoordinator {
                 command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                 param1: mavlink::ardupilotmega::RC_CHANNELS_DATA::ID as f32, // Message ID to be streamed
                 param2: 4000.0, // Interval in microseconds
-                target_system: 1,
-                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
                 confirmation: 0,
                 ..Default::default()
             },
         );
-        self_.mavconn.tx.send((self_.my_header, data)).await?;
+        self_.send_to_autopilot(data).await?;
 
         // Request the SYSTEM_TIME message to be streamed at 1 second interval.
         let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
@@ -205,13 +298,13 @@ impl DroneCoordinator {
                 command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                 param1: mavlink::ardupilotmega::SYSTEM_TIME_DATA::ID as f32, // Message ID to be streamed
                 param2: 1_000_000.0, // Interval in microseconds
-                target_system: 1,
-                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
                 confirmation: 0,
                 ..Default::default()
             },
         );
-        self_.mavconn.tx.send((self_.my_header, data)).await?;
+        self_.send_to_autopilot(data).await?;
 
         // Request the LOCAL_POSITION_NED message to be streamed at 10 millisecond interval.
         let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
@@ -219,13 +312,13 @@ impl DroneCoordinator {
                 command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                 param1: mavlink::ardupilotmega::LOCAL_POSITION_NED_DATA::ID as f32, // Message ID to be streamed
                 param2: 10_000.0, // Interval in microseconds
-                target_system: 1,
-                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
                 confirmation: 0,
                 ..Default::default()
             },
         );
-        self_.mavconn.tx.send((self_.my_header, data)).await?;
+        self_.send_to_autopilot(data).await?;
 
         // Request the ATTITUDE_QUATERNION message to be streamed at 10 millisecond interval.
         let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
@@ -233,13 +326,13 @@ impl DroneCoordinator {
                 command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                 param1: mavlink::ardupilotmega::ATTITUDE_QUATERNION_DATA::ID as f32, // Message ID to be streamed
                 param2: 10_000.0, // Interval in microseconds
-                target_system: 1,
-                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
                 confirmation: 0,
                 ..Default::default()
             },
         );
-        self_.mavconn.tx.send((self_.my_header, data)).await?;
+        self_.send_to_autopilot(data).await?;
 
         // Request the ODOMETRY message to be streamed at 100 millisecond interval.
         // This contains covariance of PX4 EKFs.
@@ -248,15 +341,29 @@ impl DroneCoordinator {
                 command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                 param1: mavlink::ardupilotmega::ODOMETRY_DATA::ID as f32, // Message ID to be streamed
                 param2: 100_000.0, // Interval in microseconds
-                target_system: 1,
-                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
                 confirmation: 0,
                 ..Default::default()
             },
         );
-        self_.mavconn.tx.send((self_.my_header, data)).await?;
+        self_.send_to_autopilot(data).await?;
 
         Ok(self_)
+    }
+
+    /// Send one message to the flight controller, and record it.
+    ///
+    /// The counterpart to [`AutopilotLink::send`], and it exists separately for
+    /// one reason: this uses the task's own [`tokio_mavlink::MavlinkSender`],
+    /// which carries the writer thread's error channel, so a failed write here
+    /// reports the underlying I/O error rather than just a closed queue. Both
+    /// paths record through [`save_tx`], so `mavlink.jsonl` holds everything FLO
+    /// sent regardless of which one sent it.
+    async fn send_to_autopilot(&mut self, data: MavMessage) -> Result<()> {
+        save_tx(&self.floz_logger, &data)?;
+        self.mavconn.tx.send((self.my_header, data)).await?;
+        Ok(())
     }
 
     /// Ask the flight controller to use the configured local-position origin.
@@ -269,10 +376,10 @@ impl DroneCoordinator {
                 latitude: origin.latitude_e7,
                 longitude: origin.longitude_e7,
                 altitude: origin.altitude_mm,
-                target_system: 1,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
             },
         );
-        self.mavconn.tx.send((self.my_header, data)).await?;
+        self.send_to_autopilot(data).await?;
         tracing::info!("Sent SET_GPS_GLOBAL_ORIGIN: {origin}");
         Ok(())
     }
@@ -371,29 +478,7 @@ impl DroneCoordinator {
                 mavlink_version: 0x3,
             });
 
-        self.mavconn.tx.send((self.my_header, data)).await?;
-        Ok(())
-    }
-
-    /// Issues a MAVLink command to switch the drone's flight mode.
-    async fn switch_flight_mode(&mut self, fm: FlightMode) -> Result<()> {
-        tracing::trace!("switching drone flight mode to {fm:?}");
-        if fm == FlightMode::Other {
-            return Err(eyre::eyre!("can't switch to Other flight mode"));
-        }
-        let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
-            mavlink::ardupilotmega::COMMAND_LONG_DATA {
-                command: mavlink::ardupilotmega::MavCmd::MAV_CMD_DO_SET_MODE,
-                param1: 1.0, // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED=1, from ardupilot docs https://ardupilot.org/dev/docs/mavlink-get-set-flightmode.html
-                param2: fm.mode_numbers().unwrap().1,
-                param3: fm.mode_numbers().unwrap().2,
-                target_system: 1,
-                target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
-                confirmation: 0,
-                ..Default::default()
-            },
-        );
-        self.mavconn.tx.send((self.my_header, data)).await?;
+        self.send_to_autopilot(data).await?;
         Ok(())
     }
 
@@ -402,7 +487,9 @@ impl DroneCoordinator {
         header: MavHeader,
         msg: MavMessage,
     ) -> Result<()> {
-        if !(header.system_id == 1 && header.component_id == 1) {
+        if !(header.system_id == AUTOPILOT_TARGET_SYSTEM
+            && header.component_id == AUTOPILOT_TARGET_COMPONENT)
+        {
             tracing::trace!(
                 "ignoring message not from flight controller: {header:?}, msg: {msg:?}"
             );
@@ -416,7 +503,7 @@ impl DroneCoordinator {
             tracing::debug!("mavlink established");
         }
         self.last_message_timestamp = Some(now());
-        let logger = &mut self.floz_logger;
+        let logger = &self.floz_logger;
 
         match msg {
             MavMessage::HEARTBEAT(msg) => {
@@ -701,63 +788,11 @@ impl DroneCoordinator {
 
         Ok(())
     }
-
-    async fn on_flight_mode_request(&mut self, fm: FlightMode) -> Result<()> {
-        if self.flight_mode_cd.old_value != Some(fm as u32) {
-            self.switch_flight_mode(fm).await?;
-        }
-        Ok(())
-    }
-
-    async fn send_trajectory_setpoint(
-        &mut self,
-        sp: drone_structs::TrajectorySetpoint,
-    ) -> Result<()> {
-        use mavlink::ardupilotmega::MavMessage::SET_POSITION_TARGET_LOCAL_NED;
-        use mavlink::ardupilotmega::*;
-        fn zero_if_none(ov: Option<FloatType>) -> f32 {
-            ov.map(|v| v as f32).unwrap_or(0.0)
-        }
-        fn one_if_none(ov: Option<FloatType>) -> u16 {
-            if ov.is_none() { 1 } else { 0 }
-        }
-
-        #[expect(clippy::identity_op)]
-        let ignoremask = (1 << 0) * one_if_none(sp.pos[0])
-            + (1 << 1) * one_if_none(sp.pos[1])
-            + (1 << 2) * one_if_none(sp.pos[2])
-            + (1 << 3) * one_if_none(sp.vel[0])
-            + (1 << 4) * one_if_none(sp.vel[1])
-            + (1 << 5) * one_if_none(sp.vel[2])
-            + (1 << 10) * one_if_none(sp.yaw)
-            + (1 << 11) * one_if_none(sp.vyaw);
-
-        let msg = SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
-            x: zero_if_none(sp.pos[0]),
-            y: zero_if_none(sp.pos[1]),
-            z: zero_if_none(sp.pos[2]),
-            vx: zero_if_none(sp.vel[0]),
-            vy: zero_if_none(sp.vel[1]),
-            vz: zero_if_none(sp.vel[2]),
-            afx: 0.0,
-            afy: 0.0,
-            afz: 0.0,
-            yaw: zero_if_none(sp.yaw),
-            yaw_rate: zero_if_none(sp.vyaw),
-            type_mask: PositionTargetTypemask::from_bits(ignoremask).unwrap(),
-            target_system: 1,
-            target_component: MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8,
-            coordinate_frame: MavFrame::MAV_FRAME_BODY_FRD,
-            time_boot_ms: (elapsed(self.sys_start) * 1000.0) as u32,
-        });
-        self.mavconn.tx.send((self.my_header, msg)).await?;
-        Ok(())
-    }
 }
 
 fn save<T: serde::Serialize>(
     name: &str,
-    logger: &mut tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
+    logger: &tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     v: &T,
 ) -> Result<()> {
     logger.send(SaveToDiskMsg::MavlinkData(StampedJson::new(
@@ -767,6 +802,32 @@ fn save<T: serde::Serialize>(
     Ok(())
 }
 
+/// Record a message on its way out to the flight controller.
+///
+/// Lands in the same `mavlink.jsonl` as the receive side, and is named
+/// `TX_<MESSAGE>` so direction is legible without having to know which message
+/// types FLO only ever receives. The payload is the whole [`MavMessage`], which
+/// serializes with a `type` tag of its own, so the record says what was actually
+/// on the wire — every field, as encoded — rather than whatever the sender
+/// computed it from.
+///
+/// One egress path is deliberately not recorded: NTRIP's `GPS_RTCM_DATA`, which
+/// holds its own cloned sender. It is a continuous stream of opaque correction
+/// bytes rather than a command, so recording it would cost far more space than
+/// the fact that RTCM is flowing is worth — and that fact is already visible in
+/// the GNSS fix type FLO logs from the receive side.
+fn save_tx(
+    logger: &tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
+    msg: &MavMessage,
+) -> Result<()> {
+    use mavlink::Message as _;
+    save(&format!("TX_{}", msg.message_name()), logger, msg)
+}
+
+// Every argument is a distinct collaborator wired in from `spawn_mavlink`, and
+// nearly all of them are forwarded straight to `DroneCoordinator::new`; bundling
+// them into a struct would only move the same list one level out.
+#[expect(clippy::too_many_arguments)]
 async fn main_loop(
     handle: &tokio::runtime::Handle,
     mavlink_cfg: &flo_core::drone_structs::MavlinkConfig,
@@ -775,18 +836,10 @@ async fn main_loop(
     broadway: flo_core::Broadway,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     local_flo_state: LocalFloState,
+    header: MavHeader,
 ) -> eyre::Result<()> {
-    let mut flight_setpoint_rx = broadway.flight_setpoint.subscribe();
-    let mut flight_mode_request_rx = broadway.flight_mode_request.subscribe();
-
     // This is hacky, but we need to clone the mavconn sender for NTRIP.
     let mavconn_tx = mavconn.tx.hacky_clone_tx();
-
-    let header = mavlink::MavHeader {
-        system_id: mavlink_cfg.system_id,
-        component_id: mavlink_cfg.component_id,
-        sequence: 0,
-    };
 
     let mut coordinator = DroneCoordinator::new(
         mavlink_cfg,
@@ -824,12 +877,6 @@ async fn main_loop(
                 let (header, msg) = r?;
                 coordinator.handle_message_from_drone(header, msg).await?;
             }
-            r = flight_setpoint_rx.recv() => {
-                coordinator.send_trajectory_setpoint(r.unwrap()).await?;
-            }
-            r = flight_mode_request_rx.recv() => {
-                coordinator.on_flight_mode_request(r.unwrap()).await?;
-            }
             ntrip_result = &mut ntrip_task => {
                 let _: ntrip::NeverOk = ntrip_result??;
                 unreachable!("NTRIP task completed.");
@@ -840,7 +887,11 @@ async fn main_loop(
 
 /// spawns tokio task to handle mavlink.
 ///
-/// This returns immediately with the join handle to the spawned task.
+/// This returns immediately with the join handle to the spawned task and an
+/// [`AutopilotLink`] for sending to the flight controller from elsewhere. The
+/// link is returned whether or not anything wants it: it is inert until someone
+/// sends on it, and building it here is what lets it share the task's header and
+/// `time_boot_ms` base.
 pub fn spawn_mavlink(
     handle: &tokio::runtime::Handle,
     broadway: Broadway,
@@ -848,7 +899,7 @@ pub fn spawn_mavlink(
     rc_cfg: Option<&flo_core::RcConfig>,
     mavlink_port: MavlinkPort,
     local_flo_state: LocalFloState,
-) -> eyre::Result<tokio::task::JoinHandle<eyre::Result<()>>> {
+) -> eyre::Result<(tokio::task::JoinHandle<eyre::Result<()>>, AutopilotLink)> {
     let rc_cfg: Option<flo_core::RcConfig> = rc_cfg.cloned();
 
     let MavlinkPort {
@@ -865,6 +916,24 @@ pub fn spawn_mavlink(
         mavlink::MavlinkVersion::V1,
     )?;
 
+    let header = mavlink::MavHeader {
+        system_id: mavlink_cfg.system_id,
+        component_id: mavlink_cfg.component_id,
+        sequence: 0,
+    };
+
+    // Established before the task starts, and shared with it, so that FLO's own
+    // `time_boot_ms` and any sent through the returned link count from the same
+    // instant.
+    let sys_start = now();
+
+    let autopilot_link = AutopilotLink {
+        tx: mavconn.tx.hacky_clone_tx(),
+        header,
+        sys_start,
+        floz_logger: floz_logger.clone(),
+    };
+
     let handle2 = handle.clone();
     let main_jh = handle.spawn(async move {
         main_loop(
@@ -875,11 +944,12 @@ pub fn spawn_mavlink(
             broadway,
             floz_logger,
             local_flo_state,
+            header,
         )
         .await
     });
 
-    Ok(main_jh)
+    Ok((main_jh, autopilot_link))
 }
 
 /// The display source the RC switch is asking for, or `None` if it has not
@@ -964,5 +1034,73 @@ mod tests {
             ..Default::default()
         };
         assert!(is_local_position_out_of_bounds(&data));
+    }
+}
+
+#[cfg(test)]
+mod tx_logging_tests {
+    use super::*;
+
+    fn a_setpoint() -> MavMessage {
+        use mavlink::ardupilotmega::*;
+        MavMessage::SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            vx: 1.5,
+            vy: 0.0,
+            vz: 0.0,
+            afx: 0.0,
+            afy: 0.0,
+            afz: 0.0,
+            yaw: 0.25,
+            yaw_rate: 0.0,
+            type_mask: PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AX_IGNORE
+                | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AY_IGNORE
+                | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AZ_IGNORE,
+            target_system: AUTOPILOT_TARGET_SYSTEM,
+            target_component: AUTOPILOT_TARGET_COMPONENT,
+            coordinate_frame: MavFrame::MAV_FRAME_BODY_NED,
+            time_boot_ms: 1234,
+        })
+    }
+
+    /// The record an egress message produces is named by direction and carries
+    /// the encoded message, so a reader can tell what actually went on the wire.
+    #[test]
+    fn tx_record_is_named_and_carries_encoded_fields() {
+        let (logger, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        save_tx(&logger, &a_setpoint()).unwrap();
+
+        let SaveToDiskMsg::MavlinkData(stamped) = rx.try_recv().unwrap() else {
+            panic!("egress record should be MavlinkData");
+        };
+        assert_eq!(stamped.typ, "TX_SET_POSITION_TARGET_LOCAL_NED");
+        // The payload is the whole MavMessage, internally tagged.
+        assert_eq!(stamped.data["type"], "SET_POSITION_TARGET_LOCAL_NED");
+        // Fields a reader would need to diagnose either of the historical bugs.
+        assert_eq!(stamped.data["vx"], 1.5);
+        // The two fields whose values were historically wrong are both in the
+        // record, so a recording is enough to tell what frame was commanded and
+        // which components were masked off. Both nest: mavlink tags its enums
+        // and serializes bitflags as their raw bits.
+        assert_eq!(
+            stamped.data["coordinate_frame"]["type"],
+            "MAV_FRAME_BODY_NED"
+        );
+        assert_eq!(stamped.data["type_mask"]["bits"], 448); // AX|AY|AZ_IGNORE
+    }
+
+    /// A receive-side record keeps its bare message name, so direction is
+    /// distinguishable in `mavlink.jsonl`.
+    #[test]
+    fn rx_records_are_not_prefixed() {
+        let (logger, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        save("LOCAL_POSITION_NED", &logger, &42u32).unwrap();
+        let SaveToDiskMsg::MavlinkData(stamped) = rx.try_recv().unwrap() else {
+            panic!("expected MavlinkData");
+        };
+        assert_eq!(stamped.typ, "LOCAL_POSITION_NED");
+        assert!(!stamped.typ.starts_with("TX_"));
     }
 }

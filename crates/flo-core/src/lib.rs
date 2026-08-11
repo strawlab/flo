@@ -1547,12 +1547,6 @@ pub enum BMsg {
     FloDetectionEvent(FloDetectionEvent),
     DroneEvent(crate::drone_structs::DroneEvent),
     DroneRealtimeEvent(crate::drone_structs::DroneRealtimeEvent),
-    /// A flight-control setpoint published by some subsystem. Recorded so
-    /// `.floz` files capture every command sent to the autopilot, regardless of
-    /// which subsystem produced it.
-    FlightSetpoint(crate::drone_structs::TrajectorySetpoint),
-    /// A flight-mode-change request published by some subsystem.
-    FlightModeRequest(crate::drone_structs::FlightMode),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]

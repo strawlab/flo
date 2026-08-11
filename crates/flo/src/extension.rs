@@ -33,6 +33,22 @@ pub struct ExtensionContext<'a> {
     /// Becomes `true` when FLO's coordinator is stopping. Extensions should
     /// finish their own graceful shutdown promptly after observing this value.
     pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    /// Egress to the flight controller, or `None` when this deployment has no
+    /// `mavlink_config` and so no flight controller to reach.
+    ///
+    /// An extension that needs this should take it in [`Extension::spawn`] and
+    /// error out when it is `None`, so a config that pairs the extension with a
+    /// non-drone deployment fails at startup instead of in the air.
+    ///
+    /// FLO itself never sends steering commands. Whether anything does is
+    /// entirely a property of what an extension chooses to put on this link, so
+    /// an extension holding it owns that safety argument.
+    ///
+    /// Recording is not part of that argument: every message sent through the
+    /// link is written to the `.floz`, by the link. An extension may still want
+    /// [`SaveToDiskMsg::ExtensionRecord`] for its own internal state — why it
+    /// chose a setpoint, as opposed to which one it sent.
+    pub autopilot_link: Option<flo_mavlink::AutopilotLink>,
 }
 
 /// A long-running subsystem composed into the flo binary at link time.

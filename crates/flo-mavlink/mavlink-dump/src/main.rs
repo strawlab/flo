@@ -49,7 +49,8 @@ async fn inner_main() -> color_eyre::eyre::Result<()> {
     let handle = tokio::runtime::Handle::try_current()?;
     let mavlink_port = flo_mavlink::MavlinkPort::open(&cfg)?;
 
-    let mut mavlink_task_jh = flo_mavlink::spawn_mavlink(
+    // This tool only listens, so it drops the autopilot egress link.
+    let (mut mavlink_task_jh, _) = flo_mavlink::spawn_mavlink(
         &handle,
         broadway.clone(),
         flo_saver_tx.clone(),

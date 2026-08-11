@@ -1,7 +1,7 @@
 use crate::{Angle, DeviceMode, FloatType, MomentCentroid, MotorPositionResult, RadialDistance};
 
 #[cfg(feature = "tokio")]
-use crate::drone_structs::{DroneEvent, DroneRealtimeEvent, FlightMode, TrajectorySetpoint};
+use crate::drone_structs::{DroneEvent, DroneRealtimeEvent};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,14 +18,6 @@ pub struct Broadway {
     pub drone_events: broadcast::Sender<DroneEvent>,
     /// Realtime events such as pose and RC channel values.
     pub drone_realtime: broadcast::Sender<DroneRealtimeEvent>,
-    /// Realtime channel: any subsystem that wants to drive the autopilot
-    /// publishes a [`TrajectorySetpoint`] here. `flo-mavlink` consumes it
-    /// and translates each setpoint into a MAVLink message.
-    pub flight_setpoint: broadcast::Sender<TrajectorySetpoint>,
-    /// Event channel: any subsystem that wants the autopilot in a
-    /// particular flight mode publishes the desired mode here.
-    /// `flo-mavlink` consumes it and issues MAVLink commands.
-    pub flight_mode_request: broadcast::Sender<FlightMode>,
 }
 
 #[cfg(feature = "tokio")]
@@ -36,8 +28,6 @@ impl Broadway {
             flo_detections: broadcast::channel(capacity_rt).0,
             drone_events: broadcast::channel(capacity).0,
             drone_realtime: broadcast::channel(capacity_rt).0,
-            flight_setpoint: broadcast::channel(capacity_rt).0,
-            flight_mode_request: broadcast::channel(capacity).0,
         }
     }
 }

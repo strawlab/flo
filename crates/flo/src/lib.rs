@@ -22,6 +22,12 @@
 //! if motors, tracking, or other subsystems fail. flo never issues
 //! steering commands in this binary, so a fault never causes loss of
 //! manual control.
+//!
+//! Note that "in this binary" is doing real work in that sentence.
+//! [`ExtensionContext::autopilot_link`] lets a binary that composes flo with an
+//! [`Extension`] send to the flight controller, and nothing here constrains
+//! what. Such a binary is no longer covered by the argument above and has to
+//! make its own.
 
 use clap::Parser;
 use color_eyre::eyre::{self, Result, WrapErr};
@@ -63,6 +69,16 @@ mod zip_dir;
 pub use camera_host::{CameraHost, CameraHostContext, CameraRegistration};
 pub use extension::{Extension, ExtensionContext, OsdOverlay};
 pub use osd::DroneStatus;
+
+/// The MAVLink layer, re-exported because [`ExtensionContext::autopilot_link`]
+/// hands out one of its types.
+///
+/// An out-of-tree extension can reach [`flo_mavlink::AutopilotLink`], the
+/// autopilot address constants, and (through [`flo_mavlink::mavlink`]) the
+/// message types themselves without naming `flo-mavlink` as a second dependency
+/// that could come to point at a different revision of this repository than
+/// `flo` does.
+pub use flo_mavlink;
 
 /// Default number of camera observations retained while the coordinator is
 /// busy. The bounded queue provides backpressure rather than allowing a slow
@@ -1776,9 +1792,14 @@ async fn app_main(
     let local_flo_state = LocalFloState::default();
     let local_flo_state2 = local_flo_state.clone();
 
+    // `None` when this deployment has no flight controller, which is what makes
+    // an extension asking to talk to one fail at spawn rather than silently
+    // sending into nothing.
+    let mut autopilot_link: Option<flo_mavlink::AutopilotLink> = None;
+
     let mut mavlink_task: Pin<Box<dyn Future<Output = _>>> =
         if let Some(mavlink_port) = mavlink_port {
-            let mavlink_task_jh = flo_mavlink::spawn_mavlink(
+            let (mavlink_task_jh, link) = flo_mavlink::spawn_mavlink(
                 handle,
                 broadway.clone(),
                 flo_saver_tx.clone(),
@@ -1795,6 +1816,7 @@ async fn app_main(
                 However, we never got an error. So we are confused and will now panic."
                 );
             } else {
+                autopilot_link = Some(link);
                 Box::pin(mavlink_task_jh)
             }
         } else {
@@ -1839,8 +1861,6 @@ async fn app_main(
         let mut rx2 = broadway.flo_detections.subscribe();
         let mut rx4 = broadway.drone_events.subscribe();
         let mut rx5 = broadway.drone_realtime.subscribe();
-        let mut rx8 = broadway.flight_setpoint.subscribe();
-        let mut rx9 = broadway.flight_mode_request.subscribe();
 
         let flo_saver_tx = flo_saver_tx.clone();
         handle.spawn(async move {
@@ -1858,12 +1878,6 @@ async fn app_main(
                     }
                     rx5_res = rx5.recv() => {
                         flo_saver_tx.bsend(DroneRealtimeEvent(rx5_res?))?;
-                    }
-                    rx8_res = rx8.recv() => {
-                        flo_saver_tx.bsend(FlightSetpoint(rx8_res?))?;
-                    }
-                    rx9_res = rx9.recv() => {
-                        flo_saver_tx.bsend(FlightModeRequest(rx9_res?))?;
                     }
                 }
             }
@@ -2215,6 +2229,7 @@ async fn app_main(
             centroid_tx: centroid_tx.clone(),
             processing_feedback: processing_feedback_rx.clone(),
             shutdown_rx: subsystem_shutdown_rx.clone(),
+            autopilot_link: autopilot_link.clone(),
         };
         let jh = ext
             .spawn(ctx)

@@ -533,15 +533,6 @@ impl Default for RcProgramState {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub struct TrajectorySetpoint {
-    pub pos: [Option<FloatType>; 3],
-    /// movement speed in body frame (x = forward)
-    pub vel: [Option<FloatType>; 3],
-    pub yaw: Option<FloatType>,
-    pub vyaw: Option<FloatType>,
-}
-
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Default, FromPrimitive)]
 #[rustfmt::skip]
 pub enum FlightMode {
@@ -569,6 +560,13 @@ impl From<u32> for FlightMode {
 
 impl FlightMode {
     /// Returns `(combined_flight_mode, main_mode, sub_mode)`, or `None` for [`FlightMode::Other`].
+    ///
+    /// This is the request-side split: `MAV_CMD_DO_SET_MODE` wants the main and
+    /// sub mode as separate parameters, where the variants above pack both into
+    /// one value. Nothing in this workspace commands a mode change, so this has
+    /// no caller here; it is kept rather than deleted because unpacking PX4's
+    /// layout is the kind of thing that goes subtly wrong when it is written out
+    /// a second time somewhere else.
     pub fn mode_numbers(&self) -> Option<(u32, f32, f32)> {
         if *self == FlightMode::Other {
             None
