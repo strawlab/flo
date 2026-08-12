@@ -126,6 +126,35 @@ accepts Strand Camera's `CodecSelection`; the simulated example includes its
 VAAPI `Ffmpeg` form. See [the crate README](crates/flo-app/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
+## Which machine am I looking at?
+
+The heading and the browser tab both read `FLO <hostname>` — for example `FLO
+strawbot` — naming the machine FLO is running on. Both views show it.
+
+The name comes from the server rather than from the address bar, because the
+address is whatever route the browser took to get there (an IP address, an
+overlay network's name for the machine, `localhost`) and none of those is what
+the machine calls itself. With two FLOs open in one browser, the tab titles are
+what tell them apart. A machine that reports no name leaves both reading `FLO`.
+
+## Phone view
+
+The **Phone** button at the top right of the BUI switches to a stripped-down view
+for use on a phone in the field. It has the controls that get reached for while
+standing next to FLO and nothing else:
+
+- **Save FLOZ**, which starts and stops a recording, with the checkbox for the
+  tracking cameras' MP4s beside it. That checkbox is the same setting the full
+  UI carries and defaults to on.
+- **Set Home**, **Go Home** and **Track**.
+- A small live view of the main tracking camera.
+- The current mode, with the same liveness dot the full UI's Info block has.
+
+**Full UI** switches back, as does the browser's Back button: the view is
+selected by the `#mobile` fragment of the same page, so switching costs no page
+load and nothing reconnects. The camera view exists only while the phone view is
+on screen — leaving it stops the camera producing preview frames.
+
 ## MAVLINK block
 
 When a flight controller is configured, the BUI grows a **MAVLINK** block
@@ -157,6 +186,61 @@ one by more than about a meter, FLO re-sends the request up to five times and
 then leaves an error in the log and a **DID NOT STICK** warning in the BUI. A
 flight controller that never reports an origin at all is logged as an error
 after ten seconds.
+
+## Raw GNSS logging for PPK
+
+A real-time RTK fix is only as good as the corrections that reached the aircraft
+while it was flying. For a solution computed afterwards instead — post-processed
+kinematics, PPK — the flight controller has to have recorded what its GNSS
+receiver actually measured, and PX4 does not do that by default:
+
+```yaml
+mavlink:
+  ppk_logging:
+    gps_dump_comm: rtcm_output   # the PPK mode; also disabled, full_communication
+    reboot_to_apply: true        # the default
+```
+
+`rtcm_output` sets PX4's `GPS_DUMP_COMM=2`, which configures the main receiver to
+emit RTCM3 MSM7 observations at 1 Hz and writes them to the `.ulg` as `gps_dump`.
+Because what is recorded is what the rover measured, it does not matter where the
+real-time corrections came from — NTRIP through FLO, or a local base station
+relayed by the ground station.
+
+A PPK solution needs the base station's observations as well, and those are never
+in the flight controller's log. When FLO is the one fetching them, it keeps them:
+every RTCM3 frame it receives from the caster is also written verbatim to
+`ntrip.rtcm3` inside the `.floz`, so a recording carries both halves of the
+problem. Corrections that reach the flight controller by some other route — a
+local base station relayed by the ground station — pass FLO by, and have to be
+archived at whatever produced them.
+
+Putting a solution together therefore uses two files:
+
+```
+ulog_extract_gps_dump flight.ulg          # writes flight_0_from_device.dat
+convbin -r rtcm3 -ts 2026/08/11 00:00:00 flight_0_from_device.dat   # rover
+unzip -p session.floz ntrip.rtcm3 > base.rtcm3                      # base
+convbin -r rtcm3 -ts 2026/08/11 00:00:00 base.rtcm3
+```
+
+The `-ts` is not optional: RTCM carries a time of week but not which week, so
+RTKLIB needs the date to place the observations in time.
+
+Note that `ntrip.rtcm3` spans the *recording*, while the rover observations span
+the flight controller's log — arm to disarm, or whatever `SDLOG_MODE` says. If a
+recording is shorter than the flight, only the overlap can be post-processed. A
+pre-capture window extends the correction stream backwards along with everything
+else.
+
+PX4 reads `GPS_DUMP_COMM` once, when its GPS driver starts, so storing a new
+value changes nothing about the flight in progress. FLO therefore reads the
+parameter at startup, writes it only if it differs, and then reboots the flight
+controller — which it will only do while it can see that the vehicle is disarmed.
+Every startup after the first is a read and nothing more. Set
+`reboot_to_apply: false` to have a changed value wait for the next boot instead;
+do that if FLO reaches the flight controller over USB, since the reboot takes the
+USB serial device away and FLO cannot reopen it.
 
 ## Post-trigger ("pre-capture") recording
 

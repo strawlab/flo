@@ -14,6 +14,8 @@ use yew_tincture::components::{Button, TypedInput, TypedInputStorage};
 
 use flo_core::*;
 
+mod mobile;
+
 mod recording_path;
 use recording_path::RecordingPathWidget;
 
@@ -156,6 +158,12 @@ struct App {
     /// Set when the modal opens; cleared once its address field has the focus.
     focus_new_rtp_target: bool,
     rtp_target_pending_removal: Option<String>,
+    /// Whether the phone view is showing, from the URL fragment. See
+    /// [`MOBILE_HASH`].
+    mobile: bool,
+    /// What the machine running FLO calls itself, sent once on connect. `None`
+    /// until it arrives, or when the server could not determine a name.
+    hostname: Option<String>,
 }
 
 enum Msg {
@@ -188,6 +196,9 @@ enum Msg {
     RemoveRtpTarget,
     /// The server broadcast that it is shutting down.
     ServerQuit,
+    /// The URL fragment changed, which is how the phone view is entered and
+    /// left.
+    HashChanged,
     RenderView,
 }
 
@@ -298,6 +309,20 @@ impl Component for App {
             link.send_message(Msg::RenderView);
         }));
 
+        {
+            // The two views are one app, so switching between them is a
+            // fragment change rather than a page load: the event stream, and
+            // everything received over it, survives the switch.
+            let link = ctx.link().clone();
+            _listeners.push(EventListener::new(
+                &gloo_utils::window(),
+                "hashchange",
+                move |_event: &Event| {
+                    link.send_message(Msg::HashChanged);
+                },
+            ));
+        }
+
         Self {
             es,
             floz_recording_path: None,
@@ -330,6 +355,8 @@ impl Component for App {
             new_rtp_target_ref: NodeRef::default(),
             focus_new_rtp_target: false,
             rtp_target_pending_removal: None,
+            mobile: mobile_hash_is_set(),
+            hostname: None,
         }
     }
 
@@ -345,6 +372,9 @@ impl Component for App {
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             Msg::RenderView => {}
+            Msg::HashChanged => {
+                self.mobile = mobile_hash_is_set();
+            }
             Msg::ServerQuit => {
                 // The server is shutting down. Show the "has quit" screen and
                 // close the event stream so the browser stops reconnecting.
@@ -590,6 +620,13 @@ impl Component for App {
                             BuiEventData::Versions(versions) => {
                                 self.component_versions = versions;
                             }
+                            BuiEventData::Hostname(hostname) => {
+                                // The tab's title, not only the heading: it is
+                                // how a tab is picked out of a row of them, and
+                                // what a bookmark of this FLO is called.
+                                gloo_utils::document().set_title(&page_title(Some(&hostname)));
+                                self.hostname = Some(hostname);
+                            }
                         }
                     }
                     Err(e) => {
@@ -608,13 +645,21 @@ impl Component for App {
             // the now-gone server.
             return self.server_quit_dialog();
         }
+        if self.mobile {
+            return self.mobile_view(ctx);
+        }
         html! {
             <div>
                 {self.disconnected_dialog()}
                 <header class="app-header">
-                    <h1>{"FLO"}</h1>
+                    { self.app_title() }
                     { self.browser_info() }
-                    <span class="app-header-connect"><ConnectDevice /></span>
+                    <span class="app-header-connect">
+                        // Same page, different view: the fragment is picked up
+                        // without a reload, so nothing is reconnected.
+                        <a class="btn" href={format!("#{MOBILE_HASH}")}>{"Phone"}</a>
+                        <ConnectDevice />
+                    </span>
                 </header>
                 <div class="border-1px">
                     // The indicator belongs to the whole panel: without fresh
@@ -706,6 +751,26 @@ impl Component for App {
 }
 
 impl App {
+    /// The heading both views carry: FLO, and which machine's FLO this is.
+    ///
+    /// The name is the machine's own, reported by the server (see
+    /// [`BuiEventData::Hostname`]); with several FLOs around, "FLO" alone does
+    /// not say which one this browser is driving. Until it arrives, and on a
+    /// machine that reports no name, the heading is just FLO.
+    fn app_title(&self) -> Html {
+        html! {
+            <h1 class="app-title">
+                // The space is a text node rather than a gap between two boxes
+                // so that the heading is still "FLO strawbot" when it is read
+                // aloud or copied, not "FLOstrawbot".
+                {"FLO "}
+                if let Some(hostname) = &self.hostname {
+                    <span class="app-title-host">{hostname}</span>
+                }
+            </h1>
+        }
+    }
+
     /// The FPV webcam's entry in [`Self::camera_links`], or `None` when camshow
     /// is not configured and there is therefore no webcam to preview.
     ///
@@ -1457,6 +1522,41 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 /// Shown in place of a value the flight controller has not reported yet.
 const NO_DATA: &str = "—";
 
+/// The document title for a FLO running on `hostname`.
+///
+/// The same in both views: which machine this is does not change with how it is
+/// being looked at, and a title that did would make a row of tabs harder to
+/// read, not easier. Matches the `<title>` in `index.html` when there is no
+/// name, so nothing flickers on connect.
+fn page_title(hostname: Option<&str>) -> String {
+    match hostname {
+        Some(hostname) => format!("FLO {hostname}"),
+        None => "FLO".to_string(),
+    }
+}
+
+/// The URL fragment that selects the phone view (see [`mobile`]).
+///
+/// A fragment rather than a path: it needs no route on the server, and the
+/// browser hands it to the app already running instead of loading the page
+/// again. Leaving the view is the empty fragment, so the phone view is also one
+/// press of Back away.
+const MOBILE_HASH: &str = "mobile";
+
+/// Whether `hash` — a URL fragment as `Location::hash` reports it, leading `#`
+/// included — selects the phone view.
+fn is_mobile_hash(hash: &str) -> bool {
+    hash.strip_prefix('#').unwrap_or(hash) == MOBILE_HASH
+}
+
+/// Whether the phone view is what the current URL asks for.
+fn mobile_hash_is_set() -> bool {
+    gloo_utils::window()
+        .location()
+        .hash()
+        .is_ok_and(|hash| is_mobile_hash(&hash))
+}
+
 /// How long without an event counts as the data having stopped.
 const STALE_DATA_SECS: f64 = 3.0;
 
@@ -1608,7 +1708,29 @@ impl From<u16> for ReadyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kbps, map_urls, parse_new_rtp_target};
+    use super::{Kbps, is_mobile_hash, map_urls, page_title, parse_new_rtp_target};
+
+    #[test]
+    fn the_title_names_the_machine_flo_runs_on() {
+        assert_eq!(page_title(Some("strawbot")), "FLO strawbot");
+        // Before the server has said, and on a machine with no name to report,
+        // the title is the one `index.html` already carries — so a connect
+        // neither blanks it nor leaves a dangling separator.
+        assert_eq!(page_title(None), "FLO");
+    }
+
+    #[test]
+    fn the_phone_view_is_selected_by_its_own_fragment_only() {
+        // `Location::hash` includes the `#`, but the link in the header and the
+        // constant it is built from do not, so both spellings must work.
+        assert!(is_mobile_hash("#mobile"));
+        assert!(is_mobile_hash("mobile"));
+        // Anything else is the full UI, including the empty fragment a bare
+        // `#` link leaves behind — that link is how the phone view is left.
+        assert!(!is_mobile_hash(""));
+        assert!(!is_mobile_hash("#"));
+        assert!(!is_mobile_hash("#mobile-something"));
+    }
 
     #[test]
     fn builds_both_map_urls_for_an_origin() {

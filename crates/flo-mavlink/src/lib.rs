@@ -14,6 +14,7 @@ use mavlink::{
 };
 
 mod ntrip;
+mod ppk;
 
 /// The `mavlink` crate this was built against.
 ///
@@ -183,6 +184,15 @@ struct DroneCoordinator {
     last_message_timestamp: Option<MyTimestamp>,
     prev_time_boot_ms: u32,
     local_flo_state: LocalFloState,
+    /// The armed flag from the most recent heartbeat, `None` until the first one
+    /// arrives.
+    ///
+    /// `armed_cd` cannot answer this: it starts out asserting `false`, which is
+    /// what makes the first heartbeat register as a change, so it cannot tell a
+    /// disarmed flight controller from one that has not been heard from at all.
+    /// Anything that must not act on that guess — asking for a reboot, say —
+    /// needs the distinction.
+    last_reported_armed: Option<bool>,
     /// The local-position origin the config asks for, if any.
     requested_origin: Option<GpsGlobalOrigin>,
     /// How many more times a mismatching origin will be re-sent before giving
@@ -230,6 +240,7 @@ impl DroneCoordinator {
             last_message_timestamp: Default::default(),
             prev_time_boot_ms: 0,
             local_flo_state,
+            last_reported_armed: None,
             requested_origin: mavlink_cfg.requested_gps_global_origin(),
             origin_retries_left: ORIGIN_SET_RETRIES,
             origin_requested_at: None,
@@ -251,6 +262,11 @@ impl DroneCoordinator {
                 self_.rc_program_state.tilt_ng.params = knob_cfg.noise_gate.clone();
             }
         }
+
+        // Bring the flight controller's raw-GNSS logging in line with the
+        // config. This goes first because it can end in a reboot, which would
+        // discard the stream requests below and the global origin with them.
+        self_.apply_ppk_logging_config().await?;
 
         // Below is the old Self::request_streams() method, now moved into the constructor.
 
@@ -510,6 +526,7 @@ impl DroneCoordinator {
                 let armed = msg
                     .base_mode
                     .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
+                self.last_reported_armed = Some(armed);
                 if self.armed_cd.update(&armed) {
                     self.broadway.drone_events.send(if armed {
                         DroneEvent::Armed
@@ -811,11 +828,11 @@ fn save<T: serde::Serialize>(
 /// on the wire — every field, as encoded — rather than whatever the sender
 /// computed it from.
 ///
-/// One egress path is deliberately not recorded: NTRIP's `GPS_RTCM_DATA`, which
-/// holds its own cloned sender. It is a continuous stream of opaque correction
-/// bytes rather than a command, so recording it would cost far more space than
-/// the fact that RTCM is flowing is worth — and that fact is already visible in
-/// the GNSS fix type FLO logs from the receive side.
+/// One egress path does not come through here: NTRIP's `GPS_RTCM_DATA`, which
+/// holds its own cloned sender. Recording it as MAVLink would be the wrong shape
+/// — a stream of opaque correction bytes chopped into 180-byte fragments, when
+/// what a reader wants is the RTCM3 stream itself. [`ntrip::ntrip_loop`] records
+/// it instead, verbatim and unfragmented, to [`flo_core::NTRIP_RTCM_FNAME`].
 fn save_tx(
     logger: &tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
     msg: &MavMessage,
@@ -840,6 +857,9 @@ async fn main_loop(
 ) -> eyre::Result<()> {
     // This is hacky, but we need to clone the mavconn sender for NTRIP.
     let mavconn_tx = mavconn.tx.hacky_clone_tx();
+    // NTRIP records the corrections it relays, so it needs the recording sink
+    // too. Cloned before the coordinator takes ownership of the original.
+    let ntrip_floz_logger = floz_logger.clone();
 
     let mut coordinator = DroneCoordinator::new(
         mavlink_cfg,
@@ -856,8 +876,9 @@ async fn main_loop(
     let mut ntrip_task: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> = {
         if let Some(ntrip_url) = &mavlink_cfg.ntrip_url {
             let ntrip_url = ntrip_url.clone();
-            let ntrip_join_handle =
-                handle.spawn(async move { ntrip::ntrip_loop(ntrip_url, mavconn_tx, header).await });
+            let ntrip_join_handle = handle.spawn(async move {
+                ntrip::ntrip_loop(ntrip_url, mavconn_tx, ntrip_floz_logger, header).await
+            });
             Box::pin(ntrip_join_handle)
         } else {
             Box::pin(std::future::pending())

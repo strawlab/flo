@@ -167,6 +167,13 @@ pub const VERSIONS_FNAME: &str = "versions.yaml";
 /// Newline-delimited JSON log of [`StampedBMsg`] events (detections, mode
 /// changes, commands) recorded during a session.
 pub const BROADWAY_FNAME: &str = "broadway.jsonl";
+/// Verbatim RTCM3 correction stream received from the NTRIP caster.
+///
+/// A byte-for-byte copy of the frames FLO relayed to the flight controller, in
+/// arrival order, so RTKLIB and friends read it directly (`convbin -r rtcm3`).
+/// The flight controller's own log holds what the *rover* measured; this is the
+/// base station half, which post-processing needs and which nothing else keeps.
+pub const NTRIP_RTCM_FNAME: &str = "ntrip.rtcm3";
 
 pub use pwm_motor_types::{
     DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,
@@ -948,6 +955,16 @@ pub enum BuiEventData {
     /// Sent once when a browser connects. Fixed for the life of the process,
     /// so it rides at the head of the stream rather than in the state updates.
     Versions(Vec<ComponentVersion>),
+    /// The host name of the machine FLO is running on, which the UI shows in
+    /// its title so that one browser with several FLOs open can tell them
+    /// apart.
+    ///
+    /// It has to come from the server: the name in the address bar is whatever
+    /// route the browser took — an IP address, an overlay network's name for
+    /// the machine, `localhost` — and none of those is what the machine calls
+    /// itself. Sent once at the head of the stream, and absent when the server
+    /// cannot determine a name.
+    Hostname(String),
 }
 
 /// What one piece of software in a running FLO was built from.
@@ -1514,6 +1531,14 @@ pub enum SaveToDiskMsg {
     GimbalEncoderData(GimbalEncoderData),
     /// Catch-all for (time)stamped JSON data from MAVLink
     MavlinkData(StampedJson),
+    /// One complete RTCM3 correction frame received from the NTRIP caster.
+    ///
+    /// Appended verbatim to [`NTRIP_RTCM_FNAME`] rather than serialized: the
+    /// consumer is a GNSS post-processing tool, which wants the byte stream, not
+    /// a transcription of it. Frames carry their own GNSS epoch, so no timestamp
+    /// is attached — and none would be trustworthy anyway, since a caster's
+    /// stream arrives with whatever latency the network had.
+    NtripRtcm(Vec<u8>),
     /// Motor positions
     MotorPosition(Box<MotorPositionResult>),
     /// Quit the writing thread.

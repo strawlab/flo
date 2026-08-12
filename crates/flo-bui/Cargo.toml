@@ -24,11 +24,14 @@ serde_path_to_error = "0.1.16"
 yew-tincture = "0.3"
 
 ads-webasm.workspace = true
+strand-cam-bui-components.workspace = true
+
 flo-core.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.72"
 features = [
+    "Document",
     "DomRect",
     "DomTokenList",
     "Element",
@@ -43,6 +46,7 @@ features = [
     "HtmlImageElement",
     "HtmlInputElement",
     "KeyboardEvent",
+    "Location",
     "MessageEvent",
     "Navigator",
     "Request",

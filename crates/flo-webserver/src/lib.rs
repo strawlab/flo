@@ -110,11 +110,17 @@ async fn events_handler(
     let strand_cameras = app_state.strand_cam_proxy_info.clone();
     let versions = app_state.component_versions.clone();
 
-    let stream1 = stream::iter(vec![
+    let mut head = vec![
         BuiEventData::Config(cfg),
         BuiEventData::StrandCameras(strand_cameras),
         BuiEventData::Versions(versions),
-    ]);
+    ];
+    // Absent rather than empty when this machine has no name to report, so the
+    // UI keeps its plain title instead of showing a blank where a name goes.
+    if let Some(hostname) = app_state.hostname.clone() {
+        head.push(BuiEventData::Hostname(hostname));
+    }
+    let stream1 = stream::iter(head);
     let stream2 = WatchStream::from(from_device_rx).map(BuiEventData::DeviceState);
 
     let data_stream = stream1
@@ -195,6 +201,25 @@ async fn device_connect_urls_handler(
     }
 }
 
+/// What this machine calls itself, for the web UI's title.
+///
+/// Looked up once when the server starts rather than per request: it is fixed
+/// for as long as the process runs, and the UI is told it once per connection.
+fn server_hostname() -> Option<String> {
+    tidy_hostname(&gethostname::gethostname())
+}
+
+/// The name to report for `raw`, or `None` if it is not a name.
+///
+/// The operating system hands back an `OsString` that can in principle be empty
+/// (an unconfigured host), padded with whitespace, or not valid UTF-8. None of
+/// those belong in a page title, and an empty name in particular has to be
+/// distinguishable from a real one so the UI can leave its title alone.
+fn tidy_hostname(raw: &std::ffi::OsStr) -> Option<String> {
+    let name = raw.to_string_lossy().trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Whether `uri`'s host is a loopback address (so unreachable from another
 /// device). Used to decide which connection URLs are worth offering to scan.
 fn is_loopback_uri(uri: &http::Uri) -> bool {
@@ -237,6 +262,9 @@ struct AppState {
     /// The newest webcam preview image, filled by whoever is reading camshow's
     /// preview link. Empty, and left that way, when no camshow is configured.
     webcam_preview: WebcamPreview,
+    /// What this machine calls itself, looked up once at startup. `None` when
+    /// the operating system reported no usable name.
+    hostname: Option<String>,
     strand_cam_proxy_info: Vec<flo_core::StrandCamProxyInfo>,
     /// Fixed for the life of the process, so it is sent once when a browser
     /// connects rather than repeated in every state update.
@@ -483,6 +511,7 @@ pub async fn main_loop(
         persistent_secret: persistent_secret.clone(),
         strand_cam_proxy_info,
         component_versions,
+        hostname: server_hostname(),
     };
 
     // `AuthConfig` is `#[non_exhaustive]`, so build it via `new` and set fields.
@@ -554,7 +583,41 @@ mod tests {
     use axum::{Router, body::Body, routing::any};
     use http::{Request, StatusCode};
 
-    use super::{EmbeddedStrandCamRouters, build_connect_urls, nest_embedded_camera_routers};
+    use super::{
+        EmbeddedStrandCamRouters, build_connect_urls, nest_embedded_camera_routers,
+        server_hostname, tidy_hostname,
+    };
+
+    #[test]
+    fn a_hostname_is_reported_as_the_machine_gives_it() {
+        assert_eq!(
+            tidy_hostname(std::ffi::OsStr::new("strawbot")).as_deref(),
+            Some("strawbot")
+        );
+        // A fully qualified name is left alone: shortening it would be guessing
+        // at which part of the name the operator recognizes.
+        assert_eq!(
+            tidy_hostname(std::ffi::OsStr::new("strawbot.example.org")).as_deref(),
+            Some("strawbot.example.org")
+        );
+    }
+
+    #[test]
+    fn a_nameless_host_reports_nothing_rather_than_an_empty_name() {
+        // The UI shows its plain title when there is no name, which it can only
+        // do if "no name" and "" do not arrive as the same thing.
+        assert_eq!(tidy_hostname(std::ffi::OsStr::new("")), None);
+        assert_eq!(tidy_hostname(std::ffi::OsStr::new("  \n")), None);
+    }
+
+    #[test]
+    fn this_machine_has_a_name() {
+        // Whatever it is, it is not empty and carries no surrounding
+        // whitespace: this is the value that ends up in the title.
+        let hostname = server_hostname().expect("a test machine should have a host name");
+        assert_eq!(hostname.trim(), hostname);
+        assert!(!hostname.is_empty());
+    }
 
     #[test]
     fn loopback_addr_has_no_token_and_is_loopback_only() {
