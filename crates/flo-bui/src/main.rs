@@ -1388,11 +1388,12 @@ impl App {
         };
         let pan_deg = format!("{:.1}°", state.cached_motors.pan.degrees());
         let tilt_deg = format!("{:.1}°", state.cached_motors.tilt.degrees());
-        let ntrip = state
-            .mavlink
-            .as_ref()
-            .and_then(|mavlink| mavlink.ntrip_kbps)
-            .map_or_else(|| NO_DATA.to_string(), |kbps| format!("{kbps:.2} kBps"));
+        let ntrip = format_ntrip_rate(
+            state
+                .mavlink
+                .as_ref()
+                .and_then(|mavlink| mavlink.ntrip_kbps),
+        );
         html! {
             <div class="qqgrid info-grid">
                 { qqblock("Mode", state.mode.to_string()) }
@@ -1401,7 +1402,9 @@ impl App {
                 { qqblock("Disparity", disparity) }
                 { qqblock("Pan", pan_deg) }
                 { qqblock("Tilt", tilt_deg) }
-                { qqblock("NTRIP?", ntrip) }
+                if let Some(ntrip) = ntrip {
+                    { qqblock("NTRIP", ntrip) }
+                }
             </div>
         }
     }
@@ -1563,6 +1566,10 @@ const NO_DATA: &str = "—";
 
 fn optional_decimal(value: Option<FloatType>) -> String {
     value.map_or_else(|| NO_DATA.to_string(), |value| format!("{value:.2}"))
+}
+
+fn format_ntrip_rate(kbps: Option<FloatType>) -> Option<String> {
+    kbps.map(|kbps| format!("{kbps:.2} kBps"))
 }
 
 /// The URL fragment that selects the phone view (see [`mobile`]).
@@ -1738,7 +1745,16 @@ impl From<u16> for ReadyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kbps, is_mobile_hash, map_urls, parse_new_rtp_target};
+    use super::{Kbps, format_ntrip_rate, is_mobile_hash, map_urls, parse_new_rtp_target};
+
+    #[test]
+    fn ntrip_readout_is_only_present_when_ntrip_is_configured() {
+        assert_eq!(format_ntrip_rate(None), None);
+        assert_eq!(
+            format_ntrip_rate(Some(1.234)),
+            Some("1.23 kBps".to_string())
+        );
+    }
 
     #[test]
     fn the_phone_view_is_selected_by_its_own_fragment_only() {
