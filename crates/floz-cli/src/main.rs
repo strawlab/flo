@@ -15,8 +15,8 @@ use serde::Serialize;
 
 /// Time window (milliseconds) within which centroids from the two cameras are
 /// considered a simultaneous pair eligible for stereopsis. This mirrors the
-/// 5 ms threshold used in the FLO controller when establishing the stereo
-/// camera frame offset (see `on_fast_tick` in the `flo` crate).
+/// window the controller allows when learning the cameras' framenumber offset
+/// (see `flo_core::stereo_sync`).
 const STEREO_WINDOW_MILLIS: i64 = 5;
 
 #[derive(Debug, Parser)]
@@ -192,13 +192,17 @@ struct StereoPairSummary {
     /// stereopsis distances could have been computed.
     num_pairs_within_window: usize,
     /// Of those acquisition-aligned pairs, how many also arrived at the PC
-    /// (`received_timestamp`) within `window_millis`. The live controller pairs
-    /// by arrival, so a count well below `num_pairs_within_window` would mean
-    /// the cameras' data reached the host too far apart to pair.
+    /// (`received_timestamp`) within `window_millis`. The live controller keeps
+    /// only a few frames of each camera while waiting for a partner, so a count
+    /// well below `num_pairs_within_window` means data reached the host too far
+    /// apart for the live pairing, however well it lines up in the recording.
     num_pairs_received_within_window: usize,
-    /// The controller locks onto the framenumber offset of the first valid pair
-    /// and then rejects any pair whose offset differs. This reports how
-    /// consistent the time-aligned pairs are by that criterion.
+    /// The framenumber offset between the two cameras, which is what pairing
+    /// turns on.
+    ///
+    /// The cameras are triggered together and each counts every trigger, so
+    /// this is one fixed integer for the whole recording — unknown until
+    /// learned, since each hardware counter started when its camera did.
     #[serde(skip_serializing_if = "Option::is_none")]
     framenumber_offset: Option<FramenumberOffsetSummary>,
 }
@@ -206,11 +210,13 @@ struct StereoPairSummary {
 #[derive(Debug, Serialize)]
 struct FramenumberOffsetSummary {
     /// The most common framenumber offset (`framenumber_a - framenumber_b`)
-    /// among time-aligned pairs — what the controller would most likely lock.
+    /// among time-aligned pairs: the offset between the cameras' counters.
     modal_offset: i64,
-    /// Pairs whose offset equals `modal_offset` (the controller would accept).
+    /// Pairs whose offset equals `modal_offset`.
     num_pairs_at_modal_offset: usize,
-    /// Pairs whose offset differs (the controller would reject these).
+    /// Pairs whose offset differs. Since the real offset does not change, these
+    /// are detections this summary's time-based matching put together that are
+    /// not from one trigger — normal where only one camera saw the subject.
     num_pairs_off_modal_offset: usize,
     /// Distinct framenumber offsets observed across the time-aligned pairs.
     num_distinct_offsets: usize,
@@ -379,8 +385,9 @@ fn build_distance_report(
             .filter(|p| p.received_skew.abs() <= window)
             .count();
 
-        // Summarize how consistent the framenumber offsets are: the controller
-        // locks the first offset and rejects pairs that disagree with it.
+        // Summarize the framenumber offset between the cameras. It is one fixed
+        // integer; pairs at any other offset are this time-based matching
+        // putting two triggers together.
         let framenumber_offset = if matched.is_empty() {
             None
         } else {
@@ -546,24 +553,27 @@ fn build_diagnosis(
                 && fo.num_pairs_off_modal_offset > 0
             {
                 out.push(format!(
-                    "Of those pairs, {} match the modal framenumber offset ({}) but {} do not \
-                     ({} distinct offsets seen). The controller locks the first offset and \
-                     rejects mismatched pairs, so framenumber drift between the cameras (e.g. \
-                     dropped frames) suppresses distance updates.",
+                    "Of those pairs, {} are at framenumber offset {} — the offset between the \
+                     cameras' counters — and {} are not ({} distinct offsets seen). That offset \
+                     never changes, so the rest are detections this time-based summary put \
+                     together that are not from one trigger; the controller, which pairs on \
+                     framenumbers, would not have used them. Expect them where only one camera \
+                     saw the subject.",
                     fo.num_pairs_at_modal_offset,
                     fo.modal_offset,
                     fo.num_pairs_off_modal_offset,
                     fo.num_distinct_offsets,
                 ));
             }
-            // Arrival skew: the live controller pairs by arrival order, so if
-            // far fewer pairs arrived together than were acquired together, the
-            // host received the two streams too far apart to pair them live.
+            // Arrival skew: live pairing keeps only a few frames of each camera
+            // while waiting for a partner, so data that arrives far apart is
+            // dropped however well it lines up in the recording.
             if sp.num_pairs_received_within_window * 2 < sp.num_pairs_within_window {
                 out.push(format!(
                     "Although {} pairs were acquired within {} ms, only {} also *arrived* at the \
-                     host within {} ms. The live controller pairs by arrival, so this arrival \
-                     skew (e.g. one camera's data lagging) prevents most pairs from forming.",
+                     host within {} ms. Live pairing holds a camera's data for a few frames and \
+                     no longer, so data lagging by more than that (e.g. frames stuck on the way \
+                     from one camera) is not paired live even though it pairs offline.",
                     sp.num_pairs_within_window,
                     sp.window_millis,
                     sp.num_pairs_received_within_window,
@@ -583,11 +593,12 @@ fn build_diagnosis(
                     .is_none_or(|fo| fo.num_pairs_off_modal_offset == 0)
             {
                 out.push(
-                    "Despite clean, well-aligned stereo opportunities (consistent framenumber \
+                    "Despite clean, well-aligned stereo opportunities (one consistent framenumber \
                      offset, matching arrival times), no distance was ever incorporated. The \
                      recorded inputs are sufficient, so the cause is in the live stereo pipeline \
-                     at record time (e.g. the two centroids were never buffered together within a \
-                     single fast tick) rather than in the data — investigate the controller."
+                     at record time (e.g. the controller learned the wrong framenumber offset and \
+                     rejected every pair afterwards) rather than in the data — investigate the \
+                     controller."
                         .to_string(),
                 );
             }
