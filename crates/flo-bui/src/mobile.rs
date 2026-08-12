@@ -43,7 +43,6 @@ impl App {
                     </div>
                 </div>
                 { self.mobile_distance() }
-                { self.mobile_gnss_status() }
                 { self.mobile_preview() }
             </div>
         }
@@ -60,6 +59,10 @@ impl App {
     /// pair of detections yet. Deliberately not the home position's distance,
     /// which is a setting rather than a measurement.
     fn mobile_distance(&self) -> Html {
+        let has_mavlink = self
+            .last_state
+            .as_ref()
+            .is_some_and(|state| state.mavlink.is_some());
         let distance = match self
             .last_state
             .as_ref()
@@ -70,7 +73,10 @@ impl App {
         };
         html! {
             <div class="border-1px">
-                { crate::qqblock("Distance", distance) }
+                <div class={classes!(has_mavlink.then_some("qqgrid"))}>
+                    { crate::qqblock("Distance", distance) }
+                    { self.mobile_gnss_status() }
+                </div>
             </div>
         }
     }
@@ -85,9 +91,7 @@ impl App {
             return html! {};
         };
         html! {
-            <div class="border-1px">
-                { crate::qqblock("GNSS status", crate::format_gnss_status(mavlink)) }
-            </div>
+            { crate::qqblock("GNSS status", crate::format_gnss_status(mavlink)) }
         }
     }
 

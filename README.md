@@ -199,10 +199,10 @@ standing next to FLO and nothing else:
   tracking cameras' MP4s beside it. That checkbox is the same setting the full
   UI carries and defaults to on.
 - **Set Home**, **Go Home** and **Track**.
-- The stereopsis **Distance**, or an em dash when there is no estimate — a
-  monocular deployment, or no pair of detections yet.
-- **GNSS status** when a flight controller is configured, with its fix/RTK
-  state and satellite count.
+- One status panel with the stereopsis **Distance** (or an em dash when there is
+  no estimate) and, when a flight controller is configured, **GNSS status**
+  with its fix/RTK state and satellite count. They sit side by side when both
+  are present.
 - A small live view of the main tracking camera.
 - The current mode, with the same liveness dot the full UI's Info block has.
 
