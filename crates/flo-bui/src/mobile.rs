@@ -43,6 +43,7 @@ impl App {
                     </div>
                 </div>
                 { self.mobile_distance() }
+                { self.mobile_gnss_status() }
                 { self.mobile_preview() }
             </div>
         }
@@ -70,6 +71,22 @@ impl App {
         html! {
             <div class="border-1px">
                 { crate::qqblock("Distance", distance) }
+            </div>
+        }
+    }
+
+    /// Primary receiver fix quality, shown only for MAVLink deployments.
+    fn mobile_gnss_status(&self) -> Html {
+        let Some(mavlink) = self
+            .last_state
+            .as_ref()
+            .and_then(|state| state.mavlink.as_ref())
+        else {
+            return html! {};
+        };
+        html! {
+            <div class="border-1px">
+                { crate::qqblock("GNSS status", crate::format_gnss_status(mavlink)) }
             </div>
         }
     }

@@ -1427,14 +1427,7 @@ impl App {
             Some(custom_mode) => flight_mode_label(custom_mode),
             None => NO_DATA.to_string(),
         };
-        let gnss_status = match (&mavlink.gnss_rtk_mode, mavlink.satellites_visible) {
-            (Some(mode), Some(satellites)) => {
-                format!("{} · {satellites} sats", mode.label())
-            }
-            (Some(mode), None) => format!("{} · sats {}", mode.label(), NO_DATA),
-            (None, Some(satellites)) => format!("{} · {satellites} sats", NO_DATA),
-            (None, None) => NO_DATA.to_string(),
-        };
+        let gnss_status = format_gnss_status(mavlink);
         let gnss_dop = match mavlink.gnss_dop {
             Some(dop) => format!(
                 "H {} · V {}",
@@ -1563,6 +1556,17 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 
 /// Shown in place of a value the flight controller has not reported yet.
 const NO_DATA: &str = "—";
+
+fn format_gnss_status(mavlink: &MavlinkState) -> String {
+    match (&mavlink.gnss_rtk_mode, mavlink.satellites_visible) {
+        (Some(mode), Some(satellites)) => {
+            format!("{} · {satellites} sats", mode.label())
+        }
+        (Some(mode), None) => format!("{} · sats {}", mode.label(), NO_DATA),
+        (None, Some(satellites)) => format!("{} · {satellites} sats", NO_DATA),
+        (None, None) => NO_DATA.to_string(),
+    }
+}
 
 fn optional_decimal(value: Option<FloatType>) -> String {
     value.map_or_else(|| NO_DATA.to_string(), |value| format!("{value:.2}"))
@@ -1745,7 +1749,21 @@ impl From<u16> for ReadyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kbps, format_ntrip_rate, is_mobile_hash, map_urls, parse_new_rtp_target};
+    use flo_core::{GnssRtkMode, MavlinkState};
+
+    use super::{
+        Kbps, format_gnss_status, format_ntrip_rate, is_mobile_hash, map_urls, parse_new_rtp_target,
+    };
+
+    #[test]
+    fn gnss_status_combines_fix_and_satellite_count() {
+        let state = MavlinkState {
+            gnss_rtk_mode: Some(GnssRtkMode::RtkFixed),
+            satellites_visible: Some(18),
+            ..Default::default()
+        };
+        assert_eq!(format_gnss_status(&state), "RTK fixed · 18 sats");
+    }
 
     #[test]
     fn ntrip_readout_is_only_present_when_ntrip_is_configured() {
