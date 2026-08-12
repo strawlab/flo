@@ -40,6 +40,7 @@ struct InitializationResult {
 async fn initialize_gimbals(
     mut messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
     mut messages_rx: SplitStream<Framed<SerialStream, V2Codec>>,
+    port_path: &str,
 ) -> Result<InitializationResult> {
     let initialization_started = Instant::now();
     tracing::debug!("starting SimpleBGC initialization");
@@ -96,6 +97,11 @@ async fn initialize_gimbals(
     // expires with the required offsets in hand. A board that does not
     // implement BOARD_INFO_3 must still fly.
     let mut queries = provenance::StartupQueries::default();
+    // Messages that arrived but answered none of the startup queries -- most
+    // often realtime stream frames a previous run left the board sending. They
+    // prove the link itself is alive, which is the first thing to know when the
+    // offsets never show up.
+    let mut unrelated_messages = 0usize;
     let collect_deadline = Instant::now() + PROVENANCE_COLLECT_TIMEOUT;
     while !queries.is_complete() {
         let remaining = collect_deadline.saturating_duration_since(Instant::now());
@@ -104,8 +110,17 @@ async fn initialize_gimbals(
         }
         let msg = match tokio::time::timeout(remaining, messages_rx.next()).await {
             Err(_elapsed) => break,
-            Ok(None) => return Err(eyre::eyre!("no response from gimbal")),
-            Ok(Some(msg)) => msg?,
+            Ok(None) => {
+                return Err(eyre::eyre!(
+                    "gimbal serial port {port_path} reached end-of-stream during startup, \
+                     after answering {:?}. The device disappeared -- check for a USB \
+                     disconnect or an unpowered controller.",
+                    queries.answered_keys()
+                ));
+            }
+            Ok(Some(msg)) => msg.with_context(|| {
+                format!("decoding SimpleBGC startup response from gimbal on {port_path}")
+            })?,
         };
         match msg {
             IncomingCommand::BoardInfo(cmd) => queries.board_info = Some(cmd),
@@ -127,15 +142,38 @@ async fn initialize_gimbals(
                 queries.params_ext = Some(cmd);
             }
             msg => {
+                unrelated_messages += 1;
                 tracing::debug!(?msg, "received message while waiting for startup queries");
             }
         }
     }
 
-    let params_ext = queries
-        .params_ext
-        .as_ref()
-        .ok_or_else(|| eyre::eyre!("gimbal did not return encoder offsets"))?;
+    let params_ext = queries.params_ext.as_ref().ok_or_else(|| {
+        let waited = initialization_started.elapsed();
+        let answered = queries.answered_keys();
+        if answered.is_empty() && unrelated_messages == 0 {
+            // Nothing came back at all, so the fault is the link or the board,
+            // not the query. This is the case a restart tends to fix.
+            eyre::eyre!(
+                "gimbal on {port_path} sent no reply of any kind within {waited:?} \
+                 (queried board info and encoder offsets at {BAUD_RATE} baud). \
+                 Check that the controller is powered, that {port_path} is the \
+                 SimpleBGC board, and that no other process holds the port. \
+                 A controller left wedged by a previous run needs a power cycle."
+            )
+        } else {
+            // The board is talking, so the link is fine -- it just never
+            // produced CMD_READ_PARAMS_EXT, which is the one response FLO
+            // cannot fly without.
+            eyre::eyre!(
+                "gimbal on {port_path} did not return encoder offsets \
+                 (CMD_READ_PARAMS_EXT, profile 0) within {waited:?}, though the link \
+                 is alive: it answered {answered:?} and sent {unrelated_messages} \
+                 unrelated message(s). The board may still be booting, or may have \
+                 no stored parameters for profile 0."
+            )
+        }
+    })?;
     let offset_yaw = (params_ext.encoder_offset.yaw as f64) / ((1 << 14) as f64);
     let offset_pitch = (params_ext.encoder_offset.pitch as f64) / ((1 << 14) as f64);
 
@@ -236,8 +274,19 @@ pub async fn run_gimbal_loop(
         // Establish initial connection to gimbals.
         let framed = tokio_util::codec::Framed::new(serial_device, V2Codec::default());
         let (messages_tx, messages_rx) = framed.split();
-        let gimbal_config_fut = initialize_gimbals(messages_tx, messages_rx);
-        let ir = tokio::time::timeout(Duration::from_millis(5000), gimbal_config_fut).await??;
+        let gimbal_config_fut = initialize_gimbals(messages_tx, messages_rx, &cfg.port_path);
+        const INIT_TIMEOUT: Duration = Duration::from_millis(5000);
+        let ir = match tokio::time::timeout(INIT_TIMEOUT, gimbal_config_fut).await {
+            Err(_elapsed) => {
+                return Err(eyre::eyre!(
+                    "gimbal startup on {} did not finish within {INIT_TIMEOUT:?}",
+                    cfg.port_path
+                ));
+            }
+            Ok(res) => {
+                res.with_context(|| format!("initializing gimbal controller on {}", cfg.port_path))?
+            }
+        };
         let (stream_warmed_up_tx, stream_warmed_up_rx) = tokio::sync::watch::channel(false);
 
         // Run the main gimbal loops forever. This future only completes when

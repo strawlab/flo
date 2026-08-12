@@ -45,6 +45,26 @@ impl StartupQueries {
             && self.params_ext.is_some()
             && self.params_3.is_some()
     }
+
+    /// Which queries the board answered. Used to describe a failed startup: a
+    /// board that answered nothing has a different problem than one that
+    /// answered three of four.
+    pub fn answered_keys(&self) -> Vec<&'static str> {
+        let mut answered = Vec::new();
+        if self.board_info.is_some() {
+            answered.push(KEY_BOARD_INFO);
+        }
+        if self.board_info_3.is_some() {
+            answered.push(KEY_BOARD_INFO_3);
+        }
+        if self.params_ext.is_some() {
+            answered.push(KEY_PARAMS_EXT);
+        }
+        if self.params_3.is_some() {
+            answered.push(KEY_PARAMS_3);
+        }
+        answered
+    }
 }
 
 fn triple<T: Copy>(rpy: &RollPitchYaw<T>) -> AxisTriple<T> {
