@@ -775,14 +775,6 @@ impl App {
         }
     }
 
-    /// The FPV webcam's entry in [`Self::camera_links`], or `None` when camshow
-    /// is not configured and there is therefore no webcam to preview.
-    ///
-    /// Opened in a new tab, unlike the tracking cameras: the preview costs work
-    /// in camshow and in flo for as long as the page is up, so it is something
-    /// the operator opens beside the main UI and closes again, not somewhere
-    /// they navigate to. A plain link rather than a scripted popup, so popup
-    /// blockers leave it alone and the window goes where they want it.
     /// What the running program was built from, one line per component.
     ///
     /// Sent by the server rather than compiled in, because the interesting
@@ -811,6 +803,13 @@ impl App {
         }
     }
 
+    /// The FPV webcam's entry in [`Self::camera_links`], or `None` when camshow
+    /// is not configured and there is therefore no webcam to preview.
+    ///
+    /// The preview costs work in camshow and in flo for as long as the page is
+    /// up, so it is something the operator opens beside the main UI and closes
+    /// again. A plain link rather than a scripted popup, so popup blockers
+    /// leave it alone and the window goes where they want it.
     fn webcam_preview_link(&self) -> Option<Html> {
         let configured = self
             .cfg
@@ -1054,6 +1053,11 @@ impl App {
     /// something the operator should have to think about. From their side it is
     /// one more camera to open, so it is one more entry in this list rather
     /// than a button styled differently from its neighbours.
+    ///
+    /// Every one of them opens in a new tab. Navigating away in this one would
+    /// tear down the event stream and this UI with it — possibly mid-flight —
+    /// and a camera is something the operator looks at *beside* the controls,
+    /// not instead of them.
     fn camera_links(&self) -> Html {
         fn role_str(role: &StrandCamRole) -> &'static str {
             match role {
@@ -1072,7 +1076,11 @@ impl App {
                 { for self.strand_cameras.iter().map(|camera| {
                     html! {
                         <li key={camera.name.clone()}>
-                            <a href={camera.proxy_prefix.clone()}>{&camera.name}</a> {role_str(&camera.role)}
+                            <a
+                                href={camera.proxy_prefix.clone()}
+                                target="_blank"
+                                rel="noopener"
+                            >{&camera.name}</a> {role_str(&camera.role)}
                         </li>
                     }
                 }) }
