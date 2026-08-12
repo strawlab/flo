@@ -47,6 +47,26 @@ pub const WEBCAM_PREVIEW_IMAGE_PATH: &str = "webcam-preview.jpg";
 /// This matches Braid's camera proxy API.
 pub const CAM_PROXY_PATH: &str = "camera";
 
+/// The document title for one of FLO's pages: `FLO airborne2 webcam`.
+///
+/// `hostname` is the machine FLO is running on, as it reports itself (see
+/// [`BuiEventData::Hostname`]), and `page` names the page when it is not the
+/// main UI. Both are optional, and a missing one is left out rather than
+/// standing in for itself, so nothing ever reads `FLO  webcam`.
+///
+/// Lives here because the titles are set from two places — the web UI sets its
+/// own from the browser, while pages served as plain HTML are titled by the
+/// server — and a row of browser tabs is only readable if they agree on the
+/// shape.
+pub fn page_title(hostname: Option<&str>, page: Option<&str>) -> String {
+    let mut title = "FLO".to_string();
+    for part in [hostname, page].into_iter().flatten() {
+        title.push(' ');
+        title.push_str(part);
+    }
+    title
+}
+
 /// Default bitrate offered when the operator adds an H.264/RTP stream.
 pub const DEFAULT_RTP_BITRATE_KBPS: u32 = 4000;
 
@@ -1819,6 +1839,24 @@ fn deserialize_float_null_as_nan<'de, D: Deserializer<'de>>(des: D) -> Result<Fl
 
 // -----------------------------------------------------------------------------
 // tests
+
+#[test]
+fn a_page_title_names_the_machine_and_then_the_page() {
+    assert_eq!(page_title(Some("airborne2"), None), "FLO airborne2");
+    assert_eq!(
+        page_title(Some("airborne2"), Some("webcam")),
+        "FLO airborne2 webcam"
+    );
+}
+
+#[test]
+fn a_page_title_leaves_out_what_it_does_not_know() {
+    // No host name yet, or a machine that reports none: the title is what the
+    // served HTML already carries, so connecting does not make it flicker.
+    assert_eq!(page_title(None, None), "FLO");
+    // And no double space where the name would have gone.
+    assert_eq!(page_title(None, Some("webcam")), "FLO webcam");
+}
 
 #[test]
 fn strand_cam_proxy_info_uses_braid_compatible_name_encoding() {

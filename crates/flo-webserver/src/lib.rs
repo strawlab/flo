@@ -145,12 +145,13 @@ async fn events_handler(
 /// frames costs work in camshow and here, so it happens only while this page
 /// is open and polling.
 async fn webcam_preview_page_handler(
+    State(app_state): State<AppState>,
     session_key: axum_token_auth::SessionKey,
 ) -> impl IntoResponse {
     session_key.is_present();
     (
         [(http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        webcam_preview::preview_page_html(),
+        webcam_preview::preview_page_html(app_state.hostname.as_deref()),
     )
 }
 
