@@ -14,6 +14,7 @@ use mavlink::{
 };
 
 mod ntrip;
+mod param_snapshot;
 mod px4_params;
 
 /// The `mavlink` crate this was built against.
@@ -201,6 +202,10 @@ struct DroneCoordinator {
     /// When the origin was requested, so silence can be complained about. None
     /// once the request has been answered, or if none was made.
     origin_requested_at: Option<MyTimestamp>,
+    /// The flight controller's parameter set, while it is still arriving. None
+    /// before it has been asked for and once it has been stored or given up on,
+    /// which is what keeps FLO from asking twice.
+    param_snapshot: Option<param_snapshot::ParamSnapshot>,
 }
 
 /// How many times a `SET_GPS_GLOBAL_ORIGIN` that did not take hold is re-sent.
@@ -244,6 +249,7 @@ impl DroneCoordinator {
             requested_origin: mavlink_cfg.requested_gps_global_origin(),
             origin_retries_left: ORIGIN_SET_RETRIES,
             origin_requested_at: None,
+            param_snapshot: None,
         };
         {
             // This is also what makes `LocalFloStateInner::mavlink` `Some`,
@@ -365,6 +371,13 @@ impl DroneCoordinator {
             },
         );
         self_.send_to_autopilot(data).await?;
+
+        // Read the flight controller's whole parameter set, for the recordings
+        // this session is about to make. Last, and only started here rather than
+        // waited for: the answers arrive over the following seconds through the
+        // main loop, so this costs no startup time and leaves FLO responsive to
+        // RC and position while the link is busy with them.
+        self_.start_param_snapshot().await?;
 
         Ok(self_)
     }
@@ -586,19 +599,11 @@ impl DroneCoordinator {
                 }
             }
             MavMessage::PARAM_VALUE(data) => {
-                let valid = if let Some(idx) = data.param_id.iter().position(|x| x == &0x00) {
-                    &data.param_id[..idx]
-                } else {
-                    &data.param_id[..]
-                };
-                match std::str::from_utf8(valid) {
-                    core::result::Result::Ok(param_id_str) => {
-                        tracing::debug!("param_id: {param_id_str}");
-                    }
-                    Err(_) => {
-                        tracing::debug!("ignoring invalid param_id: {:?}", data.param_id);
-                    }
-                }
+                // Not recorded to `mavlink.jsonl`: enumerating the parameter set
+                // produces some 1400 of these in a burst, and the snapshot they
+                // are assembled into is a better record of the same thing than
+                // 1400 lines of it would be.
+                self.note_param_value(&data);
             }
             MavMessage::RC_CHANNELS(data) => {
                 self.handle_rc(data).await?;
@@ -894,6 +899,7 @@ async fn main_loop(
             _ = send_heartbeat_interval.tick() => {
                 coordinator.send_heartbeat().await?;
                 coordinator.warn_if_origin_unanswered();
+                coordinator.poll_param_snapshot().await?;
             },
             r = coordinator.mavconn.rx.recv() => {
                 let (header, msg) = r?;

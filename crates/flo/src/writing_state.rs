@@ -3,7 +3,7 @@ use std::io::{Seek, Write};
 use color_eyre::eyre::Result;
 use flo_core::{
     FloControllerConfig, GimbalEncoderData, GimbalEncoderOffsets, GimbalProvenance, MomentCentroid,
-    SaveToDiskMsg, StampedBMsg, StampedJson, StampedMomentCentroid,
+    Px4Params, SaveToDiskMsg, StampedBMsg, StampedJson, StampedMomentCentroid,
 };
 use serde::{Deserialize, Serialize};
 
@@ -437,6 +437,144 @@ fn test_ntrip_rtcm_is_absent_when_nothing_arrived() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+fn test_px4_params() -> Px4Params {
+    use chrono::TimeZone as _;
+    use flo_core::Px4ParamValue;
+
+    // Fixed rather than `now()` so two calls compare equal: these tests assert a
+    // lossless round trip through the archive.
+    let retrieved_at = chrono::FixedOffset::east_opt(0)
+        .expect("valid fixed offset")
+        .with_ymd_and_hms(2026, 8, 12, 9, 30, 0)
+        .single()
+        .expect("valid datetime");
+
+    Px4Params {
+        retrieved_at: retrieved_at.into(),
+        reported_count: 2,
+        complete: true,
+        params: [
+            ("SDLOG_PROFILE".to_owned(), Px4ParamValue::Int(17)),
+            ("MPC_XY_P".to_owned(), Px4ParamValue::Real(0.95)),
+        ]
+        .into_iter()
+        .collect(),
+        missing_indices: Vec::new(),
+    }
+}
+
+/// Read every recording in the session back and return its parameter file, if
+/// it has one.
+#[cfg(test)]
+fn read_px4_params(floz_path: &camino::Utf8Path) -> Result<Option<Px4Params>> {
+    use std::io::Read as _;
+
+    let fd = std::fs::File::open(floz_path)?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(fd))?;
+    let mut saved = String::new();
+    match archive.by_name(flo_core::PX4_PARAMS_FNAME) {
+        core::result::Result::Ok(mut entry) => {
+            entry.read_to_string(&mut saved)?;
+        }
+        Err(_) => return Ok(None),
+    }
+    Ok(Some(serde_yaml::from_str(&saved)?))
+}
+
+/// Reading the flight controller's parameters takes long enough that a recording
+/// may well have started first, so a snapshot has to reach the recording that is
+/// already running -- not only the ones started after it.
+#[test]
+fn test_px4_params_reach_a_recording_already_in_progress() -> Result<()> {
+    let base_dir = tempfile::tempdir()?;
+    let output_dir = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("session.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        chrono::Local::now(),
+        output_dir.clone(),
+        false,
+    ))))?;
+    tx.send(SaveToDiskMsg::Px4Params(Box::new(test_px4_params())))?;
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+    handle.join().expect("writer thread panicked")?;
+
+    let saved =
+        read_px4_params(&output_dir.with_extension("floz"))?.expect("recording must carry them");
+    assert_eq!(saved, test_px4_params());
+
+    Ok(())
+}
+
+/// And it has to be kept for the rest of the session: it describes the flight
+/// controller, not the moment it was read.
+#[test]
+fn test_px4_params_reach_a_later_recording() -> Result<()> {
+    let base_dir = tempfile::tempdir()?;
+    let first = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("first.flo"))
+        .expect("tempdir path must be valid utf-8");
+    let second = camino::Utf8PathBuf::from_path_buf(base_dir.path().join("second.flo"))
+        .expect("tempdir path must be valid utf-8");
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let config = FloControllerConfig::default();
+    let (buffered_secs_tx, _buffered_secs_rx) = tokio::sync::watch::channel(0.0);
+    let handle = std::thread::spawn(move || {
+        writer_task_main(rx, &config, None, &test_versions(), buffered_secs_tx)
+    });
+
+    // A recording that ends before the parameters ever arrive cannot have them,
+    // and must not be given an empty file suggesting otherwise.
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        chrono::Local::now(),
+        first.clone(),
+        false,
+    ))))?;
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+
+    tx.send(SaveToDiskMsg::Px4Params(Box::new(test_px4_params())))?;
+
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(Some((
+        chrono::Local::now(),
+        second.clone(),
+        false,
+    ))))?;
+    tx.send(SaveToDiskMsg::ToggleSavingFloz(None))?;
+    tx.send(SaveToDiskMsg::Quit)?;
+    drop(tx);
+    handle.join().expect("writer thread panicked")?;
+
+    assert!(
+        read_px4_params(&first.with_extension("floz"))?.is_none(),
+        "a recording made before the parameters arrived must not claim to have them"
+    );
+    let saved =
+        read_px4_params(&second.with_extension("floz"))?.expect("recording must carry them");
+    assert_eq!(saved, test_px4_params());
+    // An int32 and a float must still be distinguishable after the round trip:
+    // MAVLink carries both in the same field and only the type says which.
+    assert_eq!(
+        saved.params["SDLOG_PROFILE"],
+        flo_core::Px4ParamValue::Int(17)
+    );
+    assert_eq!(
+        saved.params["MPC_XY_P"],
+        flo_core::Px4ParamValue::Real(0.95)
+    );
+
+    Ok(())
+}
+
 fn with_received_timestamp(
     mc: MomentCentroid,
     received_timestamp: chrono::DateTime<chrono::Local>,
@@ -481,6 +619,27 @@ impl Drop for WriteCloser {
     }
 }
 
+/// What the session has learned about the hardware it is recording from.
+///
+/// Each of these is read once, when FLO reaches the device in question, and each
+/// belongs in every recording of the session rather than in whichever one
+/// happened to be running at the time. The writer therefore keeps them: a
+/// recording already in progress gets one as soon as it lands, and every
+/// recording started afterwards gets it at creation.
+///
+/// Reading them is not instant -- the flight controller's parameter set takes
+/// the better part of a minute over a telemetry link -- so "the recording that
+/// happened to be running" is a real case, not a theoretical one.
+#[derive(Default)]
+struct SessionProvenance {
+    /// Gimbal encoder offsets, which arrive repeatedly; the latest wins.
+    encoder_offsets: Option<GimbalEncoderOffsets>,
+    /// The gimbal controller's identity and stored configuration.
+    gimbal: Option<Box<GimbalProvenance>>,
+    /// Every parameter the flight controller holds.
+    px4_params: Option<Box<Px4Params>>,
+}
+
 /// Listen to a Receiver for messages and save the data to disk.
 ///
 /// This function only exits upon error or when the Sender counterpart to the
@@ -507,8 +666,7 @@ pub(crate) fn writer_task_main(
 
     tracing::debug!("Starting floz writer task. {}:{}", file!(), line!());
 
-    let mut encoder_offsets = None;
-    let mut gimbal_provenance = None;
+    let mut session_provenance = SessionProvenance::default();
 
     // Pre-capture ("post-trigger") RAM buffer. Holds recent data messages
     // while not recording so that starting a recording also writes the
@@ -534,8 +692,7 @@ pub(crate) fn writer_task_main(
                         let mut ws = WritingState::new(
                             creation_time,
                             output_dirname,
-                            encoder_offsets.as_ref(),
-                            gimbal_provenance.as_deref(),
+                            &session_provenance,
                             config,
                             raw_config_source,
                             component_versions,
@@ -569,16 +726,19 @@ pub(crate) fn writer_task_main(
                 if let Some(ref mut ws) = writing_state.as_mut() {
                     ws.save_encoder_offsets(&offsets)?;
                 }
-                // Cache value.
-                encoder_offsets = Some(offsets);
+                session_provenance.encoder_offsets = Some(offsets);
             }
             GimbalProvenance(provenance) => {
                 if let Some(ref mut ws) = writing_state.as_mut() {
                     ws.save_gimbal_provenance(&provenance)?;
                 }
-                // Cache so recordings started later in the session still carry
-                // the controller identity read at connection time.
-                gimbal_provenance = Some(provenance);
+                session_provenance.gimbal = Some(provenance);
+            }
+            Px4Params(params) => {
+                if let Some(ref mut ws) = writing_state.as_mut() {
+                    ws.save_px4_params(&params)?;
+                }
+                session_provenance.px4_params = Some(params);
             }
             // All remaining variants carry per-event data. While recording,
             // write them straight to disk; otherwise feed the pre-capture
@@ -784,6 +944,17 @@ The archive typically contains:
   `.ulg`. GNSS post-processing tools read it directly, e.g. `convbin -r rtcm3
   ntrip.rtcm3`. Present only when FLO was configured with an NTRIP source; if
   corrections reached the flight controller by another route, they are not here.
+- `px4-params.yaml` — every parameter the flight controller held, read once when
+  FLO connected to it and stored in each recording of that session. This is what
+  the aircraft was tuned to, how its sensors were calibrated and what it was
+  logging, none of which the rest of a `.floz` records. Values are typed as the
+  flight controller reported them, so an integer parameter reads `17` and a float
+  reads `0.95`. `complete: false` means the flight controller stopped part way
+  through enumerating them, and `missing_indices` says which are absent.
+  Parameters that differ from their firmware default — what `param show -c`
+  prints on the flight controller — are not marked as such: PX4 knows its
+  defaults but never transmits them, so that comparison has to be made offline
+  against the firmware's parameter metadata.
 
 Not every file is present in every recording; the exact set depends on the
 hardware and configuration used.
@@ -797,8 +968,7 @@ impl WritingState {
     fn new(
         creation_time_local: chrono::DateTime<chrono::Local>,
         output_dirname: camino::Utf8PathBuf,
-        encoder_offsets: Option<&GimbalEncoderOffsets>,
-        gimbal_provenance: Option<&GimbalProvenance>,
+        session_provenance: &SessionProvenance,
         config: &FloControllerConfig,
         raw_config_source: Option<&str>,
         component_versions: &[flo_core::ComponentVersion],
@@ -903,12 +1073,16 @@ impl WritingState {
             extension_wtrs: std::collections::BTreeMap::new(),
         };
 
-        if let Some(encoder_offsets) = encoder_offsets {
+        if let Some(encoder_offsets) = &session_provenance.encoder_offsets {
             result.save_encoder_offsets(encoder_offsets)?;
         }
 
-        if let Some(gimbal_provenance) = gimbal_provenance {
+        if let Some(gimbal_provenance) = &session_provenance.gimbal {
             result.save_gimbal_provenance(gimbal_provenance)?;
+        }
+
+        if let Some(px4_params) = &session_provenance.px4_params {
+            result.save_px4_params(px4_params)?;
         }
 
         Ok(result)
@@ -918,8 +1092,8 @@ impl WritingState {
     ///
     /// Used both for live messages while recording and for replaying the
     /// pre-capture buffer. Control messages (`Quit`, `ToggleSavingFloz`,
-    /// `SetPreCaptureSeconds`, `GimbalEncoderOffsets`, `GimbalProvenance`) are handled by the
-    /// caller and never reach here.
+    /// `SetPreCaptureSeconds`, `GimbalEncoderOffsets`, `GimbalProvenance`,
+    /// `Px4Params`) are handled by the caller and never reach here.
     fn save_data_msg(&mut self, msg: SaveToDiskMsg) -> Result<()> {
         use SaveToDiskMsg::*;
         match msg {
@@ -971,6 +1145,19 @@ impl WritingState {
     fn save_gimbal_provenance(&mut self, provenance: &GimbalProvenance) -> Result<()> {
         let path = self.output_dirname.join(flo_core::GIMBAL_PROVENANCE_FNAME);
         let buf = serde_yaml::to_string(provenance)?;
+        let mut fd = std::fs::File::create(path)?;
+        fd.write_all(buf.as_bytes())?;
+        Ok(())
+    }
+
+    /// Write the flight controller's parameters.
+    ///
+    /// Written once per recording rather than appended, and overwritten if a
+    /// snapshot lands after the recording started: it is a property of the
+    /// connection, not a time series.
+    fn save_px4_params(&mut self, params: &Px4Params) -> Result<()> {
+        let path = self.output_dirname.join(flo_core::PX4_PARAMS_FNAME);
+        let buf = serde_yaml::to_string(params)?;
         let mut fd = std::fs::File::create(path)?;
         fd.write_all(buf.as_bytes())?;
         Ok(())

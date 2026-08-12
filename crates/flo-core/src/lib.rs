@@ -199,6 +199,13 @@ pub const BROADWAY_FNAME: &str = "broadway.jsonl";
 /// The flight controller's own log holds what the *rover* measured; this is the
 /// base station half, which post-processing needs and which nothing else keeps.
 pub const NTRIP_RTCM_FNAME: &str = "ntrip.rtcm3";
+/// Every parameter the flight controller holds, read once per connection.
+///
+/// See [`Px4Params`]. The flight controller's tuning, sensor calibration and
+/// logging settings decide what a recording *is*, and none of it is otherwise
+/// recoverable from the recording -- the flight log has its own copy, but only
+/// if the flight controller was logging, and only for the span it logged.
+pub const PX4_PARAMS_FNAME: &str = "px4-params.yaml";
 
 pub use pwm_motor_types::{
     DATATYPES_VERSION, FloatType, PwmDuration, PwmSerial, PwmState, VERSION_RESPONSE_JSON_NEWLINE,
@@ -1552,6 +1559,12 @@ pub enum SaveToDiskMsg {
     GimbalEncoderOffsets(GimbalEncoderOffsets),
     /// Gimbal controller identity and stored configuration, read at startup.
     GimbalProvenance(Box<GimbalProvenance>),
+    /// Every parameter the flight controller holds, read once per connection.
+    ///
+    /// Like [`Self::GimbalProvenance`], this is a property of the connection
+    /// rather than a time series: the writer keeps it and writes it into every
+    /// recording of the session, including ones started before it arrived.
+    Px4Params(Box<Px4Params>),
     /// Gimbal encoder data
     GimbalEncoderData(GimbalEncoderData),
     /// Catch-all for (time)stamped JSON data from MAVLink
@@ -1696,6 +1709,62 @@ pub struct GimbalProvenance {
     /// Queries that went unanswered. Recorded rather than omitted: a board that
     /// does not support a query is a fact about the board.
     pub unanswered: Vec<String>,
+}
+
+/// One parameter's value, as the flight controller reported its type.
+///
+/// MAVLink carries every value in a single `float` field and PX4 does not
+/// convert: an integer parameter travels as the *bit pattern* of the integer,
+/// and only `param_type` says which reading is the right one. Keeping the two
+/// apart here means the recorded file says `1` for an int32 and `1.0` for a
+/// float, so a reader need not guess either.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy)]
+#[serde(untagged)]
+pub enum Px4ParamValue {
+    Int(i32),
+    Real(f32),
+}
+
+/// Every parameter the flight controller holds, read once per connection and
+/// stored in each recording made afterwards.
+///
+/// This is the flight controller's half of a recording's provenance: what it was
+/// tuned to, how its sensors were calibrated, what it was logging. A later
+/// analysis can compare consecutive recordings and see that something was
+/// changed between them, rather than hoping someone wrote it down.
+///
+/// # Why every parameter, and not only the changed ones
+///
+/// `param show -c` in the MAVLink shell lists only parameters that differ from
+/// their firmware default, which is much the shorter list and the one a person
+/// wants to read. It is not a list FLO can ask for: PX4 computes it on board
+/// against defaults compiled into the firmware, and the MAVLink parameter
+/// protocol transmits values only -- never defaults, and no "is default" flag.
+/// Recovering it would mean fetching the firmware's parameter metadata, which
+/// PX4 offers over MAVLink FTP or an HTTP URL, neither reliably available to an
+/// aircraft in a field.
+///
+/// So FLO records everything, which is a superset: given the firmware's
+/// parameter metadata, the changed-only view can be computed offline from this
+/// file at any later date, whereas anything not recorded now is gone.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Px4Params {
+    /// When the read finished.
+    pub retrieved_at: chrono::DateTime<chrono::Local>,
+    /// How many parameters the flight controller said it had, from the
+    /// `param_count` every `PARAM_VALUE` carries.
+    pub reported_count: u16,
+    /// Whether every one of them arrived. A snapshot is stored either way: a
+    /// partial parameter set is worth more than none, provided nothing mistakes
+    /// it for a complete one.
+    pub complete: bool,
+    /// The parameters, by name.
+    pub params: std::collections::BTreeMap<String, Px4ParamValue>,
+    /// Indices the flight controller never sent, when `complete` is false.
+    ///
+    /// Indices rather than names because a parameter that never arrived is one
+    /// whose name FLO never learned. Empty when complete.
+    pub missing_indices: Vec<u16>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]

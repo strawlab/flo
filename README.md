@@ -348,6 +348,49 @@ single reboot. `reboot_to_apply: false` on *either* block suppresses that reboot
 for both, since turning it off is a statement about the link rather than about
 one parameter.
 
+## The flight controller's parameters in every recording
+
+What the aircraft was tuned to, how its sensors were calibrated and what it was
+logging decide what a recording *is*, and nothing else in a `.floz` records any
+of it. So FLO reads the flight controller's entire parameter set once, when it
+connects, and writes it into every recording of that session as
+`px4-params.yaml`:
+
+```yaml
+retrieved_at: 2026-08-12T09:30:00+02:00
+reported_count: 1387
+complete: true
+params:
+  MPC_XY_P: 0.95
+  SDLOG_PROFILE: 17
+  ...
+missing_indices: []
+```
+
+Values are typed as the flight controller reported them — an integer parameter
+reads `17`, a float reads `0.95` — which matters because MAVLink carries both in
+the same 32-bit field and only the reported type says which reading is right.
+
+This needs no configuration and happens whenever a flight controller is
+configured at all. It costs one `PARAM_REQUEST_LIST` and some 1400 replies,
+which over a 57600-baud telemetry link takes the better part of a minute, so the
+read runs *alongside* normal operation rather than delaying startup: FLO stays
+responsive to RC and position throughout. A recording started before the answers
+land gets the file as soon as they do.
+
+A flight controller that stops part way through is chased for the parameters it
+skipped, three rounds of it, and what arrived is stored either way with
+`complete: false` and the indices that never came. Indices rather than names,
+because the name of a parameter that never arrived was never learned.
+
+One thing this is *not*: the shorter list of parameters that differ from their
+firmware default, which `param show -c` prints in the MAVLink shell. That list
+cannot be asked for — PX4 computes it on board against defaults compiled into
+the firmware, and the MAVLink parameter protocol transmits values only, never
+defaults. Recording everything is a superset: given the firmware's parameter
+metadata, the changed-only view can be computed from this file at any later
+date, whereas anything not recorded now is gone.
+
 ## Post-trigger ("pre-capture") recording
 
 FLO can hold recent data in RAM so that a recording started *after* something
