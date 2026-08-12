@@ -272,6 +272,10 @@ pub struct MavlinkState {
     /// MAVLink's unknown sentinel or has not reported GNSS state yet.
     #[serde(default)]
     pub satellites_visible: Option<u8>,
+    /// NTRIP correction-stream throughput averaged over the preceding five
+    /// seconds. `None` means no NTRIP source is configured.
+    #[serde(default)]
+    pub ntrip_kbps: Option<FloatType>,
     /// `HEARTBEAT.custom_mode`, kept raw. See [`flight_mode_label`].
     pub custom_mode: Option<u32>,
 }

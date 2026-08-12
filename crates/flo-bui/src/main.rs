@@ -1388,14 +1388,20 @@ impl App {
         };
         let pan_deg = format!("{:.1}°", state.cached_motors.pan.degrees());
         let tilt_deg = format!("{:.1}°", state.cached_motors.tilt.degrees());
+        let ntrip = state
+            .mavlink
+            .as_ref()
+            .and_then(|mavlink| mavlink.ntrip_kbps)
+            .map_or_else(|| NO_DATA.to_string(), |kbps| format!("{kbps:.2} kBps"));
         html! {
-            <div class="qqgrid">
+            <div class="qqgrid info-grid">
                 { qqblock("Mode", state.mode.to_string()) }
                 { qqblock("Current Cam Data?", state.cam_stale.as_msg().to_string()) }
                 { qqblock("Distance", distance) }
                 { qqblock("Disparity", disparity) }
                 { qqblock("Pan", pan_deg) }
                 { qqblock("Tilt", tilt_deg) }
+                { qqblock("NTRIP?", ntrip) }
             </div>
         }
     }

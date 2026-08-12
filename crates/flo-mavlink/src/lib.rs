@@ -871,6 +871,9 @@ async fn main_loop(
     // NTRIP records the corrections it relays, so it needs the recording sink
     // too. Cloned before the coordinator takes ownership of the original.
     let ntrip_floz_logger = floz_logger.clone();
+    let ntrip_configured = mavlink_cfg.ntrip_url.is_some();
+    let (ntrip_rate_tx, mut ntrip_rate_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut ntrip_rate = ntrip::RollingByteRate::default();
 
     let mut coordinator = DroneCoordinator::new(
         mavlink_cfg,
@@ -888,7 +891,14 @@ async fn main_loop(
         if let Some(ntrip_url) = &mavlink_cfg.ntrip_url {
             let ntrip_url = ntrip_url.clone();
             let ntrip_join_handle = handle.spawn(async move {
-                ntrip::ntrip_loop(ntrip_url, mavconn_tx, ntrip_floz_logger, header).await
+                ntrip::ntrip_loop(
+                    ntrip_url,
+                    mavconn_tx,
+                    ntrip_floz_logger,
+                    ntrip_rate_tx,
+                    header,
+                )
+                .await
             });
             Box::pin(ntrip_join_handle)
         } else {
@@ -899,13 +909,33 @@ async fn main_loop(
     let mut send_heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     send_heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    if ntrip_configured {
+        coordinator
+            .local_flo_state
+            .write()
+            .unwrap()
+            .mavlink_mut()
+            .ntrip_kbps = Some(0.0);
+    }
+
     loop {
         tokio::select! {
             _ = send_heartbeat_interval.tick() => {
+                if ntrip_configured {
+                    coordinator
+                        .local_flo_state
+                        .write()
+                        .unwrap()
+                        .mavlink_mut()
+                        .ntrip_kbps = Some(ntrip_rate.kbps(tokio::time::Instant::now()));
+                }
                 coordinator.send_heartbeat().await?;
                 coordinator.warn_if_origin_unanswered();
                 coordinator.poll_param_snapshot().await?;
             },
+            Some(received_bytes) = ntrip_rate_rx.recv() => {
+                ntrip_rate.record(tokio::time::Instant::now(), received_bytes);
+            }
             r = coordinator.mavconn.rx.recv() => {
                 let (header, msg) = r?;
                 coordinator.handle_message_from_drone(header, msg).await?;

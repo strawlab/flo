@@ -653,6 +653,12 @@ details summary {
     .qqgrid {
         grid-template-columns: repeat(3, minmax(0, 1fr));
     }
+
+    // The primary status panel has enough short values to use the width more
+    // efficiently. Other readout panels retain their three-column layout.
+    .qqgrid.info-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
 }
 
 .qqblock {

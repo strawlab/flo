@@ -1,7 +1,40 @@
+use std::{collections::VecDeque, time::Duration};
+
 use eyre::{Context, Result};
 use mavlink::MavHeader;
 
 use flo_core::SaveToDiskMsg;
+
+const RATE_WINDOW: Duration = Duration::from_secs(5);
+const BYTES_PER_KILOBYTE: f64 = 1_000.0;
+
+#[derive(Default)]
+pub(crate) struct RollingByteRate {
+    samples: VecDeque<(tokio::time::Instant, usize)>,
+    total_bytes: usize,
+}
+
+impl RollingByteRate {
+    pub(crate) fn record(&mut self, now: tokio::time::Instant, bytes: usize) {
+        self.samples.push_back((now, bytes));
+        self.total_bytes += bytes;
+        self.expire(now);
+    }
+
+    pub(crate) fn kbps(&mut self, now: tokio::time::Instant) -> f64 {
+        self.expire(now);
+        self.total_bytes as f64 / RATE_WINDOW.as_secs_f64() / BYTES_PER_KILOBYTE
+    }
+
+    fn expire(&mut self, now: tokio::time::Instant) {
+        while self.samples.front().is_some_and(|(received_at, _)| {
+            now.saturating_duration_since(*received_at) >= RATE_WINDOW
+        }) {
+            let (_, bytes) = self.samples.pop_front().unwrap();
+            self.total_bytes -= bytes;
+        }
+    }
+}
 
 /// A zero-sized type which is never created to indicate that Ok(_) never
 /// happens.
@@ -90,6 +123,7 @@ pub(crate) async fn ntrip_loop(
     ntrip_url: String,
     mavconn_tx: tokio::sync::mpsc::Sender<(MavHeader, mavlink::ardupilotmega::MavMessage)>,
     floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
+    rate_tx: tokio::sync::mpsc::UnboundedSender<usize>,
     header: MavHeader,
 ) -> Result<NeverOk> {
     let fixed_url =
@@ -105,6 +139,7 @@ pub(crate) async fn ntrip_loop(
             tracing::error!("Received empty RTCM data from NTRIP server, skipping.");
             continue;
         }
+        rate_tx.send(bytes.len())?;
 
         // Record before the size check below, not after: a frame too large for
         // MAVLink never reaches the flight controller, but it is still a valid
@@ -138,5 +173,25 @@ pub(crate) async fn ntrip_loop(
         }
 
         sequence_number = sequence_number.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RATE_WINDOW, RollingByteRate};
+
+    #[test]
+    fn byte_rate_uses_only_the_preceding_five_seconds() {
+        let start = tokio::time::Instant::now();
+        let mut rate = RollingByteRate::default();
+
+        rate.record(start, 2_000);
+        assert!((rate.kbps(start) - 0.4).abs() < f64::EPSILON);
+
+        rate.record(start + RATE_WINDOW / 2, 3_000);
+        assert!((rate.kbps(start + RATE_WINDOW / 2) - 1.0).abs() < f64::EPSILON);
+
+        assert!((rate.kbps(start + RATE_WINDOW) - 0.6).abs() < f64::EPSILON);
+        assert_eq!(rate.kbps(start + RATE_WINDOW + RATE_WINDOW / 2), 0.0);
     }
 }
