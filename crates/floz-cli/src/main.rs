@@ -238,7 +238,9 @@ struct CentroidStamp {
 
 /// A matched stereo pair, by camera acquisition time.
 struct MatchedPair {
-    /// `framenumber_a - framenumber_b`.
+    /// `framenumber_a - framenumber_b`, as a signed count of triggers: the
+    /// counters are `u32` and wrap, and one camera counting below the other is
+    /// a small negative number, not one near 2^32.
     framenumber_offset: i64,
     /// Difference of the two cameras' `received_timestamp`s.
     received_skew: chrono::TimeDelta,
@@ -258,7 +260,10 @@ fn match_stereo_pairs(
         let delta = a[i].acquired - b[j].acquired;
         if delta.abs() <= window {
             pairs.push(MatchedPair {
-                framenumber_offset: i64::from(a[i].framenumber) - i64::from(b[j].framenumber),
+                framenumber_offset: flo_core::framenumber_offset(
+                    a[i].framenumber,
+                    b[j].framenumber,
+                ),
                 received_skew: a[i].received - b[j].received,
             });
             i += 1;
@@ -795,6 +800,17 @@ mod tests {
         let a = [stamp(0, 0, 1), stamp(10, 10, 2)];
         let b = [stamp(100, 100, 1), stamp(110, 110, 2)];
         assert!(match_stereo_pairs(&a, &b, window).is_empty());
+    }
+
+    #[test]
+    fn offset_of_a_camera_counting_below_the_other_is_negative() {
+        let window = chrono::TimeDelta::milliseconds(5);
+        // Camera b's counter is 40000 above a's, and a has wrapped past the end
+        // of the u32 range. The offset is -40000 triggers, not 2^32 - 40000.
+        let a = [stamp(0, 0, 5)];
+        let b = [stamp(0, 0, 5u32.wrapping_add(40000))];
+        let matched = match_stereo_pairs(&a, &b, window);
+        assert_eq!(matched[0].framenumber_offset, -40000);
     }
 
     #[test]
