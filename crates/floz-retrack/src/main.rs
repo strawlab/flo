@@ -4,20 +4,27 @@
 //! CLI tool to re-estimate target distance offline from the centroid data
 //! already saved in a `.floz` file.
 //!
-//! The live FLO controller computes distance by stereopsis: pairing
-//! simultaneous centroids from the primary and secondary cameras and applying
-//! the `stereopsis_calib` calibration. When that live pairing fails (see
-//! `floz-cli --distance` for diagnosis), the recorded `dist_obs`/`est_dist`
-//! columns are frozen or empty even though the raw centroids from both cameras
-//! are present and usable. This tool re-pairs those centroids offline and fills
-//! in the distance, writing a new `.floz` that downstream analysis can consume
-//! unchanged.
+//! The live FLO controller computes distance by stereopsis: pairing centroids
+//! the two cameras took on the same trigger and applying the `stereopsis_calib`
+//! calibration. Live, that pairing has a deadline — an observation stuck on the
+//! way to the controller is dropped rather than allowed to hold up steering —
+//! so the recorded `dist_obs`/`est_dist` columns can have gaps even though the
+//! raw centroids from both cameras are present and usable. Recordings from
+//! before the controller learned the cameras' framenumber offset reliably have
+//! far more than gaps: a controller that took its offset from a mispaired
+//! first look at the two cameras rejected everything afterwards, so the
+//! distance columns are empty or frozen for the whole recording (see `floz-cli
+//! --distance` for diagnosis).
+//!
+//! This tool re-pairs those centroids offline, with no deadline to meet, and
+//! fills in the distance, writing a new `.floz` that downstream analysis can
+//! consume unchanged.
 //!
 //! This v1 computes only the raw per-pair stereopsis distance (no Kalman
 //! smoothing) and writes it into both the `dist_obs` and `est_dist` columns of
 //! the recomputed `tracking_state` rows.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -25,8 +32,9 @@ use clap::Parser;
 use color_eyre::eyre::{Context, Result, bail, eyre};
 
 use flo_core::{
-    BMsg, FloControllerConfig, FloDetectionEvent, MomentCentroid, SaveTrackingState,
-    StampedMomentCentroid, StereopsisCalibration, TRACKING_STATE_FNAME,
+    BMsg, CamRole, FloControllerConfig, FloDetectionEvent, MomentCentroid, SaveTrackingState,
+    StampedMomentCentroid, StereoSyncParams, StereoSynchronizer, StereopsisCalibration,
+    TRACKING_STATE_FNAME,
 };
 
 use floz_writer::{FlozWriter, README_FNAME};
@@ -48,8 +56,12 @@ struct Opt {
     secondary_cam: Option<String>,
 
     /// Maximum difference (milliseconds) between the two cameras' acquisition
-    /// timestamps for centroids to be paired. Defaults to the 5 ms used by the
-    /// live controller.
+    /// timestamps for two centroids to count as the same trigger. Defaults to
+    /// the 5 ms the live controller uses at 100 fps and below.
+    ///
+    /// This only establishes and checks the framenumber offset between the
+    /// cameras; pairing itself is by framenumber. Keep it under half a frame
+    /// interval, or a neighbouring trigger can pass as a partner.
     #[arg(long, default_value_t = 5)]
     window_ms: i64,
 
@@ -150,58 +162,47 @@ fn resolve_roles(
 /// A valid centroid reduced to what pairing and distance need.
 struct Det {
     acquired: DateTime<Utc>,
-    framenumber: u32,
     moment: MomentCentroid,
 }
 
-/// Greedily pair primary and secondary detections by acquisition time within
-/// `window`, then keep only the pairs sharing the most common framenumber
-/// offset (mirroring how the controller locks one offset and rejects the rest).
-/// Returns `(primary_acquisition_time, distance_meters)` for each kept pair.
+/// Pair primary and secondary detections and compute each pair's distance,
+/// returning `(primary_acquisition_time, distance_meters)` for every pair.
+///
+/// Pairing is [`StereoSynchronizer`], the same code the live controller uses,
+/// fed the two recorded streams merged back into acquisition order. Offline
+/// there is no deadline, so this recovers distance for stretches the live
+/// controller had to let go — but it recovers them by the same rules, which is
+/// what makes the two comparable.
 fn compute_distances(
     primary: &[Det],
     secondary: &[Det],
     calib: &StereopsisCalibration,
     window: chrono::TimeDelta,
 ) -> Vec<(DateTime<Utc>, f32)> {
-    // First pass: greedy time-match, recording the framenumber offset of each
-    // candidate pair.
-    let mut candidates: Vec<(usize, usize, i64)> = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    while i < primary.len() && j < secondary.len() {
-        let delta = primary[i].acquired - secondary[j].acquired;
-        if delta.abs() <= window {
-            let offset = i64::from(primary[i].framenumber) - i64::from(secondary[j].framenumber);
-            candidates.push((i, j, offset));
-            i += 1;
-            j += 1;
-        } else if primary[i].acquired < secondary[j].acquired {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
+    let mut sync = StereoSynchronizer::new(StereoSyncParams {
+        window,
+        ..Default::default()
+    });
 
-    // Determine the modal framenumber offset.
-    let mut offset_counts: BTreeMap<i64, usize> = BTreeMap::new();
-    for (_, _, off) in &candidates {
-        *offset_counts.entry(*off).or_default() += 1;
-    }
-    let modal_offset = offset_counts
+    // Merge the two streams the way the controller would have received them:
+    // in acquisition order, which is the order the trigger fired.
+    let mut merged: Vec<(CamRole, &Det)> = primary
         .iter()
-        .max_by_key(|(_, n)| **n)
-        .map(|(o, _)| *o);
+        .map(|d| (CamRole::Primary, d))
+        .chain(secondary.iter().map(|d| (CamRole::Secondary, d)))
+        .collect();
+    merged.sort_by_key(|(_, d)| d.acquired);
 
     let mut out = Vec::new();
-    for (pi, si, off) in candidates {
-        if Some(off) != modal_offset {
+    for (role, det) in merged {
+        let Some(pair) = sync.push(role, det.moment.clone()) else {
             continue;
-        }
-        let state =
-            calib.centroids_to_distance((primary[pi].moment.clone(), secondary[si].moment.clone()));
+        };
+        let acquired = pair.primary.timestamp;
+        let state = calib.centroids_to_distance((pair.primary, pair.secondary));
         let dist = state.as_radial_distance().0 as f32;
         if dist.is_finite() && dist > 0.0 {
-            out.push((primary[pi].acquired, dist));
+            out.push((acquired, dist));
         }
     }
     out
@@ -328,7 +329,6 @@ fn main() -> Result<()> {
             .filter(|c| c.mu00 != 0.0 && c.cam_name == cam)
             .map(|c| Det {
                 acquired: c.timestamp,
-                framenumber: c.framenumber,
                 moment: to_moment_centroid(c),
             })
             .collect();
@@ -386,16 +386,13 @@ mod tests {
         let acquired = DateTime::<Utc>::UNIX_EPOCH + chrono::TimeDelta::milliseconds(acq_ms);
         let moment = MomentCentroid {
             framenumber,
+            timestamp: acquired,
             // x() = mu10/mu00; vary x with framenumber so pairs differ.
             mu00: 1.0,
             mu10: f64::from(framenumber),
             ..Default::default()
         };
-        Det {
-            acquired,
-            framenumber,
-            moment,
-        }
+        Det { acquired, moment }
     }
 
     fn test_calib() -> StereopsisCalibration {
@@ -409,31 +406,64 @@ mod tests {
         }
     }
 
+    /// A run of triggers 10 ms apart, the two cameras' counters `offset` apart,
+    /// starting at trigger index `from`.
+    fn run(from: i64, count: i64, offset: i64) -> (Vec<Det>, Vec<Det>) {
+        let primary: Vec<Det> = (from..from + count)
+            .map(|i| det(i * 10, i as u32 + 10))
+            .collect();
+        let secondary: Vec<Det> = (from..from + count)
+            .map(|i| det(i * 10, (i + offset) as u32 + 10))
+            .collect();
+        (primary, secondary)
+    }
+
     #[test]
-    fn pairs_within_window_and_produces_distance() {
+    fn pairs_and_produces_distance() {
         let calib = test_calib();
         let window = chrono::TimeDelta::milliseconds(5);
-        // Two aligned pairs (consistent framenumber offset of -100), one
-        // primary detection with no partner in range.
-        let primary = vec![det(0, 10), det(50, 11), det(1000, 12)];
-        let secondary = vec![det(1, 110), det(52, 111)];
+        let (primary, secondary) = run(0, 8, 100);
         let out = compute_distances(&primary, &secondary, &calib, window);
-        assert_eq!(out.len(), 2);
+        assert!(!out.is_empty());
         for (_, d) in &out {
             assert!(d.is_finite() && *d > 0.0);
         }
     }
 
     #[test]
-    fn rejects_off_modal_framenumber_offset() {
+    fn a_gap_in_one_camera_does_not_end_the_pairing() {
         let calib = test_calib();
         let window = chrono::TimeDelta::milliseconds(5);
-        // Three time-aligned pairs: offsets -100, -100, and -7 (the outlier,
-        // e.g. a dropped frame). Only the two modal-offset pairs are kept.
-        let primary = vec![det(0, 10), det(50, 11), det(100, 12)];
-        let secondary = vec![det(1, 110), det(52, 111), det(101, 19)];
+        // The secondary camera detects nothing for a stretch in the middle —
+        // the subject out of its view, or frames lost. Triggers on either side
+        // still have both halves and still have to yield distances.
+        let (primary, mut secondary) = run(0, 40, 100);
+        secondary.retain(|d| !(150..250).contains(&d.acquired.timestamp_millis()));
+
         let out = compute_distances(&primary, &secondary, &calib, window);
-        assert_eq!(out.len(), 2);
+        let before = out
+            .iter()
+            .filter(|(t, _)| t.timestamp_millis() < 150)
+            .count();
+        let after = out
+            .iter()
+            .filter(|(t, _)| t.timestamp_millis() >= 250)
+            .count();
+        assert!(before > 0, "no distances before the gap");
+        assert!(after > 0, "no distances after the gap");
+        // Nothing inside the gap was invented by pairing across triggers.
+        assert_eq!(out.len(), before + after);
+    }
+
+    #[test]
+    fn does_not_pair_across_triggers() {
+        let calib = test_calib();
+        let window = chrono::TimeDelta::milliseconds(5);
+        // Only the primary saw even triggers and only the secondary odd ones:
+        // no two of these detections are from the same trigger.
+        let primary: Vec<Det> = (0..8).map(|i| det(i * 20, i as u32)).collect();
+        let secondary: Vec<Det> = (0..8).map(|i| det(i * 20 + 10, i as u32 + 100)).collect();
+        assert!(compute_distances(&primary, &secondary, &calib, window).is_empty());
     }
 
     #[test]

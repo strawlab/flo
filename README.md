@@ -126,6 +126,58 @@ accepts Strand Camera's `CodecSelection`; the simulated example includes its
 VAAPI `Ffmpeg` form. See [the crate README](crates/flo-app/README.md) and
 [`config-flo-strand-cam-sim.yaml`](config-flo-strand-cam-sim.yaml).
 
+## Stereo pairing
+
+Distance is the only thing the second camera contributes. Pan and tilt are
+tracked from the main camera alone, and never wait on the second one: a
+monocular deployment tracks, and so does a stereo one whose second camera
+cannot see the subject or whose data arrives too late to use. What is lost in
+those cases is the distance estimate, which resumes by itself as soon as pairs
+are available again.
+
+Distance comes from stereopsis, which needs the two tracking cameras'
+detections of the *same* trigger. The cameras are hardware triggered from one
+pulse, so a subject is seen by both at the same instant and both count every
+trigger. What they do not share is where their counters started: the two
+framenumbers for one trigger differ by an arbitrary fixed integer, of either
+sign, and nothing about it can be known before the cameras are running.
+
+FLO learns that one integer at startup, from the acquisition timestamps of
+detections close enough in time to be the same trigger, and pairs on
+framenumbers from then on. It waits for several observations to agree before
+adopting it, because it is learned once and never revised — the failure worth
+avoiding is adopting an offset from two detections that were not of the same
+trigger, which costs the whole session rather than a frame.
+
+After that, a pair is complete the moment its second half arrives; nothing
+waits for a control tick. Each camera's last few frames are kept while waiting
+for a partner, which is what lets an observation that was stuck on the way —
+rather than lost — still be paired. Where several pairs are available the
+newest wins, data older than a trigger already paired is dropped rather than
+used out of order, and a distance older than ten frame intervals is dropped
+rather than fed to the filter as if it described the present. Everything
+dropped is still written to the `.floz`.
+
+Pairing reports itself once a second rather than once a frame:
+
+- `stereo pairing: cameras synchronized, framenumber offset N` — the offset was
+  learned. `N` means nothing on its own; only that it holds.
+- `stereo pairing: both cameras detected the subject ... but none of it paired`
+  — the one fault worth a warning here. Both cameras are seeing the subject and
+  no distance is coming out of it.
+- `stereo pairing: N framenumber matches ... were not of the same trigger` —
+  the learned offset does not describe these cameras. Since the offset cannot
+  change while both cameras run, suspect a camera that restarted.
+- At `RUST_LOG=flo=debug`, one line per second: the pair count and the offset
+  in use, or, when only the main camera saw the subject, that tracking is
+  carrying on without a distance estimate. That case is ordinary and is not
+  warned about.
+
+For a recording, `floz-cli --distance <file.floz>` reports how much of it could
+have been paired and why it was not, and `floz-retrack` recomputes the distance
+offline — with no deadline, so it also recovers stretches the live controller
+had to let go.
+
 ## Which machine am I looking at?
 
 The heading and the browser tab both read `FLO <hostname>` — for example `FLO
@@ -289,6 +341,20 @@ its synthetic centroids to the same cameras, so `--primary-cam` and
 stereo distance tracking is exercised. For a recording, replace the source
 portion with `replay recording.floz`. Useful source options include
 `--distance`, `--distance-amplitude`, `--rate`, `--duration`, and `--loop`.
+
+`synth` sends identical framenumbers and timestamps by default, from both
+cameras, immediately. Deployed cameras do none of that (see [Stereo
+pairing](#stereo-pairing)), and these options reproduce what they do instead,
+so the pairing can be exercised without hardware:
+
+```
+synth --config config-sim-stereo.yaml \
+  --secondary-frame-offset 40000 \   # the counters started far apart
+  --secondary-drop-every 50 \        # nothing detected in the secondary
+  --primary-drop-every 130 \         # nor, sometimes, in the primary
+  --secondary-lag-frames 2 \         # secondary data stuck, not lost
+  --secondary-skew-ms 1.5            # host stamps the two 1.5 ms apart
+```
 
 ## `camshow` binary
 

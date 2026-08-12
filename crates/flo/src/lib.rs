@@ -44,11 +44,11 @@ use tokio_serial::SerialPortBuilderExt;
 use tracing::{self as log};
 
 use flo_core::{
-    Angle, Broadway, CamStaleBitmask, CommandSource, DeviceId, DeviceMode, DeviceState,
+    Angle, Broadway, CamRole, CamStaleBitmask, CommandSource, DeviceId, DeviceMode, DeviceState,
     DisplaySource, FloCommand, FloControllerConfig, FloEvent, FloatType, FocusMotorType,
     GimbalConfig, LocalFloState, ModeChangeReason, MomentCentroid, MotorPositionResult, MotorType,
     MotorValueCache, OsdState, PwmSerial, RadialDistance, SaveToDiskMsg, StampedBMsg,
-    StrandCamRole, drone_structs::DroneEvent,
+    StereoSyncParams, StereoSynchronizer, StrandCamRole, drone_structs::DroneEvent,
 };
 use tracking::{centroid_to_sensor_angles, compute_motor_output, kalman_step};
 
@@ -279,15 +279,36 @@ struct FloCoordinator<'a> {
     tracking_state: flo_core::TrackingState,
     /// The most recent centroid data from the primary tracking camera.
     latest_centroid: Option<MomentCentroid>,
-    /// The most recent centroid data from both cameras.
-    latest_centroid_stereo: (Option<MomentCentroid>, Option<MomentCentroid>),
+    /// Pairs the two cameras' detections by trigger, when there are two
+    /// cameras. See [`flo_core::stereo_sync`].
+    ///
+    /// `None` in a monocular deployment. Distance is the only thing the second
+    /// camera contributes, so its absence — configured away, not detecting, or
+    /// not delivering — costs the distance estimate and nothing else: pan and
+    /// tilt are tracked from the main camera, which never waits on any of this.
+    stereo_sync: Option<StereoSynchronizer>,
+    /// Distance from the newest stereo pair, with the acquisition time it was
+    /// measured at, waiting for the next control step to consume it.
+    pending_stereopsis: Option<(chrono::DateTime<chrono::Utc>, flo_core::StereopsisState)>,
+    /// How old a stereo distance may be when the control step picks it up.
+    /// Older measurements are dropped rather than fed to the filter as if they
+    /// described the present.
+    stereopsis_max_age: chrono::TimeDelta,
     /// A timestamp when last primary camera data arrived.
     stamp_cam_primary: Option<std::time::Instant>,
     /// A timestamp when last secondary camera data arrived.
     stamp_cam_secondary: Option<std::time::Instant>,
     last_motor_data: Option<MotorPositionResult>,
     all_cam_names_ever_seen: std::collections::BTreeSet<String>,
-    stereo_cam_framenumber_offset: Option<i64>,
+    /// Pairing counts as of the last slow tick, so only changes are reported.
+    reported_stereo_stats: flo_core::StereoSyncStats,
+    /// Detections from each camera since the last report, which is what says
+    /// whether a second without stereo pairs means anything is wrong.
+    detections_since_report: (u64, u64),
+    /// Consecutive reports in which both cameras saw the subject and nothing
+    /// paired. Startup spends a second or two here legitimately, learning the
+    /// framenumber offset.
+    seconds_unpaired: u32,
     flo_saver_tx: mpsc::UnboundedSender<SaveToDiskMsg>,
     osd_tx: Option<watch::Sender<OsdState>>,
     my_state: flo_core::DeviceState,
@@ -347,18 +368,32 @@ impl<'a> FloCoordinator<'a> {
         let secondary_embedded = embedded
             .iter()
             .find(|camera| camera.role == StrandCamRole::Secondary);
+        // Both cameras are on the same trigger, so either one's rate describes
+        // the pairing; take whichever the configuration states.
+        let tracking_fps = main_embedded
+            .and_then(|camera| camera.expected_fps)
+            .or_else(|| secondary_embedded.and_then(|camera| camera.expected_fps));
+        // A monocular deployment has nothing to pair, and says so by having no
+        // synchronizer at all rather than one that never sees a second camera.
+        let stereo_sync = secondary_cam_name
+            .is_some()
+            .then(|| StereoSynchronizer::new(StereoSyncParams::for_fps(tracking_fps)));
         Self {
             data_dir,
             device_config,
             secondary_cam_name,
             tracking_state: Default::default(),
             latest_centroid: Default::default(),
-            latest_centroid_stereo: Default::default(),
+            stereo_sync,
+            pending_stereopsis: None,
+            stereopsis_max_age: stereopsis_max_age(tracking_fps),
             stamp_cam_primary: Default::default(),
             stamp_cam_secondary: Default::default(),
             last_motor_data: Default::default(),
             all_cam_names_ever_seen: Default::default(),
-            stereo_cam_framenumber_offset: Default::default(),
+            reported_stereo_stats: Default::default(),
+            detections_since_report: (0, 0),
+            seconds_unpaired: 0,
             flo_saver_tx,
             osd_tx,
             my_state,
@@ -440,102 +475,96 @@ impl<'a> FloCoordinator<'a> {
             is_secondary = true;
         }
 
-        if is_secondary {
+        let role = if is_secondary {
             self.stamp_cam_secondary = Some(std::time::Instant::now());
-            if centroid.mu00 != 0.0 {
-                let cs = &mut self.latest_centroid_stereo;
-                cs.1 = Some(centroid.clone());
-            }
+            CamRole::Secondary
         } else {
             self.stamp_cam_primary = Some(std::time::Instant::now());
             if centroid.mu00 != 0.0 {
-                let c = &mut self.latest_centroid;
-                *c = Some(centroid.clone());
-
-                let cs = &mut self.latest_centroid_stereo;
-                cs.0 = Some(centroid.clone());
+                self.latest_centroid = Some(centroid.clone());
             }
+            CamRole::Primary
+        };
+
+        if centroid.mu00 == 0.0 {
+            // Nothing was detected, so there is nothing to pair or to report.
+            return Ok(());
         }
 
-        if centroid.mu00 != 0.0 {
-            self.broadway
-                .flo_detections
-                .send(flo_core::FloDetectionEvent::Centroid(
-                    flo_core::CentroidEvent {
-                        centroid,
-                        is_primary: !is_secondary,
-                    },
-                ))?;
+        match role {
+            CamRole::Primary => self.detections_since_report.0 += 1,
+            CamRole::Secondary => self.detections_since_report.1 += 1,
         }
+
+        // Pair here rather than on the control tick: an observation completes
+        // its pair the moment it arrives, and waiting for a tick would only
+        // add latency to the distance estimate. Nothing above this point
+        // depends on it, so a deployment with one camera, or one whose second
+        // camera cannot see the subject, tracks exactly as it otherwise would.
+        if let Some(sync) = self.stereo_sync.as_mut()
+            && let Some(pair) = sync.push(role, centroid.clone())
+        {
+            self.on_stereo_pair(pair)?;
+        }
+
+        self.broadway
+            .flo_detections
+            .send(flo_core::FloDetectionEvent::Centroid(
+                flo_core::CentroidEvent {
+                    centroid,
+                    is_primary: !is_secondary,
+                },
+            ))?;
 
         Ok(())
+    }
+
+    /// Turn one completed stereo pair into a distance for the next control
+    /// step.
+    fn on_stereo_pair(&mut self, pair: flo_core::StereoPair) -> Result<()> {
+        self.broadway
+            .flo_detections
+            .send(flo_core::FloDetectionEvent::StereoCentroid(
+                pair.primary.clone(),
+                pair.secondary.clone(),
+            ))?;
+
+        let Some(calib) = self.device_config.stereopsis_calib.as_ref() else {
+            // Two cameras but no calibration to turn disparity into distance.
+            return Ok(());
+        };
+        let acquired = pair.primary.timestamp;
+        let stereopsis = calib.centroids_to_distance((pair.primary, pair.secondary));
+        self.pending_stereopsis = Some((acquired, stereopsis));
+        Ok(())
+    }
+
+    /// The distance from the newest stereo pair, if it is recent enough to
+    /// describe where the subject is now.
+    fn take_fresh_stereopsis(&mut self) -> Option<flo_core::StereopsisState> {
+        let (acquired, stereopsis) = self.pending_stereopsis.take()?;
+        let age = chrono::Utc::now() - acquired;
+        if age > self.stereopsis_max_age {
+            tracing::debug!(
+                "stereo pairing: discarding a distance measured {} ms ago, older than the {} ms \
+                 this control loop accepts",
+                age.num_milliseconds(),
+                self.stereopsis_max_age.num_milliseconds(),
+            );
+            return None;
+        }
+        Some(stereopsis)
     }
 
     fn on_fast_tick(&mut self, dt_secs: f64) -> Result<()> {
         let next_mode = {
             let (msg, next_mode) = {
+                let stereopsis_state = self.take_fresh_stereopsis();
                 let tracking_state = &mut self.tracking_state;
                 let latest_centroid = self.latest_centroid.take();
-                let centroids = {
-                    let lg = &mut self.latest_centroid_stereo;
-                    if let (Some(ctd0), Some(ctd1)) = (*lg).clone() {
-                        // Full stereopsis data is available, erase self.latest_centroid_stereo.
-                        *lg = (None, None);
-                        Some((ctd0, ctd1))
-                    } else {
-                        // Do not erase self.latest_centroid_stereo, as the
-                        // second centroid might still arrive a bit later.
-                        None
-                    }
-                };
-
-                let mut use_stereo = true;
-                if let Some((c1, c2)) = &centroids {
-                    // calculate offset in number of frames.
-                    let this_offset: i64 = i64::from(c2.framenumber) - i64::from(c1.framenumber);
-                    if let Some(expected_offset) = &self.stereo_cam_framenumber_offset {
-                        if *expected_offset != this_offset {
-                            tracing::warn!(
-                                "stereo camera offset: off by {}",
-                                this_offset - *expected_offset
-                            );
-                            use_stereo = false;
-                        }
-                    } else {
-                        // We do not yet have a frame offset we will accept as
-                        // valid. First, compute the time difference between the
-                        // stereo pair.
-                        let offset_millis = (c1.timestamp - c2.timestamp).num_milliseconds().abs();
-                        // Next, if the time difference is small enough, accept
-                        // this frame offset.
-                        if offset_millis < 5 {
-                            self.stereo_cam_framenumber_offset = Some(this_offset);
-                        }
-                    }
-                }
-                // Only use centroid pair for stereopsis if the frame offset is
-                // expected.
-                let stereo_centroids = if use_stereo { centroids } else { None };
-
-                if use_stereo && stereo_centroids.is_some() {
-                    self.broadway.flo_detections.send(
-                        flo_core::FloDetectionEvent::StereoCentroid(
-                            stereo_centroids.clone().unwrap().0,
-                            stereo_centroids.clone().unwrap().1,
-                        ),
-                    )?;
-                }
 
                 let centroid_timestamp = latest_centroid.as_ref().map(|x| x.timestamp);
                 let angles = centroid_to_sensor_angles(self.device_config, latest_centroid.clone());
-                let stereopsis_state = if let Some(centroids) = stereo_centroids {
-                    self.device_config
-                        .stereopsis_calib
-                        .as_ref()
-                        .map(|cal| cal.centroids_to_distance(centroids))
-                } else {
-                    None
-                };
 
                 if stereopsis_state.is_some() || self.my_state.stereopsis_state.is_none() {
                     //a hack to skip failed stereopsis detections because of centroid packets not arriving promptly, as there are many
@@ -605,6 +634,8 @@ impl<'a> FloCoordinator<'a> {
             is_stale_secondary,
         );
 
+        self.report_stereo_pairing();
+
         self.my_state.mode = self.tracking_state.mode; //my_state.mode is just a mirror of tracking_state.mode, make sure it's up to date
         // Reflect the writer's current pre-capture buffer fill.
         self.my_state.precapture_buffered_secs = *self.precapture_buffered_rx.borrow();
@@ -616,6 +647,74 @@ impl<'a> FloCoordinator<'a> {
         self.from_device_http_tx.send(self.my_state.clone())?;
         self.my_state.stereopsis_state = None; //a hack to skip failed stereopsis detections because of centroid packets not arriving promptly, as there are many
         Ok(())
+    }
+
+    /// Report once a second on how stereo pairing is doing.
+    ///
+    /// Reporting here rather than per frame is deliberate: the condition worth
+    /// knowing about is "the cameras stopped pairing", which is a property of a
+    /// second's worth of frames, and per-frame logging of it buried the signal
+    /// in thousands of lines.
+    fn report_stereo_pairing(&mut self) {
+        let (primary_detections, secondary_detections) =
+            std::mem::take(&mut self.detections_since_report);
+        let Some(sync) = self.stereo_sync.as_ref() else {
+            // Monocular deployment: nothing to pair, and nothing missing.
+            return;
+        };
+        let stats = sync.stats().clone();
+        let offset = sync.offset();
+        let previous = std::mem::replace(&mut self.reported_stereo_stats, stats.clone());
+        let paired = stats.paired - previous.paired;
+        let unpaired = stats.unpaired - previous.unpaired;
+        let late = stats.late - previous.late;
+        let rejected = stats.rejected - previous.rejected;
+
+        if rejected > 0 {
+            // Cameras on one trigger, each counting every one of it, cannot
+            // produce this: their framenumbers keep the difference they
+            // started with. Something the pairing assumes is not true.
+            tracing::warn!(
+                "stereo pairing: {rejected} framenumber matches in the last second were not of \
+                 the same trigger, by their timestamps. The learned offset {offset:?} does not \
+                 describe these cameras; has a camera restarted?"
+            );
+        }
+        if paired > 0 {
+            self.seconds_unpaired = 0;
+            tracing::debug!(
+                "stereo pairing: {paired} pairs in the last second ({unpaired} unpaired, \
+                 {late} too late to use), framenumber offset {offset:?}"
+            );
+        } else if primary_detections > 0 && secondary_detections > 0 {
+            // Both cameras saw the subject and still nothing paired. Distance
+            // estimation is down for a reason the operator cannot see anywhere
+            // else, and this is the only case here that is a fault.
+            self.seconds_unpaired += 1;
+            // Except at the very start, where a second or so of both cameras
+            // detecting is what the offset is learned from in the first place.
+            if offset.is_none() && self.seconds_unpaired <= 2 {
+                tracing::debug!(
+                    "stereo pairing: synchronizing the cameras ({primary_detections} and \
+                     {secondary_detections} detections in the last second)"
+                );
+            } else {
+                tracing::warn!(
+                    "stereo pairing: both cameras detected the subject in the last second \
+                     ({primary_detections} and {secondary_detections} detections) but none of it \
+                     paired ({unpaired} unpaired, {late} too late to use); no distance is being \
+                     estimated"
+                );
+            }
+        } else if primary_detections > 0 {
+            // Ordinary: the subject is out of the second camera's view, behind
+            // something, or too dim for it. Pan and tilt carry on regardless,
+            // and distance resumes by itself when the subject comes back.
+            tracing::debug!(
+                "stereo pairing: only the main camera saw the subject in the last second \
+                 ({primary_detections} detections); tracking continues without a distance estimate"
+            );
+        }
     }
 
     async fn handle_event(&mut self, evt: FloEvent) -> Result<()> {
@@ -1177,6 +1276,23 @@ fn is_stale(stamp: Option<&std::time::Instant>) -> bool {
         stamp.elapsed() > std::time::Duration::from_secs(1)
     } else {
         true
+    }
+}
+
+/// How old a stereo distance may be when a control step picks it up.
+///
+/// Pairing tolerates a secondary camera whose frames are stuck a few triggers
+/// behind, because a late measurement is worth more than none. There is a
+/// limit to that: past it, the subject has moved far enough that feeding the
+/// measurement to the filter as if it were current does more harm than leaving
+/// the distance to coast on the filter's own prediction. Ten frame intervals
+/// is well beyond any lag seen in practice while still ruling out data from a
+/// camera that has effectively stopped.
+fn stereopsis_max_age(fps: Option<f64>) -> chrono::TimeDelta {
+    const FALLBACK: chrono::TimeDelta = chrono::TimeDelta::milliseconds(100);
+    match fps {
+        Some(fps) if fps > 0.0 => chrono::TimeDelta::nanoseconds((10.0 / fps * 1e9) as i64),
+        _ => FALLBACK,
     }
 }
 

@@ -25,6 +25,11 @@ pub use focus::{FocusMotorConfig, FocusMotorType, TrinamicFocusConfig};
 pub mod linear_observation_model;
 pub mod motion_model;
 
+pub mod stereo_sync;
+pub use stereo_sync::{
+    CamRole, StereoPair, StereoSyncParams, StereoSyncStats, StereoSynchronizer, framenumber_offset,
+};
+
 pub mod utils;
 pub use utils::{ChangeDetector, MyTimestamp, Timestamped, elapsed, elapsed_by, now};
 
