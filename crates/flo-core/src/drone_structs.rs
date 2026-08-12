@@ -267,6 +267,11 @@ pub struct MavlinkState {
     /// [`GnssRtkMode::NoGps`]: that is the flight controller saying it has no
     /// GPS, rather than FLO not yet knowing.
     pub gnss_rtk_mode: Option<GnssRtkMode>,
+    /// Satellites used by the receiver, from the same `GPS_RAW_INT` message as
+    /// [`Self::gnss_rtk_mode`]. `None` means the flight controller reported
+    /// MAVLink's unknown sentinel or has not reported GNSS state yet.
+    #[serde(default)]
+    pub satellites_visible: Option<u8>,
     /// `HEARTBEAT.custom_mode`, kept raw. See [`flight_mode_label`].
     pub custom_mode: Option<u32>,
 }

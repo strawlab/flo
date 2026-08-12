@@ -1418,9 +1418,13 @@ impl App {
             Some(custom_mode) => flight_mode_label(custom_mode),
             None => NO_DATA.to_string(),
         };
-        let rtk = match &mavlink.gnss_rtk_mode {
-            Some(mode) => mode.label().to_string(),
-            None => NO_DATA.to_string(),
+        let gnss = match (&mavlink.gnss_rtk_mode, mavlink.satellites_visible) {
+            (Some(mode), Some(satellites)) => {
+                format!("{} · {satellites} sats", mode.label())
+            }
+            (Some(mode), None) => format!("{} · sats {}", mode.label(), NO_DATA),
+            (None, Some(satellites)) => format!("{} · {satellites} sats", NO_DATA),
+            (None, None) => NO_DATA.to_string(),
         };
         // Each triple is shown as one readout: all three numbers come from the
         // same message, so they are present or absent together, and keeping them
@@ -1452,7 +1456,7 @@ impl App {
                 <h2>{"MAVLINK"}</h2>
                 <div class="qqgrid">
                     { qqblock("Flight mode", flight_mode) }
-                    { qqblock("RTK", rtk) }
+                    { qqblock("GNSS", gnss) }
                     { qqblock("Horizontal offset", offset) }
                     { qqblock_wide("Local position (N, E, D)", position) }
                     { qqblock_wide("Attitude (yaw, pitch, roll)", attitude) }

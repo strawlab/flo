@@ -165,6 +165,10 @@ fn convert_gnss_rtk_mode(fix_type: mavlink::ardupilotmega::GpsFixType) -> GnssRt
     }
 }
 
+fn convert_satellites_visible(satellites_visible: u8) -> Option<u8> {
+    (satellites_visible != u8::MAX).then_some(satellites_visible)
+}
+
 fn is_local_position_out_of_bounds(v: &mavlink::ardupilotmega::LOCAL_POSITION_NED_DATA) -> bool {
     const MAX_LOCAL_POSITION_DIST_METERS: f32 = 10_000.0;
     (v.x * v.x + v.y * v.y + v.z * v.z)
@@ -625,11 +629,12 @@ impl DroneCoordinator {
                 save("UTM_GLOBAL_POSITION", logger, &v)?;
             }
             MavMessage::GPS_RAW_INT(v) => {
-                self.local_flo_state
-                    .write()
-                    .unwrap()
-                    .mavlink_mut()
-                    .gnss_rtk_mode = Some(convert_gnss_rtk_mode(v.fix_type));
+                {
+                    let mut state = self.local_flo_state.write().unwrap();
+                    let mavlink = state.mavlink_mut();
+                    mavlink.gnss_rtk_mode = Some(convert_gnss_rtk_mode(v.fix_type));
+                    mavlink.satellites_visible = convert_satellites_visible(v.satellites_visible);
+                }
                 save("GPS_RAW_INT", logger, &v)?;
             }
             MavMessage::LOCAL_POSITION_NED(v) => {
@@ -1004,7 +1009,16 @@ fn rc_display_source(
 mod tests {
     use flo_core::drone_structs::RcProgramState;
 
-    use super::{DisplaySource, is_local_position_out_of_bounds, rc_display_source};
+    use super::{
+        DisplaySource, convert_satellites_visible, is_local_position_out_of_bounds,
+        rc_display_source,
+    };
+
+    #[test]
+    fn mavlink_unknown_satellite_count_is_not_shown_as_255() {
+        assert_eq!(convert_satellites_visible(18), Some(18));
+        assert_eq!(convert_satellites_visible(u8::MAX), None);
+    }
 
     /// The switch is a level, so the operator flicking it either way has to
     /// change the view — and holding it still must not resend on every RC frame.
