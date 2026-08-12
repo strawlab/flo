@@ -126,14 +126,16 @@ impl WebcamPreview {
 /// wasm.
 ///
 /// `PREVIEW_IMAGE_PATH` is substituted by [`preview_page_html`] so the page and
-/// the router cannot disagree about where the image lives.
+/// the router cannot disagree about where the image lives, and `PAGE_TITLE` so
+/// this window is named for the machine it is watching, like every other FLO
+/// page.
 const PREVIEW_PAGE_TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>FLO webcam preview</title>
+<title>PAGE_TITLE</title>
 <style>
   body { margin: 0; background: #000; color: #adadad;
          font-family: system-ui, sans-serif; display: flex;
@@ -195,12 +197,31 @@ const PREVIEW_PAGE_TEMPLATE: &str = r#"<!doctype html>
 </html>
 "#;
 
-/// The preview page, with the image route filled in.
-pub(crate) fn preview_page_html() -> String {
-    PREVIEW_PAGE_TEMPLATE.replace(
-        "PREVIEW_IMAGE_PATH",
-        &format!("/{}", flo_core::WEBCAM_PREVIEW_IMAGE_PATH),
-    )
+/// The preview page, with the image route and the title filled in.
+///
+/// `hostname` is the machine FLO is running on, or `None` when it reports no
+/// name; the page is titled as the rest of the UI is, so that this window is
+/// findable in a row of tabs when several FLOs are open.
+pub(crate) fn preview_page_html(hostname: Option<&str>) -> String {
+    let title = flo_core::page_title(hostname, Some("webcam"));
+    PREVIEW_PAGE_TEMPLATE
+        .replace(
+            "PREVIEW_IMAGE_PATH",
+            &format!("/{}", flo_core::WEBCAM_PREVIEW_IMAGE_PATH),
+        )
+        .replace("PAGE_TITLE", &escape_html_text(&title))
+}
+
+/// `text`, safe to drop into HTML character data such as a `<title>`.
+///
+/// The host name is whatever the operating system hands back, so it reaches
+/// this template unexamined. A name holding `<` would otherwise end the title
+/// element early and take the rest of the page with it — an unlikely name, but
+/// a silently broken page is a poor way to find that out.
+fn escape_html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -249,8 +270,26 @@ mod tests {
     /// apply again. That failed silently — the page fetched and decoded every
     /// frame correctly and simply never showed one.
     #[test]
+    fn the_page_is_titled_for_the_machine_it_watches() {
+        assert!(
+            preview_page_html(Some("airborne2")).contains("<title>FLO airborne2 webcam</title>"),
+            "the preview window must be findable among a row of FLO tabs"
+        );
+        // A machine that reports no name still gets a title saying what the
+        // page is.
+        assert!(preview_page_html(None).contains("<title>FLO webcam</title>"));
+    }
+
+    #[test]
+    fn a_host_name_cannot_break_out_of_the_title() {
+        let page = preview_page_html(Some("<script>alert(1)</script>"));
+        assert!(!page.contains("<script>alert(1)</script>"));
+        assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
     fn the_image_is_revealed_by_whatever_hides_it() {
-        let page = preview_page_html();
+        let page = preview_page_html(None);
         assert!(
             page.contains("frame.hidden = false"),
             "the image must be revealed by the attribute that hides it"
@@ -263,7 +302,7 @@ mod tests {
 
     #[test]
     fn the_page_points_at_the_image_route() {
-        let page = preview_page_html();
+        let page = preview_page_html(None);
         assert!(
             page.contains(&format!("'/{}?t='", flo_core::WEBCAM_PREVIEW_IMAGE_PATH)),
             "the page must fetch the route the server actually serves"
