@@ -18,9 +18,16 @@
 //!
 //! Because the projection uses the controller's own calibration, the angles and
 //! stereopsis distance the controller recovers match the trajectory that was
-//! requested. Stereo pairs are sent with identical framenumbers and timestamps
-//! so the controller's pairing (constant frame offset, <5 ms timestamp skew)
-//! locks immediately.
+//! requested.
+//!
+//! The two tracking cameras are hardware triggered from one pulse, so both see
+//! every subject at the same instant and both count every trigger. What they do
+//! *not* share is where their hardware counters started, so the two
+//! framenumbers for one trigger differ by an arbitrary fixed integer.
+//! `--secondary-frame-offset` reproduces that; `--secondary-lag-frames`,
+//! `--secondary-skew-ms` and `--{primary,secondary}-drop-every` reproduce what
+//! else the controller has to cope with (see the "Stereo pairing" section of
+//! the top-level README).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -105,6 +112,46 @@ pub struct SynthArgs {
     /// config has a `stereopsis_calib`.
     #[arg(long)]
     no_stereo: bool,
+
+    /// Difference between the two cameras' hardware framenumbers at the first
+    /// trigger (`secondary - primary`). May be negative.
+    ///
+    /// Both cameras count triggers in their own hardware counter, and those
+    /// counters start wherever each camera was powered up, so a deployed pair
+    /// is essentially never at the same count.
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+    secondary_frame_offset: i32,
+
+    /// Timestamp difference between the two cameras, in milliseconds.
+    ///
+    /// The cameras are triggered by one pulse, so this is host stamping jitter
+    /// rather than a real difference in exposure time. Negative means the
+    /// secondary is stamped earlier.
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+    secondary_skew_ms: f64,
+
+    /// Withhold every Nth secondary observation.
+    ///
+    /// The trigger still fired and the camera still counted it — this is the
+    /// subject going undetected in that camera, or its frame going missing on
+    /// the way — so framenumbers are unaffected and the trigger simply has no
+    /// pair to be made from. 0 (the default) withholds nothing.
+    #[arg(long, default_value_t = 0)]
+    secondary_drop_every: u64,
+
+    /// Withhold every Nth primary observation, the mirror image of
+    /// `--secondary-drop-every`.
+    #[arg(long, default_value_t = 0)]
+    primary_drop_every: u64,
+
+    /// Deliver secondary observations this many triggers late, leaving their
+    /// framenumber and timestamp untouched.
+    ///
+    /// This models frames stuck somewhere on the way to the controller rather
+    /// than lost: the data is correct but arrives after the primary has moved
+    /// on.
+    #[arg(long, default_value_t = 0)]
+    secondary_lag_frames: u64,
 }
 
 /// Camera names to fall back on when neither the command line nor a
@@ -122,6 +169,15 @@ impl SynthArgs {
     /// Whether stereo observations will be generated for `cfg`.
     pub fn is_stereo(&self, cfg: &FloControllerConfig) -> bool {
         !self.no_stereo && cfg.stereopsis_calib.is_some()
+    }
+
+    /// Whether any of the camera-desynchronization options is in use.
+    fn is_desynchronized(&self) -> bool {
+        self.secondary_frame_offset != 0
+            || self.secondary_skew_ms != 0.0
+            || self.secondary_drop_every != 0
+            || self.primary_drop_every != 0
+            || self.secondary_lag_frames != 0
     }
 
     /// Adopt the embedded camera host's names for any not given on the command
@@ -205,13 +261,22 @@ struct Sample {
     secondary: Option<MomentCentroid>,
 }
 
+/// How one camera labels an observation: its own framenumber and its own
+/// acquisition time. The two cameras get separate stamps because free-running
+/// cameras neither expose at the same instant nor stay on the same count.
+#[derive(Clone, Copy)]
+struct Stamp {
+    framenumber: u32,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 fn project(
     opt: &SynthArgs,
     cfg: &FloControllerConfig,
     stereo: Option<&StereoInverse>,
     t: f64,
-    framenumber: u32,
-    timestamp: chrono::DateTime<chrono::Utc>,
+    primary_stamp: Stamp,
+    secondary_stamp: Stamp,
 ) -> Result<Sample> {
     let w = std::f64::consts::TAU / opt.period;
     let az = opt.azimuth_deg.to_radians() * (w * t).sin();
@@ -230,14 +295,7 @@ fn project(
     let x_main = opt.center_x as f64 + dx;
     let y_main = opt.center_y as f64 + dy;
 
-    let primary = moment_centroid(
-        opt,
-        opt.primary_cam(),
-        framenumber,
-        timestamp,
-        x_main,
-        y_main,
-    );
+    let primary = moment_centroid(opt, opt.primary_cam(), primary_stamp, x_main, y_main);
 
     let secondary = match stereo {
         Some(inv) => {
@@ -248,8 +306,7 @@ fn project(
             Some(moment_centroid(
                 opt,
                 opt.secondary_cam(),
-                framenumber,
-                timestamp,
+                secondary_stamp,
                 x_stereo,
                 y_main,
             ))
@@ -267,16 +324,15 @@ fn project(
 fn moment_centroid(
     opt: &SynthArgs,
     cam_name: &str,
-    framenumber: u32,
-    timestamp: chrono::DateTime<chrono::Utc>,
+    stamp: Stamp,
     x: f64,
     y: f64,
 ) -> MomentCentroid {
     MomentCentroid {
         schema_version: 2,
-        framenumber,
+        framenumber: stamp.framenumber,
         timestamp_source: TimestampSource::HostAcquiredTimestamp,
-        timestamp,
+        timestamp: stamp.timestamp,
         mu00: opt.mass,
         mu10: opt.mass * x,
         mu01: opt.mass * y,
@@ -330,11 +386,34 @@ pub fn run_with_sink(
         opt.duration,
     );
 
-    let mut framenumber: u32 = 0;
+    if opt.is_desynchronized() {
+        tracing::info!(
+            "Cameras desynchronized on purpose: secondary framenumber offset {}, skew {} ms, \
+             every {}th secondary and every {}th primary observation withheld, secondary \
+             delivered {} frames late (0 = none)",
+            opt.secondary_frame_offset,
+            opt.secondary_skew_ms,
+            opt.secondary_drop_every,
+            opt.primary_drop_every,
+            opt.secondary_lag_frames,
+        );
+    }
+    let secondary_skew =
+        chrono::TimeDelta::nanoseconds((opt.secondary_skew_ms * 1e6).round() as i64);
+
+    // Both cameras are on the same trigger and count every one of them, so the
+    // two counters keep whatever difference they started with, whatever happens
+    // to the observations afterwards.
+    let mut primary_framenumber: u32 = 0;
+    let mut secondary_framenumber: u32 = 0u32.wrapping_add_signed(opt.secondary_frame_offset);
+    let mut sample_index: u64 = 0;
+    // Secondary observations still in transit, oldest first.
+    let mut in_transit: std::collections::VecDeque<MomentCentroid> =
+        std::collections::VecDeque::new();
     loop {
         let wall_start = Instant::now();
-        // Base the synthetic acquisition timestamps on a single `now` per pass so
-        // a stereo pair always shares an identical timestamp.
+        // Both cameras are triggered by the same pulse, so one `now` per trigger
+        // stamps both; --secondary-skew-ms is host stamping jitter on top.
         for i in 0..n_samples {
             let t = i as f64 / opt.rate;
             let target = wall_start + dt.mul_f64(i as f64);
@@ -343,12 +422,39 @@ pub fn run_with_sink(
                 std::thread::sleep(target - now);
             }
             let timestamp = chrono::Utc::now();
-            let sample = project(opt, cfg, stereo.as_ref(), t, framenumber, timestamp)?;
-            send(sample.primary)?;
-            if let Some(secondary) = &sample.secondary {
-                send(secondary.clone())?;
+            let withholds = |every: u64| every != 0 && (sample_index + 1).is_multiple_of(every);
+            let withhold_primary = withholds(opt.primary_drop_every);
+            let withhold_secondary = withholds(opt.secondary_drop_every);
+            let sample = project(
+                opt,
+                cfg,
+                stereo.as_ref(),
+                t,
+                Stamp {
+                    framenumber: primary_framenumber,
+                    timestamp,
+                },
+                Stamp {
+                    framenumber: secondary_framenumber,
+                    timestamp: timestamp + secondary_skew,
+                },
+            )?;
+            if !withhold_primary {
+                send(sample.primary)?;
             }
-            framenumber = framenumber.wrapping_add(1);
+            primary_framenumber = primary_framenumber.wrapping_add(1);
+            if let Some(secondary) = &sample.secondary
+                && !withhold_secondary
+            {
+                in_transit.push_back(secondary.clone());
+            }
+            secondary_framenumber = secondary_framenumber.wrapping_add(1);
+            // Anything that has been in transit long enough now arrives, keeping
+            // its original framenumber and timestamp.
+            while in_transit.len() > opt.secondary_lag_frames as usize {
+                send(in_transit.pop_front().expect("length checked"))?;
+            }
+            sample_index += 1;
         }
         tracing::info!("Sent {n_samples} samples.");
         if !opt.r#loop {
@@ -365,9 +471,8 @@ pub fn run_with_sink(
 mod tests {
     use super::*;
 
-    #[test]
-    fn in_process_source_validates_before_using_a_transport() {
-        let args = SynthArgs {
+    fn args() -> SynthArgs {
+        SynthArgs {
             config: PathBuf::from("unused.yaml"),
             rate: 0.0,
             duration: 1.0,
@@ -384,9 +489,198 @@ mod tests {
             primary_cam: Some("primary".into()),
             secondary_cam: Some("secondary".into()),
             no_stereo: true,
-        };
+            secondary_frame_offset: 0,
+            secondary_skew_ms: 0.0,
+            secondary_drop_every: 0,
+            primary_drop_every: 0,
+            secondary_lag_frames: 0,
+        }
+    }
 
-        let error = run_with_sink(&args, &FloControllerConfig::default(), |_| Ok(())).unwrap_err();
+    /// A stereo config, with the calibrations `--azimuth-deg` and `--distance`
+    /// are inverted through.
+    fn stereo_config() -> FloControllerConfig {
+        FloControllerConfig {
+            centroid_to_sensor_x_angle_func: CentroidToAngleCalibration {
+                dx_gain: 0.00035,
+                dy_gain: 0.0,
+                offset: 0.0,
+            },
+            centroid_to_sensor_y_angle_func: CentroidToAngleCalibration {
+                dx_gain: 0.0,
+                dy_gain: -0.00035,
+                offset: 0.0,
+            },
+            stereopsis_calib: Some(StereopsisCalibration {
+                r1_m: 2.0,
+                x_offset_1_px: 20.0,
+                r2_m: 5.0,
+                x_offset_2_px: 10.0,
+                pixel_size_um: 3.4,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Run a short synthesis, collecting what each camera sent.
+    fn collect(opt: &SynthArgs) -> (Vec<MomentCentroid>, Vec<MomentCentroid>) {
+        let cfg = stereo_config();
+        let mut sent = Vec::new();
+        run_with_sink(opt, &cfg, |c| {
+            sent.push(c);
+            Ok(())
+        })
+        .unwrap();
+        let (primary, secondary): (Vec<_>, Vec<_>) = sent
+            .into_iter()
+            .partition(|c| c.cam_name.as_str() == opt.primary_cam());
+        (primary, secondary)
+    }
+
+    #[test]
+    fn in_process_source_validates_before_using_a_transport() {
+        let error =
+            run_with_sink(&args(), &FloControllerConfig::default(), |_| Ok(())).unwrap_err();
         assert!(error.to_string().contains("--rate must be positive"));
+    }
+
+    #[test]
+    fn synchronized_by_default() {
+        let opt = SynthArgs {
+            rate: 1000.0,
+            duration: 0.005,
+            no_stereo: false,
+            ..args()
+        };
+        let (primary, secondary) = collect(&opt);
+        assert_eq!(primary.len(), 5);
+        assert_eq!(secondary.len(), 5);
+        for (p, s) in primary.iter().zip(&secondary) {
+            assert_eq!(p.framenumber, s.framenumber);
+            assert_eq!(p.timestamp, s.timestamp);
+        }
+    }
+
+    #[test]
+    fn skew_shifts_only_the_secondary_timestamps() {
+        let opt = SynthArgs {
+            rate: 1000.0,
+            duration: 0.005,
+            no_stereo: false,
+            secondary_skew_ms: 4.0,
+            ..args()
+        };
+        let (primary, secondary) = collect(&opt);
+        assert_eq!(primary.len(), secondary.len());
+        for (p, s) in primary.iter().zip(&secondary) {
+            assert_eq!(
+                s.timestamp - p.timestamp,
+                chrono::TimeDelta::milliseconds(4)
+            );
+            assert_eq!(p.framenumber, s.framenumber);
+        }
+    }
+
+    /// Framenumber offset (`secondary - primary`) of the two observations that
+    /// share an acquisition instant, for every trigger both cameras captured.
+    ///
+    /// The subtraction wraps, as it must for counters that are `u32` on the
+    /// wire: a secondary that counts below the primary is a large positive
+    /// difference, not a negative one.
+    fn offsets(primary: &[MomentCentroid], secondary: &[MomentCentroid]) -> Vec<i64> {
+        secondary
+            .iter()
+            .filter_map(|s| {
+                let p = primary.iter().find(|p| p.timestamp == s.timestamp)?;
+                Some(i64::from(s.framenumber.wrapping_sub(p.framenumber) as i32))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_starting_offset_stays_constant() {
+        let opt = SynthArgs {
+            rate: 1000.0,
+            duration: 0.005,
+            no_stereo: false,
+            secondary_frame_offset: -7,
+            ..args()
+        };
+        let (primary, secondary) = collect(&opt);
+        assert_eq!(offsets(&primary, &secondary), vec![-7; 5]);
+    }
+
+    #[test]
+    fn a_withheld_observation_leaves_the_framenumbers_alone() {
+        let opt = SynthArgs {
+            rate: 1000.0,
+            duration: 0.010,
+            no_stereo: false,
+            secondary_frame_offset: 12,
+            secondary_drop_every: 3,
+            ..args()
+        };
+        let (primary, secondary) = collect(&opt);
+        assert_eq!(primary.len(), 10);
+        // Triggers 2, 5 and 8 (0-based) have no secondary observation.
+        assert_eq!(secondary.len(), 7);
+        // The camera counted those triggers even though nothing came of them,
+        // so the offset between the counters is the one it started with.
+        assert_eq!(offsets(&primary, &secondary), vec![12; 7]);
+    }
+
+    #[test]
+    fn a_withheld_primary_observation_leaves_the_framenumbers_alone() {
+        let opt = SynthArgs {
+            rate: 1000.0,
+            duration: 0.010,
+            no_stereo: false,
+            secondary_frame_offset: -12,
+            primary_drop_every: 3,
+            ..args()
+        };
+        let (primary, secondary) = collect(&opt);
+        assert_eq!(primary.len(), 7);
+        assert_eq!(secondary.len(), 10);
+        assert_eq!(offsets(&primary, &secondary), vec![-12; 7]);
+    }
+
+    #[test]
+    fn lagged_secondary_frames_keep_their_stamps_but_arrive_late() {
+        let opt = SynthArgs {
+            rate: 1000.0,
+            duration: 0.005,
+            no_stereo: false,
+            secondary_lag_frames: 2,
+            ..args()
+        };
+        let cfg = stereo_config();
+        let mut sent = Vec::new();
+        run_with_sink(&opt, &cfg, |c| {
+            sent.push(c);
+            Ok(())
+        })
+        .unwrap();
+        // Stamps are untouched, so the pairing still has everything it needs.
+        let (primary, secondary): (Vec<_>, Vec<_>) =
+            sent.iter().cloned().partition(|c| c.cam_name == "primary");
+        assert_eq!(offsets(&primary, &secondary), vec![0; 3]);
+        // But each secondary is delivered two triggers after its partner, and
+        // the last two never arrive at all before the run ends.
+        assert_eq!(secondary.len(), 3);
+        let order: Vec<&str> = sent.iter().map(|c| c.cam_name.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "primary",
+                "primary",
+                "primary",
+                "secondary",
+                "primary",
+                "secondary",
+                "primary",
+                "secondary",
+            ]
+        );
     }
 }
