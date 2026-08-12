@@ -42,7 +42,34 @@ impl App {
                         <Button title="Track" onsignal={ctx.link().callback(|_| Msg::SwitchToClosedLoop)}/>
                     </div>
                 </div>
+                { self.mobile_distance() }
                 { self.mobile_preview() }
+            </div>
+        }
+    }
+
+    /// How far away the thing being tracked is, as stereopsis measures it.
+    ///
+    /// The one number worth having out here: it says whether FLO has a subject
+    /// at a plausible range, and it is what the focus follows. Shown at the
+    /// readout size the full UI uses rather than as another line of small text,
+    /// because it is read at arm's length.
+    ///
+    /// An em dash when there is no estimate — a monocular deployment, or no
+    /// pair of detections yet. Deliberately not the home position's distance,
+    /// which is a setting rather than a measurement.
+    fn mobile_distance(&self) -> Html {
+        let distance = match self
+            .last_state
+            .as_ref()
+            .and_then(|state| state.stereopsis_state.as_ref())
+        {
+            Some(stereopsis) => format!("{:.2}m", stereopsis.dist),
+            None => crate::NO_DATA.to_string(),
+        };
+        html! {
+            <div class="border-1px">
+                { crate::qqblock("Distance", distance) }
             </div>
         }
     }
