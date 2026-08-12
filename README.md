@@ -296,6 +296,58 @@ Every startup after the first is a read and nothing more. Set
 do that if FLO reaches the flight controller over USB, since the reboot takes the
 USB serial device away and FLO cannot reopen it.
 
+## What the flight controller logs
+
+PX4 records one set of topics by default — enough for general log analysis, and
+no more. Which further sets it records is `SDLOG_PROFILE`, and FLO brings it in
+line with the config the same way it does `GPS_DUMP_COMM`:
+
+```yaml
+mavlink:
+  sdlog_profile:
+    topics: [default_set, high_rate]   # SDLOG_PROFILE=17
+    reboot_to_apply: true              # the default
+```
+
+`SDLOG_PROFILE` is a bitmask, and the config names its bits rather than carrying
+the number, because the number is easy to get wrong: "high rate" is *bit* 4, so
+it is worth **16**, and a config that said `4` would have asked for thermal
+calibration and dropped the default set while doing it. The names, with the value
+each contributes:
+
+| name | bit | value | what it adds |
+| --- | --- | --- | --- |
+| `default_set` | 0 | 1 | general log analysis; PX4's own default, on its own |
+| `estimator_replay` | 1 | 2 | full-rate EKF2 topics, enough to replay the estimator |
+| `thermal_calibration` | 2 | 4 | high-rate raw IMU and baro |
+| `system_identification` | 3 | 8 | high-rate actuator controls and IMU |
+| `high_rate` | 4 | 16 | full rates for fast maneuvers: RC, attitude, rates, actuators |
+| `debug` | 5 | 32 | the `debug_*` topics, for custom code |
+| `sensor_comparison` | 6 | 64 | low-rate raw IMU, baro and magnetometer |
+| `vision_and_avoidance` | 7 | 128 | computer vision and collision avoidance |
+| `raw_imu_fifo_gyro` | 8 | 256 | raw high-rate gyro FIFO |
+| `raw_imu_fifo_accel` | 9 | 512 | raw high-rate accelerometer FIFO |
+| `mavlink_tunnel` | 10 | 1024 | MAVLink tunnel messages, for payload debugging |
+
+Order does not matter and repeats are harmless; what reaches the flight
+controller is the OR of the bits. Every extra set costs log size and SD-card
+bandwidth, so `[default_set, high_rate]` is a deliberate choice rather than a
+free upgrade. An empty list is `SDLOG_PROFILE=0`, which is PX4 logging nothing at
+all — leave the `sdlog_profile` block out entirely to leave the flight controller
+alone instead.
+
+Newer PX4 has grown at least one bit beyond this table (11, high-rate sensors).
+It is deliberately unnameable: `SDLOG_PROFILE`'s maximum on PX4 v1.15 is 2047, so
+a config that could reach bit 11 could compose a value that older firmware
+refuses outright.
+
+PX4 marks `SDLOG_PROFILE` `@reboot_required` and reads it once, when its `logger`
+module starts, so the reboot story is exactly the one above — and when both
+`ppk_logging` and `sdlog_profile` need a changed value applied, the two share a
+single reboot. `reboot_to_apply: false` on *either* block suppresses that reboot
+for both, since turning it off is a statement about the link rather than about
+one parameter.
+
 ## Post-trigger ("pre-capture") recording
 
 FLO can hold recent data in RAM so that a recording started *after* something

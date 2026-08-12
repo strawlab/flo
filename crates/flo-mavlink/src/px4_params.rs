@@ -1,34 +1,37 @@
-//! Switching on the flight controller's raw-GNSS logging at startup.
+//! Bringing the flight controller's parameters in line with the config at
+//! startup.
 //!
-//! PX4 can record what its GNSS receiver actually measured — carrier-phase
-//! observations, as RTCM3 MSM7 — in its own flight log, which is what a
-//! post-processed kinematic (PPK) solution is computed from after landing. It
-//! does not do so by default, and the parameter that turns it on,
-//! `GPS_DUMP_COMM`, is read exactly once: when PX4's GPS driver starts. Writing
-//! it therefore says nothing about the flight in progress, which is why this
-//! module can end in a reboot.
+//! Two things FLO configures live in PX4's own parameter storage rather than in
+//! FLO's config, because they change what the *flight controller* records:
 //!
-//! What is logged is the rover's own measurements, so it does not matter whether
-//! the real-time corrections came from NTRIP through FLO or from a local base
-//! station relayed by the ground station. What is *not* logged either way is the
-//! base station's observations; PPK needs those too, archived at whatever
-//! produced them.
+//! - `GPS_DUMP_COMM`, which decides whether the flight log holds what the GNSS
+//!   receiver actually measured. Without it a log has only the real-time fix,
+//!   and no post-processed kinematic (PPK) solution can be computed after
+//!   landing. See [`flo_core::drone_structs::PpkLoggingConfig`].
+//! - `SDLOG_PROFILE`, which decides which sets of topics the flight log holds
+//!   and at what rate. See [`flo_core::drone_structs::SdlogProfileConfig`].
+//!
+//! Both are read exactly once, when the module that uses them starts: the GPS
+//! driver for the first, `logger` for the second. Writing either therefore says
+//! nothing about the flight in progress, which is why this module can end in a
+//! reboot — one reboot, after every parameter has been reconciled, however many
+//! of them changed.
 //!
 //! The whole exchange runs before [`DroneCoordinator`] requests any message
 //! streams, because a reboot would discard those requests along with the global
 //! origin. Nothing here is fatal: a flight controller that will not answer, will
-//! not store the value, or will not reboot costs post-processing accuracy, and
-//! grounding FLO over that would be the worse trade. Every such outcome is
+//! not store a value, or will not reboot costs recording detail after the fact,
+//! and grounding FLO over that would be the worse trade. Every such outcome is
 //! logged at `error` or `warn` and startup continues.
 //!
 //! That extends to the link itself failing mid-exchange, which is not the same
 //! as this step failing. FLO's startup ends the whole process if the MAVLink task
 //! finishes inside its first 100 ms, so reporting an I/O error from here would
-//! both kill FLO earlier than it would otherwise die and pin the blame on the
-//! PPK step for a link that was already broken. Being the first code to *read*
-//! from the link does not make it the culprit. A link failure is therefore
-//! logged, the step gives up, and the main loop reports the failure as it always
-//! has. See [`Waited`].
+//! both kill FLO earlier than it would otherwise die and pin the blame on this
+//! step for a link that was already broken. Being the first code to *read* from
+//! the link does not make it the culprit. A link failure is therefore logged, the
+//! step gives up, and the main loop reports the failure as it always has. See
+//! [`Waited`].
 
 use std::time::Duration;
 
@@ -41,6 +44,9 @@ use crate::{AUTOPILOT_TARGET_COMPONENT, AUTOPILOT_TARGET_SYSTEM, DroneCoordinato
 /// The PX4 parameter deciding what GNSS traffic reaches the flight log.
 const GPS_DUMP_COMM: &str = "GPS_DUMP_COMM";
 
+/// The PX4 parameter deciding which topics reach the flight log, and how often.
+const SDLOG_PROFILE: &str = "SDLOG_PROFILE";
+
 /// How long the flight controller has to answer one parameter read or write.
 ///
 /// PX4 answers from its MAVLink work queue within a stream interval or two; this
@@ -51,7 +57,7 @@ const PARAM_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// gives up on it.
 const PARAM_ATTEMPTS: u8 = 3;
 
-/// How long to wait between a confirmed write and asking for a reboot.
+/// How long to wait between the last confirmed write and asking for a reboot.
 ///
 /// PX4 acknowledges a `PARAM_SET` immediately but writes it to storage from a
 /// work queue: 300 ms after the change, and no more often than once every 2 s. A
@@ -72,6 +78,34 @@ const REBOOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to let the flight controller finish coming up after its first
 /// heartbeat, before FLO starts asking it for things again.
 const POST_REBOOT_SETTLE: Duration = Duration::from_secs(2);
+
+/// One PX4 parameter the config asks the flight controller to hold.
+struct WantedParam {
+    /// The parameter's name, as PX4 knows it.
+    name: &'static str,
+    /// The value to write, already in PX4's own units.
+    value: i32,
+    /// What the config asked for, in the config's own words, so a log line can
+    /// be matched back to the YAML that caused it.
+    asked_for: String,
+    /// What holding this value buys, so a log line is intelligible without the
+    /// config to hand.
+    purpose: &'static str,
+    /// Whether the config permits a reboot to make a changed value take effect.
+    reboot_to_apply: bool,
+}
+
+/// What became of one parameter.
+#[derive(Debug, PartialEq, Eq)]
+enum Reconciled {
+    /// The flight controller already held the wanted value; nothing was written
+    /// and nothing needs applying.
+    Unchanged,
+    /// The value was written and read back, and takes effect on the next boot.
+    Stored,
+    /// FLO could not set it. The reason is already in the log.
+    Failed,
+}
 
 /// A parameter name in the fixed-width form MAVLink's `param_id` wants.
 ///
@@ -117,7 +151,7 @@ fn param_value_as_i32(value: f32) -> i32 {
 /// more importantly, it is not this module's business: the main loop treats a
 /// dead link as fatal and reports it, and it did so before any of this existed.
 /// Turning a link failure into an error here would only move the blame for it
-/// into the PPK step and, because FLO's startup fails the whole process if the
+/// into this step and, because FLO's startup fails the whole process if the
 /// MAVLink task ends within its first 100 ms, would make this step the apparent
 /// cause of something it merely noticed first.
 enum Waited<T> {
@@ -132,16 +166,16 @@ enum Waited<T> {
 /// What to say when the link dies mid-exchange.
 ///
 /// Names the link as the thing that failed, and says explicitly that the main
-/// loop is where it will be dealt with, so a reader is not left thinking the PPK
+/// loop is where it will be dealt with, so a reader is not left thinking this
 /// step broke something.
-fn link_lost_message(doing: &str, e: &RecvError) -> String {
+fn link_lost_message(doing: &str, name: &str, e: &RecvError) -> String {
     format!(
-        "the MAVLink link failed while {doing} {GPS_DUMP_COMM}: {e}. Raw-GNSS logging is \
-         unchanged; the link failure itself is reported by the main MAVLink loop."
+        "the MAVLink link failed while {doing} {name}: {e}. The flight controller's parameters \
+         are unchanged; the link failure itself is reported by the main MAVLink loop."
     )
 }
 
-/// Whether a stored-but-not-yet-active parameter can be made to take effect now.
+/// Whether stored-but-not-yet-active parameters can be made to take effect now.
 #[derive(Debug, PartialEq, Eq)]
 enum RebootDecision {
     /// Ask the flight controller to reboot.
@@ -156,8 +190,19 @@ enum RebootDecision {
 /// PX4 refuses to reboot while armed on its own account, but FLO does not lean on
 /// that: `armed` being unknown is treated the same as armed, so a link that has
 /// gone quiet cannot be mistaken for a vehicle sitting safely on the ground.
-fn reboot_decision(reboot_to_apply: bool, armed: Option<bool>) -> RebootDecision {
-    if !reboot_to_apply {
+///
+/// `reboot_to_apply` is unanimous rather than a majority, because a config turns
+/// it off to say something about the *link* — that the flight controller is on
+/// USB, and a reboot takes the device node with it. That is true of the whole
+/// link, not of one parameter, so a single objection settles it. The cost of
+/// reading it the other way round would be an unreachable flight controller; the
+/// cost of reading it this way is a parameter that waits for the next boot, and
+/// says so in the log.
+fn reboot_decision(
+    reboot_to_apply: impl IntoIterator<Item = bool>,
+    armed: Option<bool>,
+) -> RebootDecision {
+    if !reboot_to_apply.into_iter().all(|permitted| permitted) {
         RebootDecision::NotPermitted
     } else if armed == Some(false) {
         RebootDecision::Reboot
@@ -167,74 +212,129 @@ fn reboot_decision(reboot_to_apply: bool, armed: Option<bool>) -> RebootDecision
 }
 
 impl DroneCoordinator {
-    /// Bring the flight controller's `GPS_DUMP_COMM` in line with the config,
-    /// rebooting it if that is what the new value needs and the config allows.
+    /// Bring the flight controller's parameters in line with the config,
+    /// rebooting it once if that is what the new values need and the config
+    /// allows.
     ///
-    /// A no-op when the config says nothing about PPK logging, and a single read
-    /// on every startup after the value has been set once.
-    pub(crate) async fn apply_ppk_logging_config(&mut self) -> Result<()> {
-        let Some(cfg) = self.mavlink_cfg.ppk_logging.clone() else {
-            return Ok(());
-        };
-        let wanted = cfg.gps_dump_comm.px4_value();
-        let mode = cfg.gps_dump_comm;
-
-        // Each step below logs its own reason for giving up -- a silent flight
-        // controller and a failed link call for different words -- so a `None`
-        // here needs no further comment.
-        let Some(current) = self.read_gps_dump_comm().await? else {
-            return Ok(());
-        };
-
-        if current == wanted {
-            tracing::info!(
-                "flight controller already has {GPS_DUMP_COMM}={current}, the configured \
-                 {mode:?}: raw-GNSS logging needs no change"
-            );
+    /// A no-op when the config asks for no parameters, and a read apiece on every
+    /// startup after the values have been set once.
+    pub(crate) async fn apply_px4_param_config(&mut self) -> Result<()> {
+        let wanted = self.wanted_px4_params();
+        if wanted.is_empty() {
             return Ok(());
         }
 
-        tracing::info!(
-            "flight controller has {GPS_DUMP_COMM}={current}; config asks for {wanted} \
-             ({mode:?}), writing it"
+        let mut pending = Vec::new();
+        for param in &wanted {
+            if self.reconcile_param(param).await? == Reconciled::Stored {
+                pending.push(param);
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let names = pending
+            .iter()
+            .map(|param| format!("{}={}", param.name, param.value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let decision = reboot_decision(
+            pending.iter().map(|param| param.reboot_to_apply),
+            self.last_reported_armed,
         );
-
-        let Some(stored) = self.write_gps_dump_comm(wanted).await? else {
-            return Ok(());
-        };
-        if stored != wanted {
-            tracing::error!(
-                "flight controller reports {GPS_DUMP_COMM}={stored} after being asked for \
-                 {wanted}; it refused the write. Raw-GNSS logging is not configured."
-            );
-            return Ok(());
-        }
-        tracing::info!("flight controller stored {GPS_DUMP_COMM}={wanted}");
-
-        match reboot_decision(cfg.reboot_to_apply, self.last_reported_armed) {
+        match decision {
             RebootDecision::Reboot => {
                 tokio::time::sleep(PARAM_SAVE_SETTLE).await;
-                self.reboot_for_ppk_logging().await?;
+                self.reboot_to_apply_params(&names).await?;
             }
             RebootDecision::NotPermitted => tracing::warn!(
-                "{GPS_DUMP_COMM}={wanted} is stored, but PX4 reads it only when its GPS driver \
-                 starts and `reboot_to_apply` is off: raw-GNSS logging begins on the flight \
-                 controller's next boot, not on this flight."
+                "{names} is stored, but PX4 reads these only at boot and `reboot_to_apply` is off: \
+                 they take effect on the flight controller's next boot, not on this flight."
             ),
             RebootDecision::Unsafe => tracing::warn!(
-                "{GPS_DUMP_COMM}={wanted} is stored, but FLO will not reboot a flight controller \
-                 it has not seen disarmed (armed: {:?}): raw-GNSS logging begins on its next \
-                 boot, not on this flight.",
+                "{names} is stored, but FLO will not reboot a flight controller it has not seen \
+                 disarmed (armed: {:?}): they take effect on its next boot, not on this flight.",
                 self.last_reported_armed
             ),
         }
         Ok(())
     }
 
-    /// Ask for `GPS_DUMP_COMM` and return what the flight controller reports, or
+    /// The parameters the config asks the flight controller to hold, in the order
+    /// they are reconciled.
+    fn wanted_px4_params(&self) -> Vec<WantedParam> {
+        let mut wanted = Vec::new();
+        if let Some(cfg) = &self.mavlink_cfg.ppk_logging {
+            wanted.push(WantedParam {
+                name: GPS_DUMP_COMM,
+                value: cfg.gps_dump_comm.px4_value(),
+                asked_for: format!("{:?}", cfg.gps_dump_comm),
+                purpose: "raw-GNSS logging for PPK",
+                reboot_to_apply: cfg.reboot_to_apply,
+            });
+        }
+        if let Some(cfg) = &self.mavlink_cfg.sdlog_profile {
+            wanted.push(WantedParam {
+                name: SDLOG_PROFILE,
+                value: cfg.px4_value(),
+                asked_for: format!("{:?}", cfg.topics),
+                purpose: "the flight log's topic profile",
+                reboot_to_apply: cfg.reboot_to_apply,
+            });
+        }
+        wanted
+    }
+
+    /// Read one parameter, and write it if it is not already what the config
+    /// asks for.
+    async fn reconcile_param(&mut self, param: &WantedParam) -> Result<Reconciled> {
+        let WantedParam {
+            name,
+            value,
+            asked_for,
+            purpose,
+            ..
+        } = param;
+
+        // Each step below logs its own reason for giving up -- a silent flight
+        // controller and a failed link call for different words -- so a `None`
+        // here needs no further comment.
+        let Some(current) = self.read_param(name).await? else {
+            return Ok(Reconciled::Failed);
+        };
+
+        if current == *value {
+            tracing::info!(
+                "flight controller already has {name}={current}, the configured {asked_for}: \
+                 {purpose} needs no change"
+            );
+            return Ok(Reconciled::Unchanged);
+        }
+
+        tracing::info!(
+            "flight controller has {name}={current}; config asks for {value} ({asked_for}), \
+             writing it"
+        );
+
+        let Some(stored) = self.write_param(name, *value).await? else {
+            return Ok(Reconciled::Failed);
+        };
+        if stored != *value {
+            tracing::error!(
+                "flight controller reports {name}={stored} after being asked for {value}; it \
+                 refused the write. {purpose} is not configured."
+            );
+            return Ok(Reconciled::Failed);
+        }
+        tracing::info!("flight controller stored {name}={value}");
+        Ok(Reconciled::Stored)
+    }
+
+    /// Ask for a parameter and return what the flight controller reports, or
     /// `None` if it never answers. Logs its own reason for giving up.
-    async fn read_gps_dump_comm(&mut self) -> Result<Option<i32>> {
-        let param_id = param_id_bytes(GPS_DUMP_COMM)?;
+    async fn read_param(&mut self, name: &str) -> Result<Option<i32>> {
+        let param_id = param_id_bytes(name)?;
         for attempt in 1..=PARAM_ATTEMPTS {
             let data =
                 MavMessage::PARAM_REQUEST_READ(mavlink::ardupilotmega::PARAM_REQUEST_READ_DATA {
@@ -246,34 +346,33 @@ impl DroneCoordinator {
                     param_id,
                 });
             self.send_to_autopilot(data).await?;
-            match self.await_param_value(GPS_DUMP_COMM).await? {
+            match self.await_param_value(name).await? {
                 Waited::Got(value) => return Ok(Some(value)),
                 Waited::LinkLost(e) => {
-                    tracing::error!("{}", link_lost_message("reading", &e));
+                    tracing::error!("{}", link_lost_message("reading", name, &e));
                     return Ok(None);
                 }
                 Waited::TimedOut => tracing::warn!(
-                    "no {GPS_DUMP_COMM} from the flight controller within \
-                     {PARAM_REPLY_TIMEOUT:?} (attempt {attempt} of {PARAM_ATTEMPTS})"
+                    "no {name} from the flight controller within {PARAM_REPLY_TIMEOUT:?} \
+                     (attempt {attempt} of {PARAM_ATTEMPTS})"
                 ),
             }
         }
         tracing::error!(
-            "flight controller did not answer {PARAM_ATTEMPTS} requests for {GPS_DUMP_COMM}; \
-             leaving its raw-GNSS logging as it is. Whether this flight can be post-processed is \
-             unknown."
+            "flight controller did not answer {PARAM_ATTEMPTS} requests for {name}; leaving it as \
+             it is."
         );
         Ok(None)
     }
 
-    /// Write `GPS_DUMP_COMM` and return the value the flight controller then
+    /// Write a parameter and return the value the flight controller then
     /// reports, or `None` if it never answers.
     ///
     /// PX4 broadcasts a `PARAM_VALUE` for every write it accepts, so the reply is
     /// both acknowledgement and read-back: a refused write comes back as the old
     /// value rather than as silence, and no separate re-read is needed.
-    async fn write_gps_dump_comm(&mut self, value: i32) -> Result<Option<i32>> {
-        let param_id = param_id_bytes(GPS_DUMP_COMM)?;
+    async fn write_param(&mut self, name: &str, value: i32) -> Result<Option<i32>> {
+        let param_id = param_id_bytes(name)?;
         for attempt in 1..=PARAM_ATTEMPTS {
             let data = MavMessage::PARAM_SET(mavlink::ardupilotmega::PARAM_SET_DATA {
                 param_value: param_value_from_i32(value),
@@ -281,36 +380,35 @@ impl DroneCoordinator {
                 target_component: AUTOPILOT_TARGET_COMPONENT,
                 param_id,
                 // PX4 rejects a write whose type disagrees with the parameter's
-                // own, and `GPS_DUMP_COMM` is an int32.
+                // own, and both parameters here are int32.
                 param_type: MavParamType::MAV_PARAM_TYPE_INT32,
             });
             self.send_to_autopilot(data).await?;
-            match self.await_param_value(GPS_DUMP_COMM).await? {
+            match self.await_param_value(name).await? {
                 Waited::Got(stored) => return Ok(Some(stored)),
                 Waited::LinkLost(e) => {
-                    tracing::error!("{}", link_lost_message("writing", &e));
+                    tracing::error!("{}", link_lost_message("writing", name, &e));
                     return Ok(None);
                 }
                 Waited::TimedOut => tracing::warn!(
-                    "flight controller did not acknowledge {GPS_DUMP_COMM}={value} within \
+                    "flight controller did not acknowledge {name}={value} within \
                      {PARAM_REPLY_TIMEOUT:?} (attempt {attempt} of {PARAM_ATTEMPTS})"
                 ),
             }
         }
         tracing::error!(
-            "flight controller never acknowledged {GPS_DUMP_COMM}={value} in {PARAM_ATTEMPTS} \
-             attempts. Raw-GNSS logging is probably still off."
+            "flight controller never acknowledged {name}={value} in {PARAM_ATTEMPTS} attempts."
         );
         Ok(None)
     }
 
-    /// Reboot the flight controller so a stored `GPS_DUMP_COMM` takes effect, and
-    /// wait for it to come back.
-    async fn reboot_for_ppk_logging(&mut self) -> Result<()> {
+    /// Reboot the flight controller so stored parameters take effect, and wait
+    /// for it to come back.
+    async fn reboot_to_apply_params(&mut self, names: &str) -> Result<()> {
         tracing::warn!(
-            "rebooting the flight controller so it starts logging raw GNSS data. If FLO reaches \
-             it over USB rather than a serial link, the device node will not come back and FLO \
-             will need restarting."
+            "rebooting the flight controller so it picks up {names}. If FLO reaches it over USB \
+             rather than a serial link, the device node will not come back and FLO will need \
+             restarting."
         );
         let data = MavMessage::COMMAND_LONG(mavlink::ardupilotmega::COMMAND_LONG_DATA {
             command: MavCmd::MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN,
@@ -344,14 +442,10 @@ impl DroneCoordinator {
         // to be puzzled over.
         if let Waited::LinkLost(e) = quiet {
             tracing::error!(
-                "the MAVLink link failed while the flight controller was rebooting: {e}. \
-                 {GPS_DUMP_COMM}={} is stored and will take effect, but FLO cannot reach the \
-                 flight controller any more -- expected if it is connected over USB, since the \
-                 reboot removes the device node. Restart FLO once it is back.",
-                self.mavlink_cfg
-                    .ppk_logging
-                    .as_ref()
-                    .map_or(0, |cfg| cfg.gps_dump_comm.px4_value())
+                "the MAVLink link failed while the flight controller was rebooting: {e}. {names} \
+                 is stored and will take effect, but FLO cannot reach the flight controller any \
+                 more -- expected if it is connected over USB, since the reboot removes the \
+                 device node. Restart FLO once it is back."
             );
             return Ok(());
         }
@@ -359,8 +453,8 @@ impl DroneCoordinator {
         if let Some(result) = ack {
             if result != MavResult::MAV_RESULT_ACCEPTED {
                 tracing::error!(
-                    "flight controller refused to reboot ({result:?}). {GPS_DUMP_COMM} is stored, \
-                     so raw-GNSS logging begins on its next boot, not on this flight."
+                    "flight controller refused to reboot ({result:?}). {names} is stored, so it \
+                     takes effect on its next boot, not on this flight."
                 );
                 return Ok(());
             }
@@ -374,7 +468,7 @@ impl DroneCoordinator {
                 // as a fault: this is the one reset FLO asked for.
                 self.prev_time_boot_ms = 0;
                 tokio::time::sleep(POST_REBOOT_SETTLE).await;
-                tracing::info!("flight controller is back up, logging raw GNSS data");
+                tracing::info!("flight controller is back up with {names}");
             }
             Waited::TimedOut => tracing::error!(
                 "no heartbeat from the flight controller {REBOOT_TIMEOUT:?} after it was asked to \
@@ -401,8 +495,8 @@ impl DroneCoordinator {
             .await;
         Ok(match waited {
             // Worth recording rather than only logging: what the flight
-            // controller said about `GPS_DUMP_COMM` is the provenance of every
-            // raw observation in the flight log this run is about to produce.
+            // controller said about these parameters is the provenance of the
+            // flight log this run is about to produce.
             Waited::Got(data) => {
                 save("PARAM_VALUE", &self.floz_logger, &data)?;
                 Waited::Got(param_value_as_i32(data.param_value))
@@ -474,6 +568,17 @@ mod tests {
         assert!(!param_id_matches(&field, "GPS_UBX_PPK"));
     }
 
+    /// Both names have to survive the round trip, and a reply to one must not be
+    /// mistaken for a reply to the other now that they are asked for in sequence.
+    #[test]
+    fn the_two_parameters_do_not_answer_for_each_other() {
+        let gps = param_id_bytes(GPS_DUMP_COMM).unwrap();
+        let sdlog = param_id_bytes(SDLOG_PROFILE).unwrap();
+        assert!(param_id_matches(&sdlog, SDLOG_PROFILE));
+        assert!(!param_id_matches(&sdlog, GPS_DUMP_COMM));
+        assert!(!param_id_matches(&gps, SDLOG_PROFILE));
+    }
+
     /// MAVLink allows a 16-character name to fill the field with no terminator,
     /// so matching cannot assume there is one.
     #[test]
@@ -493,7 +598,7 @@ mod tests {
     /// that carries an int32 2 is not 2.0.
     #[test]
     fn an_int_parameter_travels_as_its_bit_pattern() {
-        for value in [0, 1, 2] {
+        for value in [0, 1, 2, 17, 2047] {
             assert_eq!(param_value_as_i32(param_value_from_i32(value)), value);
         }
         assert_eq!(param_value_from_i32(2).to_bits(), 2);
@@ -504,18 +609,58 @@ mod tests {
 
     #[test]
     fn a_disarmed_flight_controller_may_be_rebooted() {
-        assert_eq!(reboot_decision(true, Some(false)), RebootDecision::Reboot);
+        assert_eq!(reboot_decision([true], Some(false)), RebootDecision::Reboot);
     }
 
     #[test]
     fn an_armed_flight_controller_is_never_rebooted() {
-        assert_eq!(reboot_decision(true, Some(true)), RebootDecision::Unsafe);
+        assert_eq!(reboot_decision([true], Some(true)), RebootDecision::Unsafe);
     }
 
     /// Not hearing from the vehicle is not evidence that it is on the ground.
     #[test]
     fn an_unknown_armed_state_is_treated_as_armed() {
-        assert_eq!(reboot_decision(true, None), RebootDecision::Unsafe);
+        assert_eq!(reboot_decision([true], None), RebootDecision::Unsafe);
+    }
+
+    #[test]
+    fn the_config_can_forbid_rebooting_outright() {
+        for armed in [None, Some(false), Some(true)] {
+            assert_eq!(
+                reboot_decision([false], armed),
+                RebootDecision::NotPermitted,
+                "armed: {armed:?}"
+            );
+        }
+    }
+
+    /// `reboot_to_apply: false` says the link cannot survive a reboot, which is
+    /// true of every parameter on it or none. One objection therefore settles it,
+    /// however many other parameters would have permitted the reboot.
+    #[test]
+    fn one_parameter_forbidding_a_reboot_forbids_it_for_all() {
+        assert_eq!(
+            reboot_decision([true, false], Some(false)),
+            RebootDecision::NotPermitted
+        );
+        assert_eq!(
+            reboot_decision([false, true], Some(false)),
+            RebootDecision::NotPermitted
+        );
+        assert_eq!(
+            reboot_decision([true, true], Some(false)),
+            RebootDecision::Reboot
+        );
+    }
+
+    /// Nothing pending means nothing to object to, but the caller never asks in
+    /// that case -- it returns before deciding. Pinned so a future caller that
+    /// does ask gets an answer that cannot lead to a gratuitous reboot request
+    /// unless the vehicle is also known to be disarmed.
+    #[test]
+    fn an_empty_set_of_parameters_leans_on_the_armed_check_alone() {
+        assert_eq!(reboot_decision([], Some(false)), RebootDecision::Reboot);
+        assert_eq!(reboot_decision([], None), RebootDecision::Unsafe);
     }
 
     /// A timeout and a dead link are both "no answer", but only one is worth
@@ -532,21 +677,10 @@ mod tests {
             panic!("expected a lost link");
         };
         // The operator has to be able to tell which of the two happened from the
-        // log alone, and that the PPK step is not the thing that broke.
-        let msg = link_lost_message("reading", &e);
+        // log alone, and that this step is not the thing that broke.
+        let msg = link_lost_message("reading", GPS_DUMP_COMM, &e);
         assert!(msg.contains("MAVLink link failed"), "{msg}");
         assert!(msg.contains("broken pipe"), "{msg}");
         assert!(msg.contains("reported by the main MAVLink loop"), "{msg}");
-    }
-
-    #[test]
-    fn the_config_can_forbid_rebooting_outright() {
-        for armed in [None, Some(false), Some(true)] {
-            assert_eq!(
-                reboot_decision(false, armed),
-                RebootDecision::NotPermitted,
-                "armed: {armed:?}"
-            );
-        }
     }
 }

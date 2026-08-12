@@ -398,6 +398,108 @@ pub struct PpkLoggingConfig {
     pub reboot_to_apply: bool,
 }
 
+/// One bit of PX4's `SDLOG_PROFILE`: a set of topics the flight controller
+/// writes to its own flight log, and the rate it writes them at.
+///
+/// The parameter is a bitmask, and naming the bits rather than writing the
+/// number is what keeps a config from quietly asking for something else. "High
+/// rate" is *bit* 4, so its value is 16; a config that said `4` would get
+/// thermal calibration, and would drop the default set while doing it.
+///
+/// These are the bits PX4 defines identically in v1.15 and on `main`, so the
+/// value FLO computes never exceeds the 2047 that v1.15 will accept as
+/// `SDLOG_PROFILE`'s maximum. Newer firmware has grown at least one more bit
+/// (11, high-rate sensors); it is deliberately absent, because naming it here
+/// would let a config compose a value that older firmware rejects outright.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum SdlogTopics {
+    /// Bit 0 (1): the default set, for general log analysis. This is what PX4
+    /// ships with, and on its own it is `SDLOG_PROFILE`'s default value.
+    DefaultSet,
+    /// Bit 1 (2): full-rate EKF2 topics, enough to replay the estimator.
+    EstimatorReplay,
+    /// Bit 2 (4): thermal calibration — high-rate raw IMU and baro.
+    ThermalCalibration,
+    /// Bit 3 (8): system identification — high-rate actuator controls and IMU.
+    SystemIdentification,
+    /// Bit 4 (16): full rates for analysing fast maneuvers — RC, attitude,
+    /// rates and actuators.
+    HighRate,
+    /// Bit 5 (32): the `debug_*` topics, for custom code.
+    Debug,
+    /// Bit 6 (64): sensor comparison — low-rate raw IMU, baro and magnetometer.
+    SensorComparison,
+    /// Bit 7 (128): computer vision and collision avoidance.
+    VisionAndAvoidance,
+    /// Bit 8 (256): the raw high-rate gyro FIFO.
+    RawImuFifoGyro,
+    /// Bit 9 (512): the raw high-rate accelerometer FIFO.
+    RawImuFifoAccel,
+    /// Bit 10 (1024): MAVLink tunnel messages, for debugging payload
+    /// communication.
+    MavlinkTunnel,
+}
+
+impl SdlogTopics {
+    /// The value this contributes to `SDLOG_PROFILE`.
+    pub fn px4_bit(self) -> i32 {
+        match self {
+            Self::DefaultSet => 1 << 0,
+            Self::EstimatorReplay => 1 << 1,
+            Self::ThermalCalibration => 1 << 2,
+            Self::SystemIdentification => 1 << 3,
+            Self::HighRate => 1 << 4,
+            Self::Debug => 1 << 5,
+            Self::SensorComparison => 1 << 6,
+            Self::VisionAndAvoidance => 1 << 7,
+            Self::RawImuFifoGyro => 1 << 8,
+            Self::RawImuFifoAccel => 1 << 9,
+            Self::MavlinkTunnel => 1 << 10,
+        }
+    }
+}
+
+/// What the flight controller should write to its own flight log: the value FLO
+/// writes to PX4's `SDLOG_PROFILE` parameter.
+///
+/// PX4 logs the default set and nothing else, which is enough to see what a
+/// flight did but not always enough to see why. Naming further sets here trades
+/// log size and SD-card bandwidth for detail.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SdlogProfileConfig {
+    /// The sets to log. Order does not matter and repeats are harmless; what
+    /// reaches the flight controller is the OR of their bits.
+    ///
+    /// An empty list is `SDLOG_PROFILE=0`, which is PX4 logging nothing at all.
+    /// That is a legitimate thing to ask for and FLO will ask for it, but it is
+    /// unlikely to be what an empty list was meant to say — leave the whole
+    /// `sdlog_profile` block out to leave the flight controller alone instead.
+    pub topics: Vec<SdlogTopics>,
+
+    /// Whether FLO may reboot the flight controller to make a changed value
+    /// take effect.
+    ///
+    /// PX4 reads `SDLOG_PROFILE` once, when its `logger` module starts, and
+    /// marks the parameter `@reboot_required`. Storing a new value therefore
+    /// changes nothing about the flight in progress. The trade-offs are the
+    /// same as for [`PpkLoggingConfig::reboot_to_apply`], and when both are on
+    /// the two parameters share a single reboot.
+    #[serde(
+        default = "default_reboot_to_apply",
+        skip_serializing_if = "is_default_reboot_to_apply"
+    )]
+    pub reboot_to_apply: bool,
+}
+
+impl SdlogProfileConfig {
+    /// The bitmask PX4 expects in `SDLOG_PROFILE`.
+    pub fn px4_value(&self) -> i32 {
+        self.topics.iter().fold(0, |acc, t| acc | t.px4_bit())
+    }
+}
+
 /// MAVLink configuration
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -435,6 +537,11 @@ pub struct MavlinkConfig {
     /// Left alone entirely when absent.
     #[serde(default, skip_serializing_if = "is_default")]
     pub ppk_logging: Option<PpkLoggingConfig>,
+
+    /// Which sets of topics the flight controller writes to its own flight log.
+    /// Left alone entirely when absent.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub sdlog_profile: Option<SdlogProfileConfig>,
 }
 
 impl MavlinkConfig {
@@ -471,9 +578,9 @@ fn is_default_mavlink_batt_s(val: &u8) -> bool {
 }
 
 fn default_reboot_to_apply() -> bool {
-    // Without a reboot, configuring raw-GNSS logging does nothing until the
-    // flight controller is next power-cycled, which is rarely what someone
-    // switching it on meant.
+    // Both parameters this governs are read once at boot, so without a reboot
+    // configuring them does nothing until the flight controller is next
+    // power-cycled -- rarely what someone switching them on meant.
     true
 }
 
@@ -491,6 +598,7 @@ impl Default for MavlinkConfig {
             set_gps_global_origin: Default::default(),
             ntrip_url: Default::default(),
             ppk_logging: Default::default(),
+            sdlog_profile: Default::default(),
         }
     }
 }
@@ -834,6 +942,114 @@ mod ppk_logging_config_tests {
         assert_eq!(GpsDumpComm::Disabled.px4_value(), 0);
         assert_eq!(GpsDumpComm::FullCommunication.px4_value(), 1);
         assert_eq!(GpsDumpComm::RtcmOutput.px4_value(), 2);
+    }
+}
+
+#[cfg(test)]
+mod sdlog_profile_config_tests {
+    use super::{MavlinkConfig, SdlogProfileConfig, SdlogTopics};
+
+    fn parse(yaml: &str) -> MavlinkConfig {
+        serde_yaml::from_str(yaml).expect("MAVLink config should parse")
+    }
+
+    /// A config that says nothing about logging leaves the flight controller's
+    /// profile alone.
+    #[test]
+    fn the_profile_is_absent_by_default() {
+        assert_eq!(
+            parse("port_path: serial:/dev/ttyUSB0:57600").sdlog_profile,
+            None
+        );
+    }
+
+    #[test]
+    fn topics_are_named_and_rebooting_to_apply_is_the_default() {
+        let cfg = parse(
+            "port_path: serial:/dev/ttyUSB0:57600\n\
+             sdlog_profile:\n  topics: [default_set, high_rate]\n",
+        );
+        assert_eq!(
+            cfg.sdlog_profile,
+            Some(SdlogProfileConfig {
+                topics: vec![SdlogTopics::DefaultSet, SdlogTopics::HighRate],
+                reboot_to_apply: true,
+            })
+        );
+    }
+
+    #[test]
+    fn rebooting_to_apply_can_be_declined() {
+        let cfg = parse(
+            "port_path: serial:/dev/ttyUSB0:57600\n\
+             sdlog_profile:\n  topics: [default_set]\n  reboot_to_apply: false\n",
+        );
+        assert!(!cfg.sdlog_profile.expect("configured").reboot_to_apply);
+    }
+
+    /// The whole reason the config names bits instead of carrying the number:
+    /// "high rate" is bit 4, so it is worth 16, and a config that had said `4`
+    /// would have asked for thermal calibration with the default set dropped.
+    #[test]
+    fn high_rate_logging_is_seventeen_not_four() {
+        let cfg = SdlogProfileConfig {
+            topics: vec![SdlogTopics::DefaultSet, SdlogTopics::HighRate],
+            reboot_to_apply: true,
+        };
+        assert_eq!(cfg.px4_value(), 17);
+        assert_eq!(SdlogTopics::HighRate.px4_bit(), 16);
+        assert_eq!(SdlogTopics::ThermalCalibration.px4_bit(), 4);
+    }
+
+    #[test]
+    fn order_and_repeats_do_not_change_the_value() {
+        let forwards = SdlogProfileConfig {
+            topics: vec![SdlogTopics::DefaultSet, SdlogTopics::EstimatorReplay],
+            reboot_to_apply: true,
+        };
+        let backwards_with_a_repeat = SdlogProfileConfig {
+            topics: vec![
+                SdlogTopics::EstimatorReplay,
+                SdlogTopics::DefaultSet,
+                SdlogTopics::EstimatorReplay,
+            ],
+            reboot_to_apply: true,
+        };
+        assert_eq!(forwards.px4_value(), 3);
+        assert_eq!(backwards_with_a_repeat.px4_value(), 3);
+    }
+
+    /// No named set may push the value past what PX4 v1.15 accepts as the
+    /// parameter's maximum, or the flight controller would refuse the write.
+    #[test]
+    fn every_named_set_fits_in_the_firmware_range() {
+        let all = SdlogProfileConfig {
+            topics: vec![
+                SdlogTopics::DefaultSet,
+                SdlogTopics::EstimatorReplay,
+                SdlogTopics::ThermalCalibration,
+                SdlogTopics::SystemIdentification,
+                SdlogTopics::HighRate,
+                SdlogTopics::Debug,
+                SdlogTopics::SensorComparison,
+                SdlogTopics::VisionAndAvoidance,
+                SdlogTopics::RawImuFifoGyro,
+                SdlogTopics::RawImuFifoAccel,
+                SdlogTopics::MavlinkTunnel,
+            ],
+            reboot_to_apply: true,
+        };
+        assert_eq!(all.px4_value(), 2047);
+    }
+
+    /// Asking for nothing is asking for nothing, not asking to be left alone.
+    #[test]
+    fn an_empty_list_disables_logging_outright() {
+        let cfg = parse(
+            "port_path: serial:/dev/ttyUSB0:57600\n\
+             sdlog_profile:\n  topics: []\n",
+        );
+        assert_eq!(cfg.sdlog_profile.expect("configured").px4_value(), 0);
     }
 }
 

@@ -14,7 +14,7 @@ use mavlink::{
 };
 
 mod ntrip;
-mod ppk;
+mod px4_params;
 
 /// The `mavlink` crate this was built against.
 ///
@@ -263,10 +263,11 @@ impl DroneCoordinator {
             }
         }
 
-        // Bring the flight controller's raw-GNSS logging in line with the
-        // config. This goes first because it can end in a reboot, which would
-        // discard the stream requests below and the global origin with them.
-        self_.apply_ppk_logging_config().await?;
+        // Bring the flight controller's own recording parameters in line with
+        // the config. This goes first because it can end in a reboot, which
+        // would discard the stream requests below and the global origin with
+        // them.
+        self_.apply_px4_param_config().await?;
 
         // Below is the old Self::request_streams() method, now moved into the constructor.
 
