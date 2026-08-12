@@ -46,6 +46,50 @@ impl GnssRtkMode {
     }
 }
 
+/// A global WGS84 position in the integer units carried by MAVLink.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
+pub struct GlobalPosition {
+    /// Latitude in units of 1e-7 degrees.
+    pub latitude_e7: i32,
+    /// Longitude in units of 1e-7 degrees.
+    pub longitude_e7: i32,
+    /// Altitude above mean sea level, in millimeters.
+    pub altitude_msl_mm: i32,
+}
+
+impl GlobalPosition {
+    pub fn latitude_deg(&self) -> FloatType {
+        self.latitude_e7 as FloatType / 1e7
+    }
+
+    pub fn longitude_deg(&self) -> FloatType {
+        self.longitude_e7 as FloatType / 1e7
+    }
+
+    pub fn altitude_msl_m(&self) -> FloatType {
+        self.altitude_msl_mm as FloatType / 1e3
+    }
+}
+
+impl std::fmt::Display for GlobalPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:.7}, {:.7}, {:.3} m",
+            self.latitude_deg(),
+            self.longitude_deg(),
+            self.altitude_msl_m()
+        )
+    }
+}
+
+/// Satellite-geometry dilution reported by the primary GNSS receiver.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Default)]
+pub struct GnssDop {
+    pub horizontal: Option<FloatType>,
+    pub vertical: Option<FloatType>,
+}
+
 /// A flight controller's local-position origin, in MAVLink's own units.
 ///
 /// Both `SET_GPS_GLOBAL_ORIGIN` and `GPS_GLOBAL_ORIGIN` carry these integers,
@@ -272,6 +316,16 @@ pub struct MavlinkState {
     /// MAVLink's unknown sentinel or has not reported GNSS state yet.
     #[serde(default)]
     pub satellites_visible: Option<u8>,
+    /// Raw position from PX4's selected primary GNSS receiver.
+    #[serde(default)]
+    pub gnss_location: Option<GlobalPosition>,
+    /// HDOP and VDOP from the same receiver sample as [`Self::gnss_location`].
+    #[serde(default)]
+    pub gnss_dop: Option<GnssDop>,
+    /// PX4 estimator output, corresponding to `LOCAL_POSITION_NED` through
+    /// [`Self::gps_origin`]. This is deliberately separate from raw GNSS.
+    #[serde(default)]
+    pub fused_global_position: Option<GlobalPosition>,
     /// NTRIP correction-stream throughput averaged over the preceding five
     /// seconds. `None` means no NTRIP source is configured.
     #[serde(default)]
@@ -787,7 +841,7 @@ impl FlightMode {
 
 #[cfg(test)]
 mod mavlink_state_tests {
-    use super::{Attitude, LocalPositionNed, flight_mode_label};
+    use super::{Attitude, GlobalPosition, LocalPositionNed, flight_mode_label};
 
     fn at(north_m: f64, east_m: f64) -> LocalPositionNed {
         LocalPositionNed {
@@ -805,6 +859,16 @@ mod mavlink_state_tests {
             down_m: -100.0,
         };
         assert!((position.horizontal_distance_m() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_global_position_displays_mavlink_units_as_degrees_and_meters() {
+        let position = GlobalPosition {
+            latitude_e7: 480_038_000,
+            longitude_e7: 78_449_000,
+            altitude_msl_mm: 278_123,
+        };
+        assert_eq!(position.to_string(), "48.0038000, 7.8449000, 278.123 m");
     }
 
     #[test]

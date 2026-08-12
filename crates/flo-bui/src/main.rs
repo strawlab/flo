@@ -1424,7 +1424,7 @@ impl App {
             Some(custom_mode) => flight_mode_label(custom_mode),
             None => NO_DATA.to_string(),
         };
-        let gnss = match (&mavlink.gnss_rtk_mode, mavlink.satellites_visible) {
+        let gnss_status = match (&mavlink.gnss_rtk_mode, mavlink.satellites_visible) {
             (Some(mode), Some(satellites)) => {
                 format!("{} · {satellites} sats", mode.label())
             }
@@ -1432,6 +1432,20 @@ impl App {
             (None, Some(satellites)) => format!("{} · {satellites} sats", NO_DATA),
             (None, None) => NO_DATA.to_string(),
         };
+        let gnss_dop = match mavlink.gnss_dop {
+            Some(dop) => format!(
+                "H {} · V {}",
+                optional_decimal(dop.horizontal),
+                optional_decimal(dop.vertical)
+            ),
+            None => NO_DATA.to_string(),
+        };
+        let gnss_location = mavlink
+            .gnss_location
+            .map_or_else(|| NO_DATA.to_string(), |location| location.to_string());
+        let fused_global_position = mavlink
+            .fused_global_position
+            .map_or_else(|| NO_DATA.to_string(), |position| position.to_string());
         // Each triple is shown as one readout: all three numbers come from the
         // same message, so they are present or absent together, and keeping them
         // on one line is both how they are read and one row instead of two on a
@@ -1462,7 +1476,10 @@ impl App {
                 <h2>{"MAVLINK"}</h2>
                 <div class="qqgrid">
                     { qqblock("Flight mode", flight_mode) }
-                    { qqblock("GNSS", gnss) }
+                    { qqblock("GNSS status", gnss_status) }
+                    { qqblock("GNSS DOP (H/V)", gnss_dop) }
+                    { qqblock_wide("GNSS location (lat, lon, MSL alt)", gnss_location) }
+                    { qqblock_wide("Fused global location (lat, lon, MSL alt)", fused_global_position) }
                     { qqblock("Horizontal offset", offset) }
                     { qqblock_wide("Local position (N, E, D)", position) }
                     { qqblock_wide("Attitude (yaw, pitch, roll)", attitude) }
@@ -1543,6 +1560,10 @@ async fn post_message(msg: &flo_core::FloCommand) -> Result<(), FetchError> {
 
 /// Shown in place of a value the flight controller has not reported yet.
 const NO_DATA: &str = "—";
+
+fn optional_decimal(value: Option<FloatType>) -> String {
+    value.map_or_else(|| NO_DATA.to_string(), |value| format!("{value:.2}"))
+}
 
 /// The URL fragment that selects the phone view (see [`mobile`]).
 ///

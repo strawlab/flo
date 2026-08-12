@@ -10,8 +10,8 @@ pub use events::*;
 
 pub mod drone_structs;
 pub use drone_structs::{
-    Attitude, DroneChannelData, GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, GpsOriginStatus,
-    LocalPositionNed, MavlinkState, RcConfig, flight_mode_label,
+    Attitude, DroneChannelData, GlobalPosition, GnssDop, GnssRtkMode, GpsGlobalOrigin,
+    GpsOriginCheck, GpsOriginStatus, LocalPositionNed, MavlinkState, RcConfig, flight_mode_label,
 };
 
 mod eucm_camera;

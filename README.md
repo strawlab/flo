@@ -213,9 +213,12 @@ on screen — leaving it stops the camera producing preview frames.
 
 When a flight controller is configured, the BUI grows a **MAVLINK** block
 showing what that controller reports: flight mode, GNSS/RTK fix, attitude, the
-drone's position in the local NED frame, and how far and which way that is from
-the origin (`SW 200 m`). Without a flight controller none of this is sent and
-the block does not appear.
+primary GNSS receiver's raw location and H/V DOP, the estimator's fused global
+location, the drone's position in the local NED frame, and how far and which way
+that is from the origin (`SW 200 m`). Showing raw and fused global locations
+separately makes it possible to distinguish a receiver discrepancy from an
+estimator/origin discrepancy. Without a flight controller none of this is sent
+and the block does not appear.
 
 The block updates once a second, with the rest of the state event. It is a
 readout for checking that the controller is saying what it should, not an

@@ -1,16 +1,17 @@
 use eyre::{Ok, Result, WrapErr};
+use mavlink::{
+    MavHeader,
+    ardupilotmega::{MavComponent, MavMessage, MavModeFlag},
+};
+
 use flo_core::{
     Angle, Broadway, CommandSource, DeviceMode, DisplaySource, DroneChannelData, FloCommand,
     FloEvent, FloatType, LocalFloState, ModeChangeReason, MyTimestamp, SaveToDiskMsg, StampedJson,
     drone_structs::{
-        self, Attitude, BatteryState, ChannelCondition, DroneEvent, GnssRtkMode, GpsGlobalOrigin,
-        GpsOriginCheck, LocalPositionNed,
+        self, Attitude, BatteryState, ChannelCondition, DroneEvent, GlobalPosition, GnssDop,
+        GnssRtkMode, GpsGlobalOrigin, GpsOriginCheck, LocalPositionNed,
     },
     elapsed, now,
-};
-use mavlink::{
-    MavHeader,
-    ardupilotmega::{MavComponent, MavMessage, MavModeFlag},
 };
 
 mod ntrip;
@@ -169,6 +170,14 @@ fn convert_satellites_visible(satellites_visible: u8) -> Option<u8> {
     (satellites_visible != u8::MAX).then_some(satellites_visible)
 }
 
+fn convert_dop(dop_times_100: u16) -> Option<FloatType> {
+    (dop_times_100 != u16::MAX).then_some(dop_times_100 as FloatType / 100.0)
+}
+
+fn gnss_has_location(mode: &GnssRtkMode) -> bool {
+    !matches!(mode, GnssRtkMode::NoGps | GnssRtkMode::NoFix)
+}
+
 fn is_local_position_out_of_bounds(v: &mavlink::ardupilotmega::LOCAL_POSITION_NED_DATA) -> bool {
     const MAX_LOCAL_POSITION_DIST_METERS: f32 = 10_000.0;
     (v.x * v.x + v.y * v.y + v.z * v.z)
@@ -289,6 +298,22 @@ impl DroneCoordinator {
                 command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
                 param1: mavlink::ardupilotmega::GPS_GLOBAL_ORIGIN_DATA::ID as f32, // Message ID to be streamed
                 param2: 1_000_000.0, // Interval in microseconds
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
+                confirmation: 0,
+                ..Default::default()
+            },
+        );
+        self_.send_to_autopilot(data).await?;
+
+        // This is the estimator's global counterpart to LOCAL_POSITION_NED.
+        // Request it explicitly so debugging their relationship does not
+        // depend on the flight controller's default stream profile.
+        let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
+            mavlink::ardupilotmega::COMMAND_LONG_DATA {
+                command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                param1: mavlink::ardupilotmega::GLOBAL_POSITION_INT_DATA::ID as f32,
+                param2: 1_000_000.0,
                 target_system: AUTOPILOT_TARGET_SYSTEM,
                 target_component: AUTOPILOT_TARGET_COMPONENT,
                 confirmation: 0,
@@ -632,10 +657,33 @@ impl DroneCoordinator {
                 {
                     let mut state = self.local_flo_state.write().unwrap();
                     let mavlink = state.mavlink_mut();
-                    mavlink.gnss_rtk_mode = Some(convert_gnss_rtk_mode(v.fix_type));
+                    let mode = convert_gnss_rtk_mode(v.fix_type);
+                    mavlink.gnss_location = gnss_has_location(&mode).then_some(GlobalPosition {
+                        latitude_e7: v.lat,
+                        longitude_e7: v.lon,
+                        altitude_msl_mm: v.alt,
+                    });
+                    mavlink.gnss_dop = Some(GnssDop {
+                        horizontal: convert_dop(v.eph),
+                        vertical: convert_dop(v.epv),
+                    });
+                    mavlink.gnss_rtk_mode = Some(mode);
                     mavlink.satellites_visible = convert_satellites_visible(v.satellites_visible);
                 }
                 save("GPS_RAW_INT", logger, &v)?;
+            }
+            MavMessage::GLOBAL_POSITION_INT(v) => {
+                let position = GlobalPosition {
+                    latitude_e7: v.lat,
+                    longitude_e7: v.lon,
+                    altitude_msl_mm: v.alt,
+                };
+                self.local_flo_state
+                    .write()
+                    .unwrap()
+                    .mavlink_mut()
+                    .fused_global_position = Some(position);
+                save("GLOBAL_POSITION_INT", logger, &v)?;
             }
             MavMessage::LOCAL_POSITION_NED(v) => {
                 let local_position_out_of_bounds = is_local_position_out_of_bounds(&v);
@@ -1040,14 +1088,28 @@ mod tests {
     use flo_core::drone_structs::RcProgramState;
 
     use super::{
-        DisplaySource, convert_satellites_visible, is_local_position_out_of_bounds,
-        rc_display_source,
+        DisplaySource, convert_dop, convert_satellites_visible, gnss_has_location,
+        is_local_position_out_of_bounds, rc_display_source,
     };
 
     #[test]
     fn mavlink_unknown_satellite_count_is_not_shown_as_255() {
         assert_eq!(convert_satellites_visible(18), Some(18));
         assert_eq!(convert_satellites_visible(u8::MAX), None);
+    }
+
+    #[test]
+    fn mavlink_dop_scaling_and_unknown_sentinel_are_honored() {
+        assert_eq!(convert_dop(73), Some(0.73));
+        assert_eq!(convert_dop(u16::MAX), None);
+    }
+
+    #[test]
+    fn gnss_location_is_only_valid_once_there_is_a_position_fix() {
+        assert!(!gnss_has_location(&flo_core::GnssRtkMode::NoGps));
+        assert!(!gnss_has_location(&flo_core::GnssRtkMode::NoFix));
+        assert!(gnss_has_location(&flo_core::GnssRtkMode::TwoDFix));
+        assert!(gnss_has_location(&flo_core::GnssRtkMode::RtkFixed));
     }
 
     /// The switch is a level, so the operator flicking it either way has to
