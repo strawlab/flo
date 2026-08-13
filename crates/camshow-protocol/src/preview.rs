@@ -19,6 +19,10 @@
 //!   browser, and a preview pane is a few hundred pixels wide. Sending full
 //!   sensor resolution would spend bandwidth and CPU on detail that is thrown
 //!   away twice over.
+//! - **Validated before production.** A client sends a small binary hello
+//!   before camshow considers the preview wanted. This keeps an HTTP client or
+//!   a connection to the wrong port from activating preview work or occupying
+//!   the link indefinitely.
 //! - **Self-describing per frame,** for the same reason the relay is: the
 //!   camera's geometry can change while the link is up.
 
@@ -29,9 +33,16 @@ use crate::video::{MAX_VIDEO_PAYLOAD_LEN, WirePixelFormat};
 /// wrong port fails immediately and says so.
 pub const PREVIEW_MAGIC: [u8; 4] = *b"CSPF";
 
+/// Marks a client hello on the preview link. Distinct from the frame magic so
+/// the direction of a captured message is unambiguous.
+pub const PREVIEW_CLIENT_MAGIC: [u8; 4] = *b"CSPC";
+
 /// Bumped when this framing changes incompatibly. Independent of both the
 /// control link's and the relay's versions.
-pub const PREVIEW_WIRE_VERSION: u16 = 1;
+pub const PREVIEW_WIRE_VERSION: u16 = 2;
+
+/// Size of the hello FLO sends before camshow starts producing previews.
+pub const PREVIEW_CLIENT_HELLO_LEN: usize = 6;
 
 /// Size of the fixed header preceding each frame's pixel data.
 pub const PREVIEW_HEADER_LEN: usize = 32;
@@ -65,6 +76,28 @@ pub enum PreviewWireError {
     },
     #[error("payload length {0} exceeds the maximum")]
     PayloadTooLarge(u32),
+}
+
+/// Encode the hello FLO sends immediately after connecting to the preview
+/// port. Camshow does not activate preview production until this is validated.
+pub fn encode_client_hello() -> [u8; PREVIEW_CLIENT_HELLO_LEN] {
+    let mut out = [0u8; PREVIEW_CLIENT_HELLO_LEN];
+    out[0..4].copy_from_slice(&PREVIEW_CLIENT_MAGIC);
+    out[4..6].copy_from_slice(&PREVIEW_WIRE_VERSION.to_le_bytes());
+    out
+}
+
+/// Validate a preview client hello.
+pub fn decode_client_hello(bytes: &[u8; PREVIEW_CLIENT_HELLO_LEN]) -> Result<(), PreviewWireError> {
+    let magic: [u8; 4] = bytes[0..4].try_into().expect("4 bytes");
+    if magic != PREVIEW_CLIENT_MAGIC {
+        return Err(PreviewWireError::BadMagic(magic));
+    }
+    let version = u16::from_le_bytes(bytes[4..6].try_into().expect("2 bytes"));
+    if version != PREVIEW_WIRE_VERSION {
+        return Err(PreviewWireError::VersionMismatch { peer: version });
+    }
+    Ok(())
 }
 
 /// The fixed header preceding one preview frame's pixel data.
@@ -202,6 +235,20 @@ mod tests {
         assert_eq!(encoded.len(), PREVIEW_HEADER_LEN);
         assert_eq!(PreviewFrameHeader::decode(&encoded).unwrap(), original);
         assert_eq!(original.payload_len, 640 * 360 * 3);
+    }
+
+    #[test]
+    fn client_hello_roundtrips() {
+        decode_client_hello(&encode_client_hello()).unwrap();
+    }
+
+    #[test]
+    fn an_http_request_is_not_a_preview_client() {
+        let request_prefix = *b"GET / ";
+        assert_eq!(
+            decode_client_hello(&request_prefix),
+            Err(PreviewWireError::BadMagic(*b"GET "))
+        );
     }
 
     #[test]

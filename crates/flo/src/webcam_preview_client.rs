@@ -10,12 +10,15 @@
 //! send anything. Closing the page returns the whole path to rest within a few
 //! seconds.
 
-use camshow_protocol::preview::{PREVIEW_HEADER_LEN, PreviewFrameHeader};
+use camshow_protocol::preview::{PREVIEW_HEADER_LEN, PreviewFrameHeader, encode_client_hello};
 use camshow_protocol::video::WirePixelFormat;
 use color_eyre::eyre::{self, Result, WrapErr};
 use flo_webserver::WebcamPreview;
 use machine_vision_formats::{image_ref::ImageRef, pixel_format::RGB8};
-use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use tracing::{debug, info, warn};
 
 /// How long to wait before reconnecting after the link fails or ends.
@@ -64,6 +67,10 @@ pub(crate) async fn run(addr: String, preview: WebcamPreview) -> Result<()> {
 
 /// Read frames until the link fails or the preview stops being wanted.
 async fn read_frames(mut stream: TcpStream, preview: &WebcamPreview) -> Result<()> {
+    stream
+        .write_all(&encode_client_hello())
+        .await
+        .context("sending preview client hello")?;
     let mut header_buf = [0u8; PREVIEW_HEADER_LEN];
     loop {
         stream

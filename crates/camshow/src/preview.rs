@@ -16,10 +16,17 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use camshow_protocol::{preview::PreviewFrameHeader, video::WirePixelFormat};
+use camshow_protocol::{
+    preview::{PREVIEW_CLIENT_HELLO_LEN, PreviewFrameHeader, decode_client_hello},
+    video::WirePixelFormat,
+};
 use eyre::{Result, WrapErr};
 use machine_vision_formats::{ImageData, Stride, owned::OImage, pixel_format::RGB8};
-use tokio::{io::AsyncWriteExt, net::TcpListener, sync::watch};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::watch,
+};
 use tracing::{debug, info, warn};
 
 use crate::state::Timestamp;
@@ -84,8 +91,12 @@ impl PreviewServer {
             .await
             .with_context(|| format!("binding preview listener at {listen_addr}"))?;
         info!("preview link listening on {}", listener.local_addr()?);
+        self.run_on_listener(listener).await
+    }
+
+    async fn run_on_listener(&mut self, listener: TcpListener) -> Result<()> {
         loop {
-            let (stream, peer) = match listener.accept().await {
+            let (mut stream, peer) = match listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => {
                     warn!("preview accept error: {e}; retrying");
@@ -93,6 +104,10 @@ impl PreviewServer {
                     continue;
                 }
             };
+            if let Err(e) = read_client_hello(&mut stream).await {
+                debug!("rejecting non-preview client {peer}: {e}");
+                continue;
+            }
             debug!("preview link connected from {peer}");
             self.connected.store(true, Ordering::Relaxed);
             // Only frames captured from here on: whatever is in the channel
@@ -139,6 +154,22 @@ impl PreviewServer {
     }
 }
 
+/// A peer must identify itself promptly before it can activate preview work.
+/// In particular, a browser's HTTP request is rejected here and the accept
+/// loop remains available to FLO.
+async fn read_client_hello<R>(stream: &mut R) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    let mut hello = [0u8; PREVIEW_CLIENT_HELLO_LEN];
+    tokio::time::timeout(HELLO_TIMEOUT, stream.read_exact(&mut hello))
+        .await
+        .wrap_err("preview client did not identify itself in time")??;
+    decode_client_hello(&hello).wrap_err("invalid preview client hello")
+}
+
 /// Longest edge of a preview frame. flo re-encodes these to JPEG for a pane a
 /// few hundred pixels wide, so anything larger is detail thrown away twice.
 pub(crate) const PREVIEW_MAX_WIDTH: u32 = 640;
@@ -179,7 +210,42 @@ pub(crate) fn downscale_rgb8(src: &OImage<RGB8>) -> OImage<RGB8> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+
     use super::*;
+
+    #[tokio::test]
+    async fn a_browser_is_rejected_before_it_activates_the_preview() {
+        let (mut browser, mut server) = tokio::io::duplex(64);
+        browser.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+
+        assert!(read_client_hello(&mut server).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_browser_does_not_block_the_next_preview_client() {
+        let (sink, mut server) = channel();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move { server.run_on_listener(listener).await });
+
+        let mut browser = tokio::net::TcpStream::connect(addr).await.unwrap();
+        browser.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+
+        let mut flo = tokio::net::TcpStream::connect(addr).await.unwrap();
+        flo.write_all(&camshow_protocol::preview::encode_client_hello())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !sink.wanted() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the valid client should be accepted after the browser");
+
+        server_task.abort();
+    }
 
     /// `width` x `height` where each pixel's red channel is its column index,
     /// so a subsample can be checked by value.
