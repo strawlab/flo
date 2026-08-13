@@ -20,6 +20,14 @@ const BAUD_RATE: u32 = 115_200;
 /// A short stream warm-up used before sending the first control command.
 const STREAM_WARMUP_PACKETS: u64 = 100;
 const STREAM_WARMUP_SETTLE_DURATION: Duration = Duration::from_millis(250);
+/// Let bytes already queued by a previous run's realtime stream drain after we
+/// unregister it. A full 255-byte controller buffer takes about 22 ms to send
+/// at 115200 baud; this leaves comfortable margin.
+const STARTUP_STREAM_DRAIN_DURATION: Duration = Duration::from_millis(50);
+/// A parameter response is large enough that the controller may drop it when
+/// its transmit buffer is busy. Repeat the required query until it arrives.
+const OFFSETS_QUERY_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const OFFSETS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to keep collecting startup query responses once the required
 /// encoder offsets have arrived.
 ///
@@ -27,6 +35,19 @@ const STREAM_WARMUP_SETTLE_DURATION: Duration = Duration::from_millis(250);
 /// are provenance, and provenance must never be able to ground the aircraft --
 /// if a board does not answer them, that is recorded and startup continues.
 const PROVENANCE_COLLECT_TIMEOUT: Duration = Duration::from_millis(1500);
+
+fn realtime_stream_command(interval: u16) -> OutgoingCommand {
+    let msg_data = custom_messages::RequestStreamIntervalCustom {
+        interval,
+        realtime_data_custom_flags: 1 << 11 /*ENCODER_RAW24*/ | 1 << 0 /*IMU_ANGLES*/ | 1 << 4, /*GYRO_DATA*/
+        sync_to_data: true,
+        ..Default::default()
+    };
+    OutgoingCommand::RawMessage(simplebgc::RawMessage {
+        typ: simplebgc::constants::CMD_DATA_STREAM_INTERVAL,
+        payload: Payload::to_bytes(&msg_data),
+    })
+}
 
 struct InitializationResult {
     messages_tx: SplitSink<Framed<SerialStream, V2Codec>, OutgoingCommand>,
@@ -44,6 +65,15 @@ async fn initialize_gimbals(
 ) -> Result<InitializationResult> {
     let initialization_started = Instant::now();
     tracing::debug!("starting SimpleBGC initialization");
+
+    // Realtime streams survive the client that registered them. A previous
+    // FLO run may therefore have left the board filling this serial link at
+    // roughly 125 Hz. Unregister our exact stream before requesting the large
+    // parameter response: the SimpleBGC protocol explicitly permits that
+    // response to be skipped while the controller's transmit buffer is full.
+    messages_tx.send(realtime_stream_command(0)).await?;
+    tokio::time::sleep(STARTUP_STREAM_DRAIN_DURATION).await;
+
     {
         //send control config (to disable confirmation responses)
         let ax_cfg = simplebgc::AxisControlConfigParams {
@@ -102,25 +132,40 @@ async fn initialize_gimbals(
     // prove the link itself is alive, which is the first thing to know when the
     // offsets never show up.
     let mut unrelated_messages = 0usize;
-    let collect_deadline = Instant::now() + PROVENANCE_COLLECT_TIMEOUT;
+    let offsets_deadline = Instant::now() + OFFSETS_RESPONSE_TIMEOUT;
+    let mut collect_deadline = offsets_deadline;
+    let mut next_offsets_retry = Instant::now() + OFFSETS_QUERY_RETRY_INTERVAL;
+    let mut offsets_query_attempts = 1usize;
     while !queries.is_complete() {
-        let remaining = collect_deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let msg = match tokio::time::timeout(remaining, messages_rx.next()).await {
-            Err(_elapsed) => break,
-            Ok(None) => {
-                return Err(eyre::eyre!(
+        let deadline_remaining = collect_deadline.saturating_duration_since(Instant::now());
+        let retry_remaining = next_offsets_retry.saturating_duration_since(Instant::now());
+        let msg = tokio::select! {
+            () = tokio::time::sleep(deadline_remaining) => break,
+            () = tokio::time::sleep(retry_remaining), if queries.params_ext.is_none() => {
+                // The initial unregister may itself have arrived while the
+                // board was booting. Repeat it before each retry so a stale
+                // stream cannot keep starving the required response.
+                messages_tx.send(realtime_stream_command(0)).await?;
+                tokio::time::sleep(STARTUP_STREAM_DRAIN_DURATION).await;
+                messages_tx
+                    .send(OutgoingCommand::ReadParamsExt(ParamsQuery { profile_id: 0 }))
+                    .await?;
+                offsets_query_attempts += 1;
+                next_offsets_retry = Instant::now() + OFFSETS_QUERY_RETRY_INTERVAL;
+                tracing::debug!(offsets_query_attempts, "retried SimpleBGC encoder offsets query");
+                continue;
+            }
+            msg = messages_rx.next() => match msg {
+                None => return Err(eyre::eyre!(
                     "gimbal serial port {port_path} reached end-of-stream during startup, \
                      after answering {:?}. The device disappeared -- check for a USB \
                      disconnect or an unpowered controller.",
                     queries.answered_keys()
-                ));
-            }
-            Ok(Some(msg)) => msg.with_context(|| {
-                format!("decoding SimpleBGC startup response from gimbal on {port_path}")
-            })?,
+                )),
+                Some(msg) => msg.with_context(|| {
+                    format!("decoding SimpleBGC startup response from gimbal on {port_path}")
+                })?,
+            },
         };
         match msg {
             IncomingCommand::BoardInfo(cmd) => queries.board_info = Some(cmd),
@@ -137,9 +182,14 @@ async fn initialize_gimbals(
                 tracing::info!("gimbal encoder offsets (raw) y-p-r: {y}, {p}, {r}");
                 tracing::debug!(
                     elapsed = ?initialization_started.elapsed(),
+                    offsets_query_attempts,
                     "received SimpleBGC encoder offsets"
                 );
                 queries.params_ext = Some(cmd);
+                // Required state is now in hand. Give optional provenance its
+                // own collection window rather than making it consume the
+                // board-boot tolerance above.
+                collect_deadline = Instant::now() + PROVENANCE_COLLECT_TIMEOUT;
             }
             msg => {
                 unrelated_messages += 1;
@@ -169,8 +219,8 @@ async fn initialize_gimbals(
                 "gimbal on {port_path} did not return encoder offsets \
                  (CMD_READ_PARAMS_EXT, profile 0) within {waited:?}, though the link \
                  is alive: it answered {answered:?} and sent {unrelated_messages} \
-                 unrelated message(s). The board may still be booting, or may have \
-                 no stored parameters for profile 0."
+                 unrelated message(s) across {offsets_query_attempts} query attempts. \
+                 The board may have no stored parameters for profile 0."
             )
         }
     })?;
@@ -221,21 +271,8 @@ async fn initialize_gimbals(
 
     {
         // Request realtime encoder data stream.
-        let msg_data = custom_messages::RequestStreamIntervalCustom {
-            interval: 1,
-            realtime_data_custom_flags: 1 << 11 /*ENCODER_RAW24*/ | 1 << 0 /*IMU_ANGLES*/ | 1 << 4, /*GYRO_DATA*/
-            sync_to_data: true,
-            ..Default::default()
-        };
-
         let stream_requested_at = Instant::now();
-        results
-            .messages_tx
-            .send(OutgoingCommand::RawMessage(simplebgc::RawMessage {
-                typ: simplebgc::constants::CMD_DATA_STREAM_INTERVAL,
-                payload: Payload::to_bytes(&msg_data),
-            }))
-            .await?;
+        results.messages_tx.send(realtime_stream_command(1)).await?;
         results.stream_requested_at = stream_requested_at;
         tracing::debug!("requested SimpleBGC realtime encoder stream");
     }
@@ -276,7 +313,7 @@ pub async fn run_gimbal_loop(
         let framed = tokio_util::codec::Framed::new(serial_device, V2Codec::default());
         let (messages_tx, messages_rx) = framed.split();
         let gimbal_config_fut = initialize_gimbals(messages_tx, messages_rx, &cfg.port_path);
-        const INIT_TIMEOUT: Duration = Duration::from_millis(5000);
+        const INIT_TIMEOUT: Duration = Duration::from_secs(8);
         let ir = match tokio::time::timeout(INIT_TIMEOUT, gimbal_config_fut).await {
             Err(_elapsed) => {
                 return Err(eyre::eyre!(
@@ -748,6 +785,25 @@ fn to_msg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_and_starting_target_the_same_realtime_stream() {
+        let OutgoingCommand::RawMessage(stop) = realtime_stream_command(0) else {
+            panic!("stream command should be raw")
+        };
+        let OutgoingCommand::RawMessage(start) = realtime_stream_command(1) else {
+            panic!("stream command should be raw")
+        };
+
+        assert_eq!(stop.typ, simplebgc::constants::CMD_DATA_STREAM_INTERVAL);
+        assert_eq!(start.typ, stop.typ);
+        let mut expected_start = stop.payload.to_vec();
+        // Payload layout begins with command id followed by the little-endian
+        // interval. Registration identity is the command id plus config bytes,
+        // so interval must be the only difference between start and stop.
+        expected_start[1..3].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(start.payload.as_ref(), expected_start);
+    }
 
     #[tokio::test]
     async fn closed_motor_command_channel_requests_shutdown() {
