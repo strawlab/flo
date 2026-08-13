@@ -220,7 +220,13 @@ impl eframe::App for CamshowApp {
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
                 if let Some(tex) = self.texture.as_ref() {
-                    ui.add(egui::Image::new(tex).shrink_to_fit());
+                    let image = egui::Image::new(tex).shrink_to_fit();
+                    if is_fullscreen {
+                        let image_size = image.calc_size(panel_rect.size(), Some(tex.size_vec2()));
+                        image.paint_at(ui, centered_rect(panel_rect, image_size));
+                    } else {
+                        ui.add(image);
+                    }
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label("waiting for camera…");
@@ -252,6 +258,10 @@ impl eframe::App for CamshowApp {
                 );
             });
     }
+}
+
+fn centered_rect(outer: egui::Rect, size: egui::Vec2) -> egui::Rect {
+    egui::Rect::from_center_size(outer.center(), size)
 }
 
 fn display_source_hotkey(input: &egui::InputState) -> Option<DisplaySource> {
@@ -291,5 +301,16 @@ mod tests {
         for (key, expected) in cases {
             assert_eq!(display_source_for_key(key), Some(expected));
         }
+    }
+
+    #[test]
+    fn fullscreen_image_is_centered_in_the_panel() {
+        let panel = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let image = centered_rect(panel, egui::vec2(1440.0, 1080.0));
+
+        assert_eq!(image.left(), 240.0);
+        assert_eq!(image.right(), 1680.0);
+        assert_eq!(image.top(), 0.0);
+        assert_eq!(image.bottom(), 1080.0);
     }
 }
