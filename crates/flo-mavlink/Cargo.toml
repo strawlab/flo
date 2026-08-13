@@ -17,4 +17,4 @@ http.workspace = true
 
 flo-core = { workspace = true, default-features = true }
 tokio-mavlink.workspace = true
-robust-ntrip-client = "0.1"
+robust-ntrip-client = "0.1.1"
