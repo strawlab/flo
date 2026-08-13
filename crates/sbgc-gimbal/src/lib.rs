@@ -235,8 +235,7 @@ async fn initialize_gimbals(
                 typ: simplebgc::constants::CMD_DATA_STREAM_INTERVAL,
                 payload: Payload::to_bytes(&msg_data),
             }))
-            .await
-            .unwrap();
+            .await?;
         results.stream_requested_at = stream_requested_at;
         tracing::debug!("requested SimpleBGC realtime encoder stream");
     }
@@ -245,6 +244,7 @@ async fn initialize_gimbals(
 
 enum InternalGimbalError {
     RxTimeout,
+    Shutdown,
     Wrapped { report: eyre::Report },
 }
 
@@ -256,7 +256,8 @@ fn wrap<T: Into<eyre::Report>>(orig: T) -> InternalGimbalError {
 
 /// Run the gimbal motors.
 ///
-/// The returned future only resolves in the case of error.
+/// The returned future resolves when FLO shuts down or the gimbal encounters an
+/// unrecoverable error.
 pub async fn run_gimbal_loop(
     rx: tokio::sync::watch::Receiver<MotorValueCache>,
     motor_position_tx: tokio::sync::mpsc::Sender<MotorPositionResult>,
@@ -306,6 +307,10 @@ pub async fn run_gimbal_loop(
         {
             Ok(()) => {
                 unreachable!();
+            }
+            Err(InternalGimbalError::Shutdown) => {
+                tracing::debug!("gimbal channels closed; ending gimbal task");
+                return Ok(());
             }
             Err(InternalGimbalError::RxTimeout) => {
                 tracing::error!("Timeout elapsed reading from gimbals. Resetting.");
@@ -503,7 +508,10 @@ async fn run_gimbal_loop_internal(
                                 vtilt_imu,
                             };
 
-                            motor_position_tx.send(ret).await.unwrap();
+                            motor_position_tx
+                                .send(ret)
+                                .await
+                                .map_err(|_| InternalGimbalError::Shutdown)?;
                         }
                         _ => {
                             tracing::debug!(
@@ -552,7 +560,10 @@ async fn run_gimbal_loop_internal(
                 stream_warmup_packets = STREAM_WARMUP_PACKETS,
                 "waiting to send SimpleBGC controls until realtime stream warm-up completes"
             );
-            stream_warmed_up_rx.changed().await?;
+            stream_warmed_up_rx
+                .changed()
+                .await
+                .map_err(|_| InternalGimbalError::Shutdown)?;
         }
         tracing::debug!(
             ?STREAM_WARMUP_SETTLE_DURATION,
@@ -561,10 +572,7 @@ async fn run_gimbal_loop_internal(
         tokio::time::sleep(STREAM_WARMUP_SETTLE_DURATION).await;
 
         loop {
-            let current_motors = {
-                rx.changed().await.unwrap();
-                rx.borrow_and_update().clone()
-            };
+            let current_motors = next_motor_value(&mut rx).await?;
 
             let new_mode = (current_motors.drivemode, current_motors.rel_frame);
 
@@ -585,7 +593,8 @@ async fn run_gimbal_loop_internal(
                             yaw: AxisControlParams { speed: 0, angle: 0 },
                         },
                     }))
-                    .await?;
+                    .await
+                    .map_err(wrap)?;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             last_mode = new_mode;
@@ -628,7 +637,8 @@ async fn run_gimbal_loop_internal(
                                 },
                             },
                         }))
-                        .await?;
+                        .await
+                        .map_err(wrap)?;
                 }
                 MotorDriveMode::Speed => {
                     const SPEED_UNIT: FloatType = 0.1220740379; //1 sent to sbgc corresponds to this many degrees per second
@@ -656,7 +666,8 @@ async fn run_gimbal_loop_internal(
                                 },
                             },
                         }))
-                        .await?;
+                        .await
+                        .map_err(wrap)?;
                 }
             }
 
@@ -685,7 +696,7 @@ async fn run_gimbal_loop_internal(
             tokio::time::sleep(Duration::from_secs_f64(0.015)).await;
         }
         #[expect(unreachable_code)]
-        Ok::<_, eyre::Error>(())
+        Ok::<_, InternalGimbalError>(())
     };
 
     tokio::pin!(rx_loop);
@@ -697,13 +708,22 @@ async fn run_gimbal_loop_internal(
             rx_result
         }
         control_result = &mut control_loop => {
-            control_result.map_err(|report| InternalGimbalError::Wrapped{report})
+            control_result
         }
     };
 
     loop_result?;
 
     Ok(())
+}
+
+async fn next_motor_value(
+    rx: &mut tokio::sync::watch::Receiver<MotorValueCache>,
+) -> Result<MotorValueCache, InternalGimbalError> {
+    rx.changed()
+        .await
+        .map_err(|_| InternalGimbalError::Shutdown)?;
+    Ok(rx.borrow_and_update().clone())
 }
 
 fn to_msg(
@@ -722,5 +742,21 @@ fn to_msg(
         encoder_raw24_roll: orig.encoder_raw24.roll.into(),
         encoder_raw24_pitch: orig.encoder_raw24.pitch.into(),
         encoder_raw24_yaw: orig.encoder_raw24.yaw.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_motor_command_channel_requests_shutdown() {
+        let (tx, mut rx) = tokio::sync::watch::channel(MotorValueCache::default());
+        drop(tx);
+
+        assert!(matches!(
+            next_motor_value(&mut rx).await,
+            Err(InternalGimbalError::Shutdown)
+        ));
     }
 }
