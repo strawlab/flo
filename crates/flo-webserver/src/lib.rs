@@ -158,7 +158,7 @@ async fn webcam_preview_page_handler(
 /// The newest webcam preview image.
 ///
 /// Fetching this is also what marks the preview as wanted, which is what makes
-/// the producer connect to camshow at all. `503` when nothing recent is in
+/// the producer connect to camshow at all. `204` when nothing recent is in
 /// hand -- camshow absent, still connecting, or stopped sending -- which the
 /// page reports rather than showing a stale frame.
 async fn webcam_preview_image_handler(
@@ -166,8 +166,12 @@ async fn webcam_preview_image_handler(
     session_key: axum_token_auth::SessionKey,
 ) -> axum::response::Response {
     session_key.is_present();
-    app_state.webcam_preview.note_demand();
-    match app_state.webcam_preview.snapshot() {
+    webcam_preview_image_response(&app_state.webcam_preview)
+}
+
+fn webcam_preview_image_response(webcam_preview: &WebcamPreview) -> axum::response::Response {
+    webcam_preview.note_demand();
+    match webcam_preview.snapshot() {
         Some(jpeg) => (
             [
                 (http::header::CONTENT_TYPE, "image/jpeg"),
@@ -176,7 +180,7 @@ async fn webcam_preview_image_handler(
             jpeg.to_vec(),
         )
             .into_response(),
-        None => (StatusCode::SERVICE_UNAVAILABLE, "no webcam frame").into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 
@@ -586,8 +590,21 @@ mod tests {
 
     use super::{
         EmbeddedStrandCamRouters, build_connect_urls, nest_embedded_camera_routers,
-        server_hostname, tidy_hostname,
+        server_hostname, tidy_hostname, webcam_preview_image_response,
     };
+
+    #[tokio::test]
+    async fn missing_webcam_preview_frame_returns_no_content() {
+        let preview = super::WebcamPreview::new();
+        let response = webcam_preview_image_response(&preview);
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty());
+        assert!(preview.wanted(), "the request should still create demand");
+    }
 
     #[test]
     fn a_hostname_is_reported_as_the_machine_gives_it() {

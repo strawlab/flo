@@ -169,7 +169,10 @@ const PREVIEW_PAGE_TEMPLATE: &str = r#"<!doctype html>
     inFlight = true;
     try {
       const resp = await fetch('PREVIEW_IMAGE_PATH?t=' + Date.now(), { cache: 'no-store' });
-      if (resp.ok) {
+      if (resp.status === 204) {
+        frame.hidden = true;
+        status.textContent = 'No webcam frames. Is camshow running?';
+      } else if (resp.ok) {
         const blob = await resp.blob();
         const url = URL.createObjectURL(blob);
         const previous = frame.src;
@@ -310,6 +313,21 @@ mod tests {
         assert!(
             !page.contains("PREVIEW_IMAGE_PATH"),
             "the placeholder must be substituted"
+        );
+    }
+
+    #[test]
+    fn the_page_treats_no_content_as_a_missing_frame() {
+        let page = preview_page_html(None);
+        let no_content = page
+            .find("resp.status === 204")
+            .expect("page should recognize the no-frame response");
+        let generic_success = page
+            .find("resp.ok")
+            .expect("page should recognize an image response");
+        assert!(
+            no_content < generic_success,
+            "204 is successful HTTP and must be handled before resp.ok"
         );
     }
 }
