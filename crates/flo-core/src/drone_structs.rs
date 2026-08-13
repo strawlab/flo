@@ -593,6 +593,9 @@ pub struct MavlinkConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub set_gps_global_origin: Option<[FloatType; 3]>,
 
+    /// NTRIP caster URL. Credentials may be supplied as the systemd
+    /// `ntrip_username` and `ntrip_password` credentials, with
+    /// `NTRIP_USERNAME` and `NTRIP_PASSWORD` retained as legacy fallbacks.
     #[serde(default, skip_serializing_if = "is_default")]
     pub ntrip_url: Option<String>,
 
