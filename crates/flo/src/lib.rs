@@ -2211,9 +2211,9 @@ async fn app_main(
             .await
             .with_context(|| format!("Opening TCP listener at address \"{}\"", cli.http_addr))?;
 
-    // Filled by the preview reader below, drained by the web server. Always
-    // constructed: with no camshow configured nothing ever fills it, and the
-    // preview page simply reports that there are no frames.
+    // Filled by the preview reader below and drained by the web server. The
+    // preview page simply reports that there are no frames while camshow is
+    // absent.
     let webcam_preview = flo_webserver::WebcamPreview::new();
 
     // Run web server main loop
@@ -2261,20 +2261,19 @@ async fn app_main(
         .as_ref()
         .and_then(|c| c.camshow_addr.clone());
     let (camshow_precapture_secs_tx, camshow_precapture_secs_rx) = watch::channel(0.0f64);
-    // The preview reader is spawned whenever camshow is configured at all: it
-    // sits idle, not even connected, until the preview page is opened. Its
-    // address defaults to the standard preview port on camshow's host.
-    if camshow_addr.is_some() {
-        let preview_addr = device_config
-            .osd_config
-            .as_ref()
-            .and_then(|c| c.camshow_preview_addr.clone())
-            .unwrap_or_else(|| camshow_protocol::preview::DEFAULT_CAMSHOW_PREVIEW_ADDR.to_string());
-        handle.spawn(webcam_preview_client::run(
-            preview_addr,
-            webcam_preview.clone(),
-        ));
-    }
+    // The preview link is independent of the control link. Always spawn its
+    // reader so a camshow started later (or used only for preview) is picked up
+    // without restarting FLO. It sits idle, not even connected, until the
+    // preview page is opened.
+    let preview_addr = device_config
+        .osd_config
+        .as_ref()
+        .and_then(|c| c.camshow_preview_addr.clone())
+        .unwrap_or_else(|| camshow_protocol::preview::DEFAULT_CAMSHOW_PREVIEW_ADDR.to_string());
+    handle.spawn(webcam_preview_client::run(
+        preview_addr,
+        webcam_preview.clone(),
+    ));
 
     let (canvas_tx, camshow_recording_tx, mut camshow_task) = if let Some(addr) = camshow_addr {
         let (canvas_tx, canvas_rx) = watch::channel(osd_utils::OsdCache::new(30, 16));

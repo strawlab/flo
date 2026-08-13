@@ -803,23 +803,14 @@ impl App {
         }
     }
 
-    /// The FPV webcam's entry in [`Self::camera_links`], or `None` when camshow
-    /// is not configured and there is therefore no webcam to preview.
+    /// The FPV webcam's entry in [`Self::camera_links`].
     ///
     /// The preview costs work in camshow and in flo for as long as the page is
     /// up, so it is something the operator opens beside the main UI and closes
     /// again. A plain link rather than a scripted popup, so popup blockers
     /// leave it alone and the window goes where they want it.
-    fn webcam_preview_link(&self) -> Option<Html> {
-        let configured = self
-            .cfg
-            .as_ref()
-            .and_then(|cfg| cfg.osd_config.as_ref())
-            .is_some_and(|osd| osd.camshow_addr.is_some());
-        if !configured {
-            return None;
-        }
-        Some(html! {
+    fn webcam_preview_link(&self) -> Html {
+        html! {
             <li key="fpv-webcam">
                 <a
                     href={format!("/{}", flo_core::WEBCAM_PREVIEW_PATH)}
@@ -828,7 +819,7 @@ impl App {
                 >{"FPV webcam"}</a>
                 {" (Preview)"}
             </li>
-        })
+        }
     }
 
     fn camshow_display_view(&self, ctx: &Context<Self>) -> Html {
@@ -1066,11 +1057,6 @@ impl App {
             }
         }
 
-        let webcam_preview = self.webcam_preview_link();
-        if self.strand_cameras.is_empty() && webcam_preview.is_none() {
-            return html! { <p>{"No cameras configured."}</p> };
-        }
-
         html! {
             <ul class="camera-list">
                 { for self.strand_cameras.iter().map(|camera| {
@@ -1084,7 +1070,7 @@ impl App {
                         </li>
                     }
                 }) }
-                { webcam_preview.unwrap_or_default() }
+                { self.webcam_preview_link() }
             </ul>
         }
     }

@@ -265,7 +265,7 @@ struct AppState {
     /// when a device-connection QR code is requested.
     persistent_secret: cookie::Key,
     /// The newest webcam preview image, filled by whoever is reading camshow's
-    /// preview link. Empty, and left that way, when no camshow is configured.
+    /// preview link. Empty while camshow is absent or nobody is watching.
     webcam_preview: WebcamPreview,
     /// What this machine calls itself, looked up once at startup. `None` when
     /// the operating system reported no usable name.
