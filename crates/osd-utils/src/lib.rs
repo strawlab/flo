@@ -232,6 +232,17 @@ pub fn test_pattern() -> OsdCache {
     canvas
 }
 
+/// A minimal canvas standing in for flo's live OSD when no fresh update has
+/// arrived recently, so a dead or dropped control link is visible on the
+/// display instead of leaving the corner silently blank.
+pub fn flo_disconnected_pattern() -> OsdCache {
+    use flo_core::osd_structs::Align;
+
+    let mut canvas = OsdCache::new(20, 1);
+    canvas.print(b"FLO DISCONNECTED", 0, 0, Align::Left);
+    canvas
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

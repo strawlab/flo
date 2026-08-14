@@ -438,6 +438,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
     let mut last_fallback_warn: Option<Instant> = None;
     let mut display_source = *display_source_rx.borrow_and_update();
     let mut relay_selector = RelayFrameSelector::new(display_source);
+    let disconnected_canvas = osd_utils::flo_disconnected_pattern();
 
     loop {
         if shutting_down.load(Ordering::Acquire) {
@@ -503,18 +504,21 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         let timestamp = frame.timestamp;
 
         let osd_snapshot = osd_rx.borrow_and_update().clone();
-        // TODO: investigate what happens when data is stale.
-        // We probably want to show an error on the OSD like "STALE".
         let live_canvas = osd_snapshot
             .as_ref()
             .filter(|s| s.received_at.elapsed() < OSD_STALE_AFTER)
             .map(|s| &s.canvas);
-        // Live OSD takes precedence; the test pattern is the fallback when
-        // flo isn't pushing. Note that this is the canvas flo currently *has*,
-        // not necessarily the one that gets drawn: it is also what the
-        // recording's SRT sidecar logs, and that must stay true even while a
-        // tracking camera is displayed and nothing is stamped at all.
-        let active_canvas = live_canvas.or(test_pattern.as_ref());
+        // Live OSD takes precedence; the test pattern is the opt-in fallback
+        // for verifying the render pipeline without flo running; otherwise
+        // the disconnected notice makes a dead or dropped link visible
+        // instead of leaving the corner blank. Note that this is the canvas
+        // flo currently *has*, not necessarily the one that gets drawn: it is
+        // also what the recording's SRT sidecar logs, and that must stay true
+        // even while a tracking camera is displayed and nothing is stamped at
+        // all.
+        let active_canvas = live_canvas
+            .or(test_pattern.as_ref())
+            .or(Some(&disconnected_canvas));
 
         // A relayed tracking-camera frame is shown as it came in: the OSD
         // canvas is calibrated for the FPV camera, so stamping it onto an IR
