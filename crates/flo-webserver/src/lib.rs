@@ -234,7 +234,7 @@ fn is_loopback_uri(uri: &http::Uri) -> bool {
 async fn handle_auth_error(err: tower::BoxError) -> (StatusCode, &'static str) {
     match err.downcast::<axum_token_auth::ValidationErrors>() {
         Ok(err) => {
-            tracing::error!(
+            tracing::warn!(
                 "Validation error(s): {:?}",
                 err.errors().collect::<Vec<_>>()
             );
