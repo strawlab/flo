@@ -195,11 +195,6 @@ struct Cli {
     #[arg(long)]
     osd: Option<String>,
 
-    /// TCP address of a `camshow` instance to push OSD canvas updates and
-    /// recording control to. Overrides `osd_config.camshow_addr` if set.
-    #[arg(long)]
-    camshow: Option<String>,
-
     /// The address to bind for the HTTP server
     #[arg(long, default_value = "0.0.0.0:2222")]
     http_addr: String,
@@ -1710,23 +1705,6 @@ where
             "osd device is provided but osd configuration is missing. Using built-in defaults."
         );
         cfg.cal = Some(flo_core::FpvCameraOSDCalibration::default());
-    }
-
-    // CLI `--camshow` overrides any address from the config file. If only
-    // the CLI is provided and there is no `osd_config`, synthesize a minimal
-    // one so the camshow link still works.
-    if let Some(addr) = cli.camshow.as_ref() {
-        let cfg = device_config
-            .osd_config
-            .get_or_insert_with(|| flo_core::OsdConfig {
-                port_path: None,
-                cal: Some(flo_core::FpvCameraOSDCalibration::default()),
-                blob: Default::default(),
-                camshow_addr: None,
-                camshow_preview_addr: None,
-                camshow_mp4_cfg: None,
-            });
-        cfg.camshow_addr = Some(addr.clone());
     }
 
     if let Some(gimbal_port) = &cli.gimbal {
