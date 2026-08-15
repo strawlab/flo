@@ -1592,6 +1592,15 @@ where
 
     flo_tracing::init_tracing(&log_dir, "flo")?;
 
+    // What produced this run, said before anything else happens. Each `.floz`
+    // carries the same list, but a session that records nothing -- or that
+    // fails before its first recording, which is exactly when the question
+    // gets asked -- leaves the log as the only account of which build ran.
+    // Same wording as `--version`, one component per line so it greps.
+    for component in &component_versions {
+        tracing::info!("component: {component}");
+    }
+
     let device_id = match get_device_id() {
         Ok(device_id) => device_id,
         Err(e) => {
