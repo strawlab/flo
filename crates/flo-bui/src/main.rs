@@ -1624,6 +1624,14 @@ fn gps_origin_div(status: &GpsOriginStatus) -> Html {
     };
     let (note, class) = match status.check {
         GpsOriginCheck::NotRequested => (String::new(), "gps-origin-ok"),
+        GpsOriginCheck::AwaitingGpsFix => (
+            "waiting for a usable GPS fix before setting the configured origin".to_string(),
+            "gps-origin-warn",
+        ),
+        GpsOriginCheck::AwaitingSafeToSet => (
+            "waiting until the vehicle is disarmed, on the ground, and not recording".to_string(),
+            "gps-origin-warn",
+        ),
         GpsOriginCheck::Awaiting => (
             "not yet confirmed by the flight controller".to_string(),
             "gps-origin-warn",

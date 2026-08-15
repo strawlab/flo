@@ -918,6 +918,11 @@ pub struct LocalFloStateInner {
     /// in, and that task runs only when one is configured.
     #[serde(default)]
     pub mavlink: Option<MavlinkState>,
+    /// Whether FLO is currently writing a recording. MAVLink setup operations
+    /// that would change the meaning of recorded positions wait until this is
+    /// false.
+    #[serde(default)]
+    pub is_recording: bool,
     /// True when LOCAL_POSITION_NED is >=10km from global origin.
     #[serde(default)]
     pub local_position_out_of_bounds: bool,

@@ -178,6 +178,18 @@ fn gnss_has_location(mode: &GnssRtkMode) -> bool {
     !matches!(mode, GnssRtkMode::NoGps | GnssRtkMode::NoFix)
 }
 
+/// A global origin changes the reference frame of local positions, so only do
+/// it before takeoff and outside a recording.
+fn origin_may_be_set(
+    is_recording: bool,
+    armed: Option<bool>,
+    landed_state: Option<mavlink::ardupilotmega::MavLandedState>,
+) -> bool {
+    !is_recording
+        && armed == Some(false)
+        && landed_state == Some(mavlink::ardupilotmega::MavLandedState::MAV_LANDED_STATE_ON_GROUND)
+}
+
 fn is_local_position_out_of_bounds(v: &mavlink::ardupilotmega::LOCAL_POSITION_NED_DATA) -> bool {
     const MAX_LOCAL_POSITION_DIST_METERS: f32 = 10_000.0;
     (v.x * v.x + v.y * v.y + v.z * v.z)
@@ -207,8 +219,15 @@ struct DroneCoordinator {
     /// Anything that must not act on that guess — asking for a reboot, say —
     /// needs the distinction.
     last_reported_armed: Option<bool>,
+    /// The most recent landed state, or `None` until the flight controller has
+    /// reported one. A configured GPS origin is changed only on the ground.
+    last_reported_landed_state: Option<mavlink::ardupilotmega::MavLandedState>,
     /// The local-position origin the config asks for, if any.
     requested_origin: Option<GpsGlobalOrigin>,
+    /// Whether the configured origin has been sent at least once. Its first
+    /// send waits for a usable GNSS fix; later sends are the bounded retries
+    /// for a reported mismatch.
+    origin_has_been_requested: bool,
     /// How many more times a mismatching origin will be re-sent before giving
     /// up and leaving the mismatch standing for the operator to act on.
     origin_retries_left: u8,
@@ -259,7 +278,9 @@ impl DroneCoordinator {
             prev_time_boot_ms: 0,
             local_flo_state,
             last_reported_armed: None,
+            last_reported_landed_state: None,
             requested_origin: mavlink_cfg.requested_gps_global_origin(),
+            origin_has_been_requested: false,
             origin_retries_left: ORIGIN_SET_RETRIES,
             origin_requested_at: None,
             param_snapshot: None,
@@ -306,6 +327,21 @@ impl DroneCoordinator {
         );
         self_.send_to_autopilot(data).await?;
 
+        // The origin is only changed while the vehicle is reported on the
+        // ground, so request that state rather than relying on a default stream.
+        let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
+            mavlink::ardupilotmega::COMMAND_LONG_DATA {
+                command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                param1: mavlink::ardupilotmega::EXTENDED_SYS_STATE_DATA::ID as f32,
+                param2: 1_000_000.0,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
+                confirmation: 0,
+                ..Default::default()
+            },
+        );
+        self_.send_to_autopilot(data).await?;
+
         // This is the estimator's global counterpart to LOCAL_POSITION_NED.
         // Request it explicitly so debugging their relationship does not
         // depend on the flight controller's default stream profile.
@@ -322,12 +358,27 @@ impl DroneCoordinator {
         );
         self_.send_to_autopilot(data).await?;
 
-        // Send GPS global origin to the drone. Whether it took hold is checked
-        // against the GPS_GLOBAL_ORIGIN stream requested above.
+        // GPS_RAW_INT says whether the receiver has a position fix. The
+        // configured origin is deliberately withheld until then, so changing
+        // the origin cannot make LOCAL_POSITION_NED refer to a distant stale
+        // estimate.
+        let data = mavlink::ardupilotmega::MavMessage::COMMAND_LONG(
+            mavlink::ardupilotmega::COMMAND_LONG_DATA {
+                command: mavlink::ardupilotmega::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                param1: mavlink::ardupilotmega::GPS_RAW_INT_DATA::ID as f32,
+                param2: 1_000_000.0,
+                target_system: AUTOPILOT_TARGET_SYSTEM,
+                target_component: AUTOPILOT_TARGET_COMPONENT,
+                confirmation: 0,
+                ..Default::default()
+            },
+        );
+        self_.send_to_autopilot(data).await?;
+
+        // Keep the configured origin visible while waiting to see a usable GPS
+        // position. It is sent from the GPS_RAW_INT handler once that arrives.
         if self_.requested_origin.is_some() {
-            self_.set_origin_status_check(GpsOriginCheck::Awaiting);
-            self_.origin_requested_at = Some(now());
-            self_.send_gps_global_origin().await?;
+            self_.set_origin_status_check(GpsOriginCheck::AwaitingGpsFix);
         }
 
         // Request the RC_CHANNELS message to be streamed at 4 msec interval.
@@ -443,6 +494,42 @@ impl DroneCoordinator {
         Ok(())
     }
 
+    /// Send the configured origin only when doing so cannot disturb flight or
+    /// change the coordinate frame of data currently being recorded.
+    async fn send_gps_global_origin_when_safe(&mut self) -> Result<()> {
+        if self.requested_origin.is_none() || self.origin_has_been_requested {
+            return Ok(());
+        }
+        let (has_gnss_location, is_recording) = {
+            let state = self.local_flo_state.read().unwrap();
+            (
+                state
+                    .mavlink
+                    .as_ref()
+                    .and_then(|mavlink| mavlink.gnss_location)
+                    .is_some(),
+                state.is_recording,
+            )
+        };
+        if !has_gnss_location {
+            self.set_origin_status_check(GpsOriginCheck::AwaitingGpsFix);
+            return Ok(());
+        }
+        if !origin_may_be_set(
+            is_recording,
+            self.last_reported_armed,
+            self.last_reported_landed_state,
+        ) {
+            self.set_origin_status_check(GpsOriginCheck::AwaitingSafeToSet);
+            return Ok(());
+        }
+
+        self.origin_has_been_requested = true;
+        self.set_origin_status_check(GpsOriginCheck::Awaiting);
+        self.origin_requested_at = Some(now());
+        self.send_gps_global_origin().await
+    }
+
     fn set_origin_status_check(&mut self, check: GpsOriginCheck) {
         self.local_flo_state
             .write()
@@ -469,6 +556,18 @@ impl DroneCoordinator {
             longitude_e7: reported.longitude,
             altitude_mm: reported.altitude,
         };
+        if !self.origin_has_been_requested {
+            // The controller may publish its own origin before it has a usable
+            // fix. Record it, but do not call it a mismatch until FLO has sent
+            // the configured origin after receiving a valid GPS position.
+            self.local_flo_state
+                .write()
+                .unwrap()
+                .mavlink_mut()
+                .gps_origin
+                .reported = Some(reported);
+            return Ok(());
+        }
         self.origin_requested_at = None;
         let (check, was) = {
             let mut state = self.local_flo_state.write().unwrap();
@@ -504,7 +603,10 @@ impl DroneCoordinator {
                     );
                 }
             }
-            GpsOriginCheck::NotRequested | GpsOriginCheck::Awaiting => {}
+            GpsOriginCheck::NotRequested
+            | GpsOriginCheck::AwaitingGpsFix
+            | GpsOriginCheck::AwaitingSafeToSet
+            | GpsOriginCheck::Awaiting => {}
         }
         Ok(())
     }
@@ -595,6 +697,7 @@ impl DroneCoordinator {
                             fm.into(),
                         ))?;
                 }
+                self.send_gps_global_origin_when_safe().await?;
             }
             MavMessage::BATTERY_STATUS(bs) => {
                 self.broadway
@@ -611,7 +714,6 @@ impl DroneCoordinator {
             | MavMessage::ATTITUDE_TARGET(_)
             | MavMessage::CURRENT_EVENT_SEQUENCE(_)
             | MavMessage::ESTIMATOR_STATUS(_)
-            | MavMessage::EXTENDED_SYS_STATE(_)
             | MavMessage::LINK_NODE_STATUS(_)
             | MavMessage::TIMESYNC(_)
             | MavMessage::RADIO_STATUS(_)
@@ -654,10 +756,10 @@ impl DroneCoordinator {
                 save("UTM_GLOBAL_POSITION", logger, &v)?;
             }
             MavMessage::GPS_RAW_INT(v) => {
+                let mode = convert_gnss_rtk_mode(v.fix_type);
                 {
                     let mut state = self.local_flo_state.write().unwrap();
                     let mavlink = state.mavlink_mut();
-                    let mode = convert_gnss_rtk_mode(v.fix_type);
                     mavlink.gnss_location = gnss_has_location(&mode).then_some(GlobalPosition {
                         latitude_e7: v.lat,
                         longitude_e7: v.lon,
@@ -671,6 +773,11 @@ impl DroneCoordinator {
                     mavlink.satellites_visible = convert_satellites_visible(v.satellites_visible);
                 }
                 save("GPS_RAW_INT", logger, &v)?;
+                self.send_gps_global_origin_when_safe().await?;
+            }
+            MavMessage::EXTENDED_SYS_STATE(v) => {
+                self.last_reported_landed_state = Some(v.landed_state);
+                self.send_gps_global_origin_when_safe().await?;
             }
             MavMessage::GLOBAL_POSITION_INT(v) => {
                 let position = GlobalPosition {
@@ -1089,7 +1196,7 @@ mod tests {
 
     use super::{
         DisplaySource, convert_dop, convert_satellites_visible, gnss_has_location,
-        is_local_position_out_of_bounds, rc_display_source,
+        is_local_position_out_of_bounds, origin_may_be_set, rc_display_source,
     };
 
     #[test]
@@ -1110,6 +1217,33 @@ mod tests {
         assert!(!gnss_has_location(&flo_core::GnssRtkMode::NoFix));
         assert!(gnss_has_location(&flo_core::GnssRtkMode::TwoDFix));
         assert!(gnss_has_location(&flo_core::GnssRtkMode::RtkFixed));
+    }
+
+    #[test]
+    fn gps_origin_waits_until_the_vehicle_is_disarmed_and_on_the_ground() {
+        use super::mavlink::ardupilotmega::MavLandedState;
+
+        assert!(origin_may_be_set(
+            false,
+            Some(false),
+            Some(MavLandedState::MAV_LANDED_STATE_ON_GROUND)
+        ));
+        assert!(!origin_may_be_set(
+            true,
+            Some(false),
+            Some(MavLandedState::MAV_LANDED_STATE_ON_GROUND)
+        ));
+        assert!(!origin_may_be_set(
+            false,
+            Some(true),
+            Some(MavLandedState::MAV_LANDED_STATE_ON_GROUND)
+        ));
+        assert!(!origin_may_be_set(
+            false,
+            Some(false),
+            Some(MavLandedState::MAV_LANDED_STATE_IN_AIR)
+        ));
+        assert!(!origin_may_be_set(false, None, None));
     }
 
     /// The switch is a level, so the operator flicking it either way has to

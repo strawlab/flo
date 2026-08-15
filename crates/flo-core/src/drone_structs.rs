@@ -168,6 +168,12 @@ pub enum GpsOriginCheck {
     /// The config has no `set_gps_global_origin`, so FLO never asked.
     #[default]
     NotRequested,
+    /// FLO has a configured origin but is waiting for a usable GNSS fix before
+    /// sending it to the flight controller.
+    AwaitingGpsFix,
+    /// FLO has a usable GNSS fix but will not change the origin until the
+    /// vehicle is disarmed, on the ground, and no recording is being saved.
+    AwaitingSafeToSet,
     /// FLO asked, but the flight controller has not reported an origin yet.
     Awaiting,
     /// The flight controller reports the origin FLO asked for.

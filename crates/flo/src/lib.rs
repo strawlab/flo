@@ -735,6 +735,7 @@ impl<'a> FloCoordinator<'a> {
     /// cameras' MP4 recordings start here too, so one operator action saves
     /// every source — the same thing arming over MAVLink does.
     async fn start_recording(&mut self, include_precapture: bool) -> Result<()> {
+        self.local_flo_state.write().unwrap().is_recording = true;
         // A pre-capture recording begins in the past, so date it from where its
         // data actually starts rather than from the trigger. Every output takes
         // its name from this one value, which keeps the `.floz` and the webcam
@@ -858,6 +859,7 @@ impl<'a> FloCoordinator<'a> {
         }
         self.send_cam_arg_to_all(strand_cam_remote_control::CamArg::SetIsRecordingMp4(false))
             .await;
+        self.local_flo_state.write().unwrap().is_recording = false;
         Ok(())
     }
 
