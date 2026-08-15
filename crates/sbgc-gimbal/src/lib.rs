@@ -71,7 +71,12 @@ async fn initialize_gimbals(
     // roughly 125 Hz. Unregister our exact stream before requesting the large
     // parameter response: the SimpleBGC protocol explicitly permits that
     // response to be skipped while the controller's transmit buffer is full.
-    messages_tx.send(realtime_stream_command(0)).await?;
+    messages_tx
+        .send(realtime_stream_command(0))
+        .await
+        .with_context(|| {
+            format!("writing the first SimpleBGC command to the gimbal on {port_path}")
+        })?;
     tokio::time::sleep(STARTUP_STREAM_DRAIN_DURATION).await;
 
     {

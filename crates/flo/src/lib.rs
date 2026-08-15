@@ -1847,6 +1847,41 @@ fn run_tokio_main(
     )
 }
 
+/// Report a supervised subsystem that resolved, and turn its outcome into the
+/// main loop's.
+///
+/// Every subsystem selected on in [`app_main`]'s loop is expected to outlive
+/// that loop, so one that resolves — with an error, with a panic, or even with
+/// `Ok(())` — is a shutdown of the whole application. Left unnamed, the only
+/// thing an operator sees is the *downstream* effects: the embedded cameras
+/// log a clean "ending nicely", the writer closes its `.floz`, and nothing
+/// says which subsystem went first. Name it here, at the point where the
+/// decision to stop is actually made.
+fn subsystem_resolved(
+    name: &str,
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => {
+            // Not an error, but not expected either: nothing here is supposed
+            // to finish on its own while FLO is running.
+            tracing::warn!("{name} stopped without an error. FLO is shutting down.");
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            // Logged as well as returned. The returned report reaches the
+            // process exit status, but a deployment that reads only this log
+            // should not have to infer the cause from a bare exit code.
+            tracing::error!("{name} failed. FLO is shutting down. {error:?}");
+            Err(error.wrap_err(format!("{name} failed")))
+        }
+        Err(error) => {
+            tracing::error!("{name} did not shut down cleanly. FLO is shutting down. {error}");
+            Err(eyre::Report::new(error).wrap_err(format!("{name} did not shut down cleanly")))
+        }
+    }
+}
+
 /// The highest-level main loop for the flo app.
 #[expect(clippy::too_many_arguments)]
 async fn app_main(
@@ -2414,18 +2449,19 @@ async fn app_main(
         // Wait for any of a number of things to happen
         tokio::select! {
             _ = &mut shutdown_rx => {
+                tracing::info!("FLO was asked to shut down.");
                 break;
             }
             mavlink_result = &mut mavlink_task => {
-                mavlink_result??;
+                subsystem_resolved("The MAVLink link", mavlink_result)?;
                 break;
             }
             osd_task_result = &mut osd_task => {
-                osd_task_result??;
+                subsystem_resolved("The OSD", osd_task_result)?;
                 break;
             }
             Some(extension_result) = extension_tasks.join_next(), if !extension_tasks.is_empty() => {
-                extension_result??;
+                subsystem_resolved("An extension", extension_result)?;
                 break;
             }
             camera_host_result = async {
@@ -2437,29 +2473,29 @@ async fn app_main(
                 // This JoinHandle is complete; remove it before shutdown so
                 // the graceful-stop path never polls it again.
                 camera_host_task = None;
-                camera_host_result??;
+                subsystem_resolved("The camera host", camera_host_result)?;
                 break;
             }
             motor_task_result = &mut motor_task_join_handle => {
-                motor_task_result??;
+                subsystem_resolved("The motor backend", motor_task_result)?;
                 break;
             }
             focus_motor_task_result = &mut focus_motor_task => {
-                focus_motor_task_result??;
+                subsystem_resolved("The focus motor backend", focus_motor_task_result)?;
                 break;
             }
             saver_result = &mut saver_handle => {
-                saver_result??;
+                subsystem_resolved("The .floz writer", saver_result)?;
                 break;
             }
             converter_result = &mut converter_handle => {
-                converter_result??;
+                subsystem_resolved("The event recorder", converter_result)?;
                 break;
             }
             camshow_result = &mut camshow_task => {
                 // The camshow client runs forever under normal operation;
                 // if it returns it means the spawned task was cancelled.
-                camshow_result??;
+                subsystem_resolved("The camshow link", camshow_result)?;
                 break;
             }
             centroid = centroid_rx.recv() => {
@@ -2492,7 +2528,13 @@ async fn app_main(
     Ok::<(), eyre::Error>(())
     }
     .await;
-    tracing::debug!("FloCoordinator ending.");
+    // At INFO, and with the error, because everything the operator sees after
+    // this point is a *consequence* of it: cameras stopping, the recording
+    // ending, browsers being told FLO has quit.
+    match &coordinator_result {
+        Ok(()) => tracing::info!("FLO is stopping its subsystems."),
+        Err(error) => tracing::error!("FLO is stopping its subsystems after an error. {error:?}"),
+    }
 
     // Give extensions a bounded opportunity to release external resources
     // before the runtime cancels their remaining tasks. This is especially
