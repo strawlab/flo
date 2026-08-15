@@ -52,18 +52,19 @@ impl Server {
     /// retried inside each server.
     pub(crate) async fn run(mut self) -> Result<()> {
         let video = crate::video_link::serve(self.video_listen_addr.clone(), self.relayed.clone());
-        let preview_listen_addr = self.preview_listen_addr.clone();
+        let preview_listener = PreviewServer::bind(&self.preview_listen_addr).await?;
+        let preview_port = preview_listener.local_addr()?.port();
         let preview_server = self.preview_server.take();
         let preview = async move {
             match preview_server {
-                Some(server) => server.run(preview_listen_addr).await,
+                Some(mut server) => server.run_on_listener(preview_listener).await,
                 // Nothing constructs a `Server` without one; if that ever
                 // changes, the other two links carry on without a preview.
                 None => std::future::pending().await,
             }
         };
         tokio::select! {
-            result = self.serve_control() => result,
+            result = self.serve_control(preview_port) => result,
             result = video => result,
             result = preview => result,
         }
@@ -72,7 +73,7 @@ impl Server {
     /// Binds `listen_addr` and serves flo connections, forwarding OSD updates
     /// and recording commands to the channels, until a bind or accept error
     /// ends the loop.
-    async fn serve_control(&mut self) -> Result<()> {
+    async fn serve_control(&mut self, preview_port: u16) -> Result<()> {
         let listener = TcpListener::bind(&self.listen_addr)
             .await
             .with_context(|| format!("binding TCP listener at {}", self.listen_addr))?;
@@ -99,6 +100,7 @@ impl Server {
                 &recording_tx,
                 &rtp_targets_tx,
                 &display_source_tx,
+                preview_port,
             )
             .await
             {
@@ -126,6 +128,7 @@ impl Server {
         recording_tx: &tokio::sync::mpsc::UnboundedSender<RecordingCommand>,
         rtp_targets_tx: &watch::Sender<Vec<flo_core::RtpTarget>>,
         display_source_tx: &watch::Sender<DisplaySource>,
+        preview_port: u16,
     ) -> Result<()> {
         stream.set_nodelay(true).ok();
         let (read_half, write_half) = stream.into_split();
@@ -162,6 +165,9 @@ impl Server {
                             .send(CamshowToFlo::RtpTargets {
                                 targets: rtp_targets_tx.borrow().clone(),
                             })
+                            .await?;
+                        requests
+                            .send(CamshowToFlo::PreviewPort { port: preview_port })
                             .await?;
                     }
                     other => eyre::bail!("client sent {other:?} before Hello"),

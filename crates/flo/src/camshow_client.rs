@@ -7,6 +7,8 @@
 //! is currently buffered. flo's main loop is unaffected by camshow being
 //! unavailable.
 
+use std::net::SocketAddr;
+
 use camshow_protocol::{
     CamshowToFlo, FloCamshowCodec, FloToCamshow, PROTOCOL_VERSION, RecordingStart,
 };
@@ -34,6 +36,7 @@ pub(crate) async fn run(
     mut display_source_rx: watch::Receiver<DisplaySource>,
     mut rtp_targets_rx: watch::Receiver<Vec<RtpTarget>>,
     mut precapture_secs_rx: watch::Receiver<f64>,
+    preview_addr_tx: watch::Sender<Option<SocketAddr>>,
     flo_events_tx: tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
     info!("camshow link target: {addr}");
@@ -48,6 +51,7 @@ pub(crate) async fn run(
                     &mut display_source_rx,
                     &mut rtp_targets_rx,
                     &mut precapture_secs_rx,
+                    &preview_addr_tx,
                     &flo_events_tx,
                 )
                 .await
@@ -72,8 +76,10 @@ async fn serve_connection(
     display_source_rx: &mut watch::Receiver<DisplaySource>,
     rtp_targets_rx: &mut watch::Receiver<Vec<RtpTarget>>,
     precapture_secs_rx: &mut watch::Receiver<f64>,
+    preview_addr_tx: &watch::Sender<Option<SocketAddr>>,
     flo_events_tx: &tokio::sync::broadcast::Sender<FloEvent>,
 ) -> Result<()> {
+    let camshow_ip = stream.peer_addr()?.ip();
     stream.set_nodelay(true).ok();
     let (read_half, write_half) = stream.into_split();
     let mut requests = FramedRead::new(read_half, FloCamshowCodec::default());
@@ -154,6 +160,9 @@ async fn serve_connection(
                             FloCommand::SetRtpTargets(targets),
                             CommandSource::Camshow,
                         ));
+                    }
+                    CamshowToFlo::PreviewPort { port } => {
+                        preview_addr_tx.send(Some(SocketAddr::new(camshow_ip, port)))?;
                     }
                 }
             }

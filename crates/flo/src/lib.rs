@@ -1693,7 +1693,6 @@ where
                 cal: None,
                 blob: Default::default(),
                 camshow_addr: None,
-                camshow_preview_addr: None,
                 camshow_mp4_cfg: None,
             });
         }
@@ -2285,23 +2284,16 @@ async fn app_main(
         .as_ref()
         .and_then(|c| c.camshow_addr.clone());
     let (camshow_precapture_secs_tx, camshow_precapture_secs_rx) = watch::channel(0.0f64);
-    // The preview link is independent of the control link. Always spawn its
-    // reader so a camshow started later (or used only for preview) is picked up
-    // without restarting FLO. It sits idle, not even connected, until the
-    // preview page is opened.
-    let preview_addr = device_config
-        .osd_config
-        .as_ref()
-        .and_then(|c| c.camshow_preview_addr.clone())
-        .unwrap_or_else(|| camshow_protocol::preview::DEFAULT_CAMSHOW_PREVIEW_ADDR.to_string());
-    handle.spawn(webcam_preview_client::run(
-        preview_addr,
-        webcam_preview.clone(),
-    ));
-
     let (canvas_tx, camshow_recording_tx, mut camshow_task) = if let Some(addr) = camshow_addr {
         let (canvas_tx, canvas_rx) = watch::channel(osd_utils::OsdCache::new(30, 16));
         let (rec_tx, rec_rx) = mpsc::unbounded_channel();
+        // Camshow advertises the preview port after the control handshake. The
+        // reader stays idle until then, avoiding a second configured address.
+        let (preview_addr_tx, preview_addr_rx) = watch::channel(None);
+        handle.spawn(webcam_preview_client::run(
+            preview_addr_rx,
+            webcam_preview.clone(),
+        ));
         let jh = handle.spawn(camshow_client::run(
             addr,
             canvas_rx,
@@ -2309,6 +2301,7 @@ async fn app_main(
             display_source_rx,
             rtp_targets_rx,
             camshow_precapture_secs_rx,
+            preview_addr_tx,
             broadway.flo_events.clone(),
         ));
         let task: Pin<Box<dyn Future<Output = _>>> = Box::pin(jh);

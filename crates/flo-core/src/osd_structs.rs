@@ -41,12 +41,6 @@ pub struct OsdConfig {
     /// default (an ffmpeg pipe with built-in defaults).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camshow_mp4_cfg: Option<strand_cam_remote_control::RecordingConfig>,
-    /// Address of camshow's preview link, from which flo reads webcam frames
-    /// for its browser preview page. Defaults to the standard port on the
-    /// same host as `camshow_addr`; nothing is read from it until someone
-    /// opens the preview page.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub camshow_preview_addr: Option<String>,
 }
 
 #[derive(Debug, Clone)]

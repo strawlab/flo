@@ -691,13 +691,17 @@ impl Component for App {
                 <div class="border-1px">
                     <h2>{"Cameras"}</h2>
                     { self.camera_links() }
-                    { self.camshow_display_view(ctx) }
+                    if self.camshow_is_configured() {
+                        { self.camshow_display_view(ctx) }
+                    }
                 </div>
                 { self.mavlink_view() }
-                <div class="border-1px">
-                    <h2>{"H.264 RTP Targets"}</h2>
-                    { self.rtp_targets_view(ctx) }
-                </div>
+                if self.camshow_is_configured() {
+                    <div class="border-1px">
+                        <h2>{"H.264 RTP Targets"}</h2>
+                        { self.rtp_targets_view(ctx) }
+                    </div>
+                }
                 { self.add_rtp_target_dialog(ctx) }
                 { self.remove_rtp_target_dialog(ctx) }
                 <div class="border-1px">
@@ -755,6 +759,16 @@ impl Component for App {
 }
 
 impl App {
+    /// Camshow owns the FPV webcam and RTP encoder, so expose those controls
+    /// only when the FLO configuration names its control endpoint.
+    fn camshow_is_configured(&self) -> bool {
+        self.cfg
+            .as_ref()
+            .and_then(|cfg| cfg.osd_config.as_ref())
+            .and_then(|cfg| cfg.camshow_addr.as_ref())
+            .is_some()
+    }
+
     /// The heading both views carry: FLO, and which machine's FLO this is.
     ///
     /// The name is the machine's own, reported by the server (see
@@ -1070,7 +1084,9 @@ impl App {
                         </li>
                     }
                 }) }
-                { self.webcam_preview_link() }
+                if self.camshow_is_configured() {
+                    { self.webcam_preview_link() }
+                }
             </ul>
         }
     }

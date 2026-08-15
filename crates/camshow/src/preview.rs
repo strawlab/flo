@@ -81,20 +81,16 @@ pub(crate) fn channel() -> (PreviewSink, PreviewServer) {
 }
 
 impl PreviewServer {
-    /// Serve preview frames until the listener fails to bind.
-    ///
-    /// A bind failure is fatal for the same reason it is on the other two
-    /// links: it cannot be recovered from in place. Per-connection errors just
-    /// end that connection and wait for flo to reconnect.
-    pub(crate) async fn run(mut self, listen_addr: String) -> Result<()> {
-        let listener = TcpListener::bind(&listen_addr)
+    /// Bind the preview listener before the control server starts so its port
+    /// can be advertised during the control handshake.
+    pub(crate) async fn bind(listen_addr: &str) -> Result<TcpListener> {
+        TcpListener::bind(listen_addr)
             .await
-            .with_context(|| format!("binding preview listener at {listen_addr}"))?;
-        info!("preview link listening on {}", listener.local_addr()?);
-        self.run_on_listener(listener).await
+            .with_context(|| format!("binding preview listener at {listen_addr}"))
     }
 
-    async fn run_on_listener(&mut self, listener: TcpListener) -> Result<()> {
+    pub(crate) async fn run_on_listener(&mut self, listener: TcpListener) -> Result<()> {
+        info!("preview link listening on {}", listener.local_addr()?);
         loop {
             let (mut stream, peer) = match listener.accept().await {
                 Ok(pair) => pair,

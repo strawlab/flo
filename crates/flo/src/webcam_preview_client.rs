@@ -18,6 +18,7 @@ use machine_vision_formats::{image_ref::ImageRef, pixel_format::RGB8};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::watch,
 };
 use tracing::{debug, info, warn};
 
@@ -39,16 +40,25 @@ const JPEG_QUALITY: u8 = 70;
 /// Runs until cancelled. Every failure here is non-fatal: camshow may be
 /// absent, restarting, or built without the preview link, and flo carries on
 /// regardless. That is why the only reporting is a log line.
-pub(crate) async fn run(addr: String, preview: WebcamPreview) -> Result<()> {
-    info!("webcam preview link target: {addr}");
+pub(crate) async fn run(
+    mut addr_rx: watch::Receiver<Option<std::net::SocketAddr>>,
+    preview: WebcamPreview,
+) -> Result<()> {
     loop {
+        let addr = loop {
+            if let Some(addr) = *addr_rx.borrow_and_update() {
+                break addr;
+            }
+            addr_rx.changed().await?;
+        };
+        info!("webcam preview link target: {addr}");
         // Nothing to do until a browser asks. No connection, so camshow does
         // not produce frames either.
         while !preview.wanted() {
             tokio::time::sleep(IDLE_POLL).await;
         }
 
-        match TcpStream::connect(&addr).await {
+        match TcpStream::connect(addr).await {
             Ok(stream) => {
                 debug!("connected to camshow preview link at {addr}");
                 if let Err(e) = read_frames(stream, &preview).await {

@@ -31,7 +31,8 @@ pub const DEFAULT_CAMSHOW_ADDR: &str = "127.0.0.1:2224";
 /// 5: made the bitrate independently configurable for every RTP target.
 /// 6: added pre-capture (`SetPreCaptureSeconds` and
 ///    `RecordingStart::include_precapture`).
-pub const PROTOCOL_VERSION: u32 = 6;
+/// 7: camshow advertises its preview port on the control link.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Parameters for a recording-start: the codec config, the output
 /// directory, and the timestamp used to derive the file name. Defined as a
@@ -97,6 +98,10 @@ pub enum CamshowToFlo {
     SetDisplaySource { source: flo_core::DisplaySource },
     /// The H.264/RTP destinations camshow is currently configured to send to.
     RtpTargets { targets: Vec<flo_core::RtpTarget> },
+    /// The TCP port on the control peer that serves FPV webcam previews. FLO
+    /// combines this with the control connection's peer IP, rather than using
+    /// camshow's bind address, which may be an unspecified address.
+    PreviewPort { port: u16 },
 }
 
 /// Codec as used by FLO: decode requests from camshow and encode commands to it.
@@ -221,6 +226,15 @@ mod tests {
         assert!(matches!(
             roundtrip_camshow_to_flo(&to_flo),
             CamshowToFlo::RtpTargets { targets } if targets.len() == 1
+        ));
+    }
+
+    #[test]
+    fn preview_port_roundtrips() {
+        let message = CamshowToFlo::PreviewPort { port: 2226 };
+        assert!(matches!(
+            roundtrip_camshow_to_flo(&message),
+            CamshowToFlo::PreviewPort { port: 2226 }
         ));
     }
 
