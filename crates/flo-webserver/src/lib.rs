@@ -231,18 +231,20 @@ fn is_loopback_uri(uri: &http::Uri) -> bool {
     matches!(uri.host(), Some("127.0.0.1") | Some("[::1]"))
 }
 
-async fn handle_auth_error(err: tower::BoxError) -> (StatusCode, &'static str) {
+async fn handle_auth_error(err: tower::BoxError) -> (StatusCode, String) {
     match err.downcast::<axum_token_auth::ValidationErrors>() {
         Ok(err) => {
-            tracing::warn!(
-                "Validation error(s): {:?}",
-                err.errors().collect::<Vec<_>>()
-            );
-            (StatusCode::UNAUTHORIZED, "Request is not authorized")
+            let reasons = err.errors().collect::<Vec<_>>().join("; ");
+            let body = format!("Request is not authorized: {reasons}");
+            tracing::warn!("{}", body);
+            (StatusCode::UNAUTHORIZED, body)
         }
         Err(orig_err) => {
             tracing::error!("Unhandled internal error: {orig_err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            )
         }
     }
 }
@@ -337,12 +339,23 @@ fn build_connect_urls(
     persistent_secret: &cookie::Key,
 ) -> std::io::Result<strand_bui_backend_session_types::DeviceConnectUrls> {
     let info = make_bui_server_info(bound_addr, token_required, persistent_secret);
+    // Tell the frontend when the token it is about to draw a QR code for dies,
+    // so a code left on screen can say so rather than silently going stale.
+    // Reading it back out of the token keeps this honest if the TTL above ever
+    // stops being what the minted token actually carries.
+    let token_expires_unix = match info.token() {
+        strand_bui_backend_session_types::AccessToken::NoToken => None,
+        strand_bui_backend_session_types::AccessToken::PreSharedToken(token) => {
+            axum_token_auth::token_expiry(token).map(|expiry| expiry.unix_timestamp())
+        }
+    };
     let uris = strand_bui_backend_session::build_urls(&info)?;
     let loopback_only = uris.iter().all(is_loopback_uri);
     let urls = uris.into_iter().map(|u| u.to_string()).collect();
     Ok(strand_bui_backend_session_types::DeviceConnectUrls {
         urls,
         loopback_only,
+        token_expires_unix,
     })
 }
 
@@ -589,8 +602,9 @@ mod tests {
     use http::{Request, StatusCode};
 
     use super::{
-        EmbeddedStrandCamRouters, build_connect_urls, nest_embedded_camera_routers,
-        server_hostname, tidy_hostname, webcam_preview_image_response,
+        ACCESS_TOKEN_TTL, EmbeddedStrandCamRouters, build_connect_urls,
+        nest_embedded_camera_routers, server_hostname, tidy_hostname,
+        webcam_preview_image_response,
     };
 
     #[tokio::test]
@@ -645,6 +659,9 @@ mod tests {
         let info = build_connect_urls(addr, false, &secret).unwrap();
         assert_eq!(info.urls, vec!["http://127.0.0.1:3440/".to_string()]);
         assert!(info.loopback_only);
+        // Nothing expires when there is no token, so the UI is told nothing
+        // rather than being given a time to display.
+        assert_eq!(info.token_expires_unix, None);
     }
 
     #[test]
@@ -661,6 +678,20 @@ mod tests {
         );
         // A token must actually be present after `token=`.
         assert!(url.len() > "http://192.168.1.5:3440/?token=".len());
+        // The reported expiry describes the token actually embedded above, so
+        // it must land one TTL from now rather than at some unrelated instant.
+        let expires = info
+            .token_expires_unix
+            .expect("a URL carrying a token reports when it dies");
+        let expected = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + ACCESS_TOKEN_TTL.as_secs() as i64;
+        assert!(
+            (expires - expected).abs() <= 5,
+            "expected ~{expected}, got {expires}"
+        );
     }
 
     #[tokio::test]
