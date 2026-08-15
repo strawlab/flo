@@ -168,6 +168,11 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     bootstrap::init(cli.log_dir.clone())?;
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        git_revision = env!("GIT_HASH"),
+        "camshow starting"
+    );
 
     if !cli.gui && cli.rtp_dest.is_none() {
         warn!(
