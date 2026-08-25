@@ -3,19 +3,16 @@
 
 use std::{
     collections::VecDeque,
-    io::{BufRead, BufReader},
-    process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex, mpsc::SyncSender},
     time::Duration,
 };
 
-use ffmpeg_writer::{FfmpegCodecArgs, ffmpeg_pixel_format, write_frame_rows};
+use ffmpeg_writer::{FfmpegCodecArgs, FfmpegFrameSink, FfmpegOutput};
 use h264_reader::{annexb::AnnexBReader, push::NalFragmentHandler};
 use h264_rtp::AccessUnit;
-use machine_vision_formats::pixel_format::PixFmt;
 use strand_dynamic_frame::DynamicFrame;
 
-use crate::{Error, Result, encoder::H264StreamEncoder};
+use crate::{Result, encoder::H264StreamEncoder};
 
 /// H.264 NAL unit type for an Access Unit Delimiter (RFC 6184 / ITU-T H.264
 /// §7.4.1.2.3). Used only to detect AU boundaries in ffmpeg's output; never
@@ -59,13 +56,14 @@ pub(crate) struct FfmpegStreamEncoder {
 }
 
 struct Running {
-    child: Child,
-    stdin: ChildStdin,
-    pixfmt: PixFmt,
-    width: u32,
-    height: u32,
+    /// Owns the ffmpeg child, the frame piping, the geometry invariant and the
+    /// stderr draining -- see [`FfmpegFrameSink`], which `FfmpegWriter` in
+    /// strand-braid is built on too.
+    sink: FfmpegFrameSink,
+    /// Parses the encoded elementary stream off the sink's stdout. Ours rather
+    /// than the sink's, because what arrives on that pipe is this crate's
+    /// business.
     stdout_thread: std::thread::JoinHandle<()>,
-    stderr_thread: std::thread::JoinHandle<()>,
 }
 
 impl FfmpegStreamEncoder {
@@ -89,18 +87,6 @@ impl FfmpegStreamEncoder {
     /// Spawn ffmpeg configured to read raw video of this frame's format and
     /// emit a zero-latency, SDP-less-receiver-friendly H.264 elementary stream.
     fn start(&mut self, frame: &DynamicFrame) -> Result<()> {
-        let pixfmt = frame.pixel_format();
-        // Safe to pipe a mono frame as `gray` here only because `codec_args`
-        // below leaves `pixfmt` at its default, `yuv420p`. Some ffmpeg releases
-        // write 0 rather than 128 into the chroma planes when converting `gray`
-        // to a full-range *semi-planar* format such as NV12, which records a
-        // solid green cast; planar destinations are converted correctly
-        // everywhere. Point this at NV12 and it needs
-        // `ffmpeg_writer::probe_mono_framing` the way `FfmpegWriter` does.
-        let ff_pixfmt = ffmpeg_pixel_format(pixfmt)?;
-        let width = frame.width();
-        let height = frame.height();
-
         // bufsize = 2 seconds' worth of frames at the target bitrate, a
         // conventional VBV buffer size for low-latency live encoding.
         let bufsize_bits =
@@ -126,54 +112,33 @@ impl FfmpegStreamEncoder {
             ..Default::default()
         };
 
-        let input_args = vec![
-            "-f".to_string(),
-            "rawvideo".to_string(),
-            "-pixel_format".to_string(),
-            ff_pixfmt.to_string(),
-            "-video_size".to_string(),
-            format!("{width}x{height}"),
-            "-framerate".to_string(),
-            format!("{}/1", self.fps.round().max(1.0) as u32),
-        ];
-
-        let mut args = codec_args.to_args(&input_args);
-        args.push("pipe:1".to_string());
-
-        let mut child = Command::new("ffmpeg")
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdin = child.stdin.take().expect("stdin was piped");
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
+        // The sink decides how to hand a mono frame over. That matters for the
+        // IR tracking cameras: some ffmpeg releases write 0 rather than 128
+        // into the chroma planes when converting `gray` to a full-range
+        // semi-planar format, which streams a solid green cast, and the sink
+        // pipes NV12 with real chroma where it measures that happening. Getting
+        // this for free is the point of sharing the sink -- the hand-rolled
+        // spawn this replaced was safe only by accident, because `codec_args`
+        // above leaves `pixfmt` at its default `yuv420p`.
+        let mut sink = FfmpegFrameSink::new(
+            frame,
+            &codec_args,
+            (self.fps.round().max(1.0) as usize, 1),
+            FfmpegOutput::Stdout,
+        )?;
+        let stdout = sink
+            .take_stdout()
+            .expect("a sink writing to Stdout has a stdout");
 
         let stdout_thread = {
             let au_tx = self.au_tx.clone();
             let pts_queue = self.pts_queue.clone();
             std::thread::spawn(move || run_stdout_reader(stdout, au_tx, pts_queue))
         };
-        // Mandatory: with stdout piped, an undrained stderr deadlocks the
-        // child once its pipe buffer fills.
-        let stderr_thread = std::thread::spawn(move || {
-            for line in BufReader::new(stderr)
-                .lines()
-                .map_while(std::result::Result::ok)
-            {
-                tracing::debug!("ffmpeg: {line}");
-            }
-        });
 
         self.running = Some(Running {
-            child,
-            stdin,
-            pixfmt,
-            width,
-            height,
+            sink,
             stdout_thread,
-            stderr_thread,
         });
         Ok(())
     }
@@ -185,16 +150,20 @@ impl FfmpegStreamEncoder {
     fn stop(&mut self) -> Result<()> {
         if let Some(running) = self.running.take() {
             let Running {
-                mut child,
-                stdin,
+                sink,
                 stdout_thread,
-                stderr_thread,
-                ..
             } = running;
-            drop(stdin); // signal EOF on ffmpeg's stdin
-            let _ = child.wait();
+            // Closing the sink signals EOF on ffmpeg's stdin and waits for it.
+            // Not a failure worth propagating -- every caller here is
+            // deliberately discarding this child -- but worth saying out loud,
+            // since the sink can now report what ffmpeg actually complained
+            // about.
+            if let Err(e) = sink.close() {
+                tracing::warn!("ffmpeg exited badly while being replaced: {e}");
+            }
+            // Its stdout hit EOF when the child exited, so this returns
+            // promptly and we lose no already-encoded access unit.
             let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
         }
         self.pts_queue
             .lock()
@@ -206,28 +175,25 @@ impl FfmpegStreamEncoder {
 
 impl H264StreamEncoder for FfmpegStreamEncoder {
     fn submit(&mut self, frame: &DynamicFrame, pts: Duration) -> Result<()> {
-        if self.running.is_none() {
-            self.start(frame)?;
-        }
-        let running = self
-            .running
-            .as_ref()
-            .expect("just started if it wasn't running");
-        if frame.pixel_format() != running.pixfmt
-            || frame.width() != running.width
-            || frame.height() != running.height
-        {
-            return Err(Error::FfmpegWriter(
-                ffmpeg_writer::Error::FormatOrSizeChanged,
-            ));
-        }
+        let running = match &mut self.running {
+            Some(running) => running,
+            None => {
+                self.start(frame)?;
+                self.running.as_mut().expect("just started")
+            }
+        };
 
+        // Pushed before the frame, so an access unit cannot come back off the
+        // stdout thread before its presentation time is queued. The sink
+        // rejects a frame whose format or size does not match the running
+        // child, so a mismatch cannot desynchronize this queue.
         self.pts_queue
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(pts);
-        let running = self.running.as_mut().expect("checked above");
-        write_frame_rows(frame, &mut running.stdin)?;
+        // A failure here propagates out of the worker loop, which drops the
+        // encoder and its queue, so there is nothing to unwind.
+        running.sink.send(frame)?;
         Ok(())
     }
 
@@ -341,6 +307,101 @@ fn run_stdout_reader(
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    /// Reassemble the access units this encoder produced into the Annex-B byte
+    /// stream a decoder expects, putting back the start codes that
+    /// [`AccessUnit`] carries implicitly.
+    fn annex_b(au_rx: &std::sync::mpsc::Receiver<AccessUnit>) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for au in au_rx.iter() {
+            for nal in au.nals {
+                stream.extend_from_slice(&[0, 0, 0, 1]);
+                stream.extend_from_slice(&nal);
+            }
+        }
+        stream
+    }
+
+    /// The IR tracking cameras are grayscale, and a `gray` frame handed to the
+    /// wrong ffmpeg records chroma 0 -- a solid green cast -- instead of 128.
+    /// The framing decision that avoids that lives in [`FfmpegFrameSink`], so
+    /// this asserts we really do get it by streaming mono frames through the
+    /// encoder as configured for flight and inspecting the chroma that comes
+    /// back out. (Whether the *bad* framing is correctly detected is
+    /// ffmpeg-writer's own test; this is the end of that pipe.)
+    #[test]
+    fn mono_frames_stream_with_neutral_chroma() {
+        let (width, height) = (192u32, 144u32);
+        let (au_tx, au_rx) = sync_channel(256);
+        let mut encoder =
+            FfmpegStreamEncoder::new(FfmpegEncoderConfig {}, 2_000, 25.0, 10, au_tx).unwrap();
+
+        let mut buf = vec![0u8; (width * height) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                buf[y * width as usize + x] = (x * 255 / (width as usize - 1)) as u8;
+            }
+        }
+        let frame = strand_dynamic_frame::DynamicFrameOwned::from_buf(
+            width,
+            height,
+            width as usize,
+            buf,
+            machine_vision_formats::pixel_format::PixFmt::Mono8,
+        )
+        .unwrap();
+
+        for i in 0..10u64 {
+            encoder
+                .submit(&frame.borrow(), Duration::from_millis(i * 40))
+                .unwrap();
+        }
+        // Closes ffmpeg's stdin and joins the stdout thread, so every access
+        // unit has been pushed by the time this returns; dropping the last
+        // sender is what ends `annex_b`'s iteration.
+        Box::new(encoder).finish().unwrap();
+
+        let stream = annex_b(&au_rx);
+        assert!(
+            !stream.is_empty(),
+            "the encoder produced no access units at all"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let stream_path = tmp.path().join("streamed.h264");
+        std::fs::write(&stream_path, &stream).unwrap();
+
+        // Decode to H.264's own planar 4:2:0 layout, so the decode adds no
+        // conversion that could hide -- or invent -- a chroma error.
+        let decoded = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(&stream_path)
+            .args([
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-",
+            ])
+            .output()
+            .expect("running ffmpeg to decode the streamed access units");
+        assert!(
+            decoded.status.success(),
+            "decode failed: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+
+        let luma_len = width as usize * height as usize;
+        let chroma = &decoded.stdout[luma_len..];
+        assert!(!chroma.is_empty(), "decoded frame carried no chroma");
+        let mean = chroma.iter().map(|&c| c as u64).sum::<u64>() / chroma.len() as u64;
+        assert!(
+            mean.abs_diff(128) <= 4,
+            "streamed mono video is not neutral (mean chroma {mean}, 0 would be green)"
+        );
+    }
 
     fn new_handler(
         au_tx: SyncSender<AccessUnit>,
