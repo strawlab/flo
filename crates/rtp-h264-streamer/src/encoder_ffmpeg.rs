@@ -90,6 +90,13 @@ impl FfmpegStreamEncoder {
     /// emit a zero-latency, SDP-less-receiver-friendly H.264 elementary stream.
     fn start(&mut self, frame: &DynamicFrame) -> Result<()> {
         let pixfmt = frame.pixel_format();
+        // Safe to pipe a mono frame as `gray` here only because `codec_args`
+        // below leaves `pixfmt` at its default, `yuv420p`. Some ffmpeg releases
+        // write 0 rather than 128 into the chroma planes when converting `gray`
+        // to a full-range *semi-planar* format such as NV12, which records a
+        // solid green cast; planar destinations are converted correctly
+        // everywhere. Point this at NV12 and it needs
+        // `ffmpeg_writer::probe_mono_framing` the way `FfmpegWriter` does.
         let ff_pixfmt = ffmpeg_pixel_format(pixfmt)?;
         let width = frame.width();
         let height = frame.height();
