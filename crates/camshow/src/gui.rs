@@ -2,7 +2,12 @@
 
 use std::{
     ops::ControlFlow,
-    sync::{Arc, mpsc as std_mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc as std_mpsc,
+    },
+    time::{Duration, Instant},
 };
 
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -10,17 +15,22 @@ use eyre::Result;
 use flo_core::DisplaySource;
 use machine_vision_formats::{ImageData, pixel_format::RGB8};
 use tokio::sync::watch;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::{
     sink::FrameSink,
     state::{DisplayFrame, Frame, Timestamp},
 };
 
+/// How long the GUI may go without painting before the capture thread reports
+/// it. Generous, because a paint rate is only meaningful over several frames.
+const PAINT_STALL_AFTER: Duration = Duration::from_secs(5);
+
 /// The capture-thread half of the GUI wiring, from [`channels`].
 pub(crate) struct GuiSinkConfig {
     display_tx: watch::Sender<Option<DisplayFrame>>,
     egui_ctx_rx: std_mpsc::Receiver<egui::Context>,
+    passes: Arc<AtomicU64>,
 }
 
 /// The main-thread half of the GUI wiring, from [`channels`].
@@ -28,25 +38,30 @@ pub(crate) struct GuiHandles {
     display_rx: watch::Receiver<Option<DisplayFrame>>,
     egui_ctx_tx: std_mpsc::Sender<egui::Context>,
     display_source_tx: watch::Sender<DisplaySource>,
+    passes: Arc<AtomicU64>,
 }
 
 /// Creates the channels connecting the capture thread to eframe on the main
 /// thread: frames go one way, the egui context (available only once eframe has
-/// built the app) comes back the other.
+/// built the app) comes back the other, and a pass counter goes with them so
+/// the capture thread can tell whether eframe is still painting.
 pub(crate) fn channels(
     display_source_tx: watch::Sender<DisplaySource>,
 ) -> (GuiSinkConfig, GuiHandles) {
     let (display_tx, display_rx) = watch::channel::<Option<DisplayFrame>>(None);
     let (egui_ctx_tx, egui_ctx_rx) = std_mpsc::channel();
+    let passes = Arc::new(AtomicU64::new(0));
     (
         GuiSinkConfig {
             display_tx,
             egui_ctx_rx,
+            passes: Arc::clone(&passes),
         },
         GuiHandles {
             display_rx,
             egui_ctx_tx,
             display_source_tx,
+            passes,
         },
     )
 }
@@ -66,6 +81,14 @@ pub(crate) fn run(handles: GuiHandles, windowed: bool) -> Result<()> {
             }
             vb
         })),
+        // Off deliberately. With vsync on, the GL swap throttles on the
+        // compositor's frame callbacks, which a surface that is not being
+        // composited (no monitor attached, output asleep) never receives —
+        // that blocks this thread inside `swap_buffers` indefinitely, and a
+        // blocked GUI thread cannot process the viewport close that shutdown
+        // depends on. Nothing is lost by turning it off: what is drawn is a
+        // camera feed that already paces itself on frame arrival.
+        vsync: false,
         ..Default::default()
     };
 
@@ -77,6 +100,7 @@ pub(crate) fn run(handles: GuiHandles, windowed: bool) -> Result<()> {
                 handles.display_rx,
                 handles.egui_ctx_tx,
                 handles.display_source_tx,
+                handles.passes,
             )))
         }),
     )
@@ -87,6 +111,13 @@ pub(crate) fn run(handles: GuiHandles, windowed: bool) -> Result<()> {
 pub(crate) struct GuiSink {
     display_tx: watch::Sender<Option<DisplayFrame>>,
     egui_ctx: egui::Context,
+    /// Bumped by [`CamshowApp::update`] on the main thread, read here on the
+    /// capture thread. Whether eframe is painting cannot be observed from
+    /// inside `update`, which by definition only runs when it is.
+    passes: Arc<AtomicU64>,
+    last_progress_check: Instant,
+    passes_at_last_check: u64,
+    stalled: bool,
 }
 
 impl GuiSink {
@@ -101,7 +132,54 @@ impl GuiSink {
         Ok(Self {
             display_tx: cfg.display_tx,
             egui_ctx,
+            passes: cfg.passes,
+            last_progress_check: Instant::now(),
+            passes_at_last_check: 0,
+            stalled: false,
         })
+    }
+
+    /// Reports, from off the GUI thread, whether the GUI is still painting.
+    ///
+    /// Painting is driven by whatever is compositing our surface, not by us: a
+    /// surface nobody is displaying (no monitor attached, output asleep) can
+    /// stop being painted entirely while capture, recording and streaming
+    /// carry on unaffected. With no screen to look at, that state has no
+    /// symptom at all until shutdown, when the viewport close this sink queues
+    /// is never acted on and the process has to be killed. So say it out loud.
+    ///
+    /// Only the transitions are logged at `info`/`warn`: a line every few
+    /// seconds forever would be noise, and the interesting fact is the change.
+    fn check_paint_progress(&mut self) {
+        let elapsed = self.last_progress_check.elapsed();
+        if elapsed < PAINT_STALL_AFTER {
+            return;
+        }
+        let passes = self.passes.load(Ordering::Relaxed);
+        let painted = passes - self.passes_at_last_check;
+        match (painted == 0, self.stalled) {
+            (true, false) => {
+                warn!(
+                    "GUI has not painted for {:.1}s (is anything displaying it?); \
+                     capture and recording are unaffected",
+                    elapsed.as_secs_f32()
+                );
+                self.stalled = true;
+            }
+            (false, true) => {
+                info!(
+                    "GUI is painting again ({painted} passes in {:.1}s)",
+                    elapsed.as_secs_f32()
+                );
+                self.stalled = false;
+            }
+            _ => debug!(
+                "GUI painted {painted} passes in {:.1}s",
+                elapsed.as_secs_f32()
+            ),
+        }
+        self.last_progress_check = Instant::now();
+        self.passes_at_last_check = passes;
     }
 
     /// Closes the egui viewport, so eframe's main loop returns. Called once
@@ -128,6 +206,9 @@ impl FrameSink for GuiSink {
             return ControlFlow::Break(());
         }
         self.egui_ctx.request_repaint();
+        // Asking for a repaint is not the same as getting one, and this
+        // thread is the only one in a position to notice the difference.
+        self.check_paint_progress();
         ControlFlow::Continue(())
     }
 
@@ -140,6 +221,9 @@ struct CamshowApp {
     texture: Option<TextureHandle>,
     last_recording: bool,
     display_source_tx: watch::Sender<DisplaySource>,
+    /// Bumped once per pass so [`GuiSink::check_paint_progress`], on the
+    /// capture thread, can see whether this one is still being driven.
+    passes: Arc<AtomicU64>,
 }
 
 impl CamshowApp {
@@ -147,6 +231,7 @@ impl CamshowApp {
         frame_rx: watch::Receiver<Option<DisplayFrame>>,
         egui_ctx_tx: std_mpsc::Sender<egui::Context>,
         display_source_tx: watch::Sender<DisplaySource>,
+        passes: Arc<AtomicU64>,
     ) -> Self {
         Self {
             frame_rx,
@@ -154,6 +239,7 @@ impl CamshowApp {
             texture: None,
             last_recording: false,
             display_source_tx,
+            passes,
         }
     }
 
@@ -195,6 +281,8 @@ impl eframe::App for CamshowApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.passes.fetch_add(1, Ordering::Relaxed);
+
         let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
 
         if let Some(source) = ctx.input(display_source_hotkey) {

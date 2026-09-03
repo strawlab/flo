@@ -383,9 +383,17 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         .spawn(move || {
             // A send or every sender being dropped: either way, stop.
             let _ = shutdown_rx.blocking_recv();
+            info!("shutdown requested; stopping the capture loop");
             shutting_down_for_shutdown.store(true, Ordering::Release);
             if let Some(on_shutdown) = on_shutdown {
+                // Bracketed because this is where a GUI that is not being
+                // painted strands the process: the close is only queued here,
+                // and only a paint can act on it. "asking" with no "asked"
+                // after it means this call itself blocked; "asked" with no
+                // GUI exit after it means the close was queued and ignored.
+                info!("asking the GUI to close");
                 on_shutdown();
+                info!("asked the GUI to close");
             }
         })
         .ok();
@@ -453,11 +461,7 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     debug!("recording command channel closed; capture loop shutting down");
-                    if let Some(rec) = active.take() {
-                        rec.finish();
-                    }
-                    sinks.finish();
-                    webcam.close();
+                    tear_down(active.take(), &mut sinks, &mut webcam);
                     return Ok(());
                 }
             }
@@ -636,12 +640,26 @@ pub(crate) fn run(task: CameraTask) -> Result<()> {
         }
     }
 
-    if let Some(rec) = active.take() {
+    tear_down(active.take(), &mut sinks, &mut webcam);
+    Ok(())
+}
+
+/// Flushes and releases everything the capture loop owns, announcing each step.
+///
+/// Every wait in here is unbounded — an MP4 `moov` write, and a V4L2 stream
+/// teardown that `poll()`s a camera that may have stopped answering — and the
+/// process cannot exit until all of them return. When it does not, the log has
+/// to be able to say which one it stopped on.
+fn tear_down(active: Option<ActiveRecording>, sinks: &mut Sinks, webcam: &mut WebcamSource) {
+    if let Some(rec) = active {
+        info!("finishing the active recording");
         rec.finish();
     }
+    info!("finishing outputs");
     sinks.finish();
+    info!("closing the webcam");
     webcam.close();
-    Ok(())
+    info!("capture loop finished");
 }
 
 fn apply_command(
