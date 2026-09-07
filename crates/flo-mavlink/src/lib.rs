@@ -1007,6 +1007,42 @@ fn save_tx(
     save(&format!("TX_{}", msg.message_name()), logger, msg)
 }
 
+/// How long to wait before the first attempt at restarting NTRIP, and the
+/// ceiling that wait doubles up to.
+///
+/// Reconnecting is the NTRIP client's own job and it does that itself for as
+/// long as the failure looks transient, but some failures escape it: a caster
+/// answering 4xx, for one, which it treats as an unrecoverable configuration
+/// error rather than something to retry. Corrections are an enhancement — the
+/// flight controller falls back to non-RTK GNSS without them — so a caster
+/// having a bad afternoon must not end the flight. Restart the task instead,
+/// backing off so a genuinely misconfigured URL does not spin, and let
+/// `ntrip_kbps` (which decays to zero on its own once bytes stop arriving)
+/// show the operator that no corrections are being received.
+const NTRIP_MIN_RESTART_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(1);
+const NTRIP_MAX_RESTART_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(60);
+
+/// Spawn [`ntrip::ntrip_loop`], optionally after waiting first.
+///
+/// Spawned rather than awaited inside `main_loop`'s `select!` so that relaying
+/// corrections makes progress while the loop is busy handling a message.
+fn spawn_ntrip_loop(
+    handle: &tokio::runtime::Handle,
+    ntrip_url: String,
+    mavconn_tx: tokio::sync::mpsc::Sender<(MavHeader, MavMessage)>,
+    floz_logger: tokio::sync::mpsc::UnboundedSender<SaveToDiskMsg>,
+    rate_tx: tokio::sync::mpsc::UnboundedSender<usize>,
+    header: MavHeader,
+    wait_first: Option<tokio::time::Duration>,
+) -> tokio::task::JoinHandle<eyre::Result<ntrip::NeverOk>> {
+    handle.spawn(async move {
+        if let Some(wait_first) = wait_first {
+            tokio::time::sleep(wait_first).await;
+        }
+        ntrip::ntrip_loop(ntrip_url, mavconn_tx, floz_logger, rate_tx, header).await
+    })
+}
+
 // Every argument is a distinct collaborator wired in from `spawn_mavlink`, and
 // nearly all of them are forwarded straight to `DroneCoordinator::new`; bundling
 // them into a struct would only move the same list one level out.
@@ -1042,20 +1078,20 @@ async fn main_loop(
     .await?;
 
     // For GNSS RTK, connect to NTRIP server and send RTCM data to the autopilot.
+    // The senders are cloned into the task rather than moved so that it can be
+    // restarted: see `NTRIP_MIN_RESTART_BACKOFF`.
+    let mut ntrip_restart_backoff = NTRIP_MIN_RESTART_BACKOFF;
     let mut ntrip_task: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> = {
         if let Some(ntrip_url) = &mavlink_cfg.ntrip_url {
-            let ntrip_url = ntrip_url.clone();
-            let ntrip_join_handle = handle.spawn(async move {
-                ntrip::ntrip_loop(
-                    ntrip_url,
-                    mavconn_tx,
-                    ntrip_floz_logger,
-                    ntrip_rate_tx,
-                    header,
-                )
-                .await
-            });
-            Box::pin(ntrip_join_handle)
+            Box::pin(spawn_ntrip_loop(
+                handle,
+                ntrip_url.clone(),
+                mavconn_tx.clone(),
+                ntrip_floz_logger.clone(),
+                ntrip_rate_tx.clone(),
+                header,
+                None,
+            ))
         } else {
             Box::pin(std::future::pending())
         }
@@ -1090,14 +1126,43 @@ async fn main_loop(
             },
             Some(received_bytes) = ntrip_rate_rx.recv() => {
                 ntrip_rate.record(tokio::time::Instant::now(), received_bytes);
+                // Corrections are flowing, so whatever we backed off from is
+                // over: the next failure starts from the shortest wait again.
+                ntrip_restart_backoff = NTRIP_MIN_RESTART_BACKOFF;
             }
             r = coordinator.mavconn.rx.recv() => {
                 let (header, msg) = r?;
                 coordinator.handle_message_from_drone(header, msg).await?;
             }
             ntrip_result = &mut ntrip_task => {
-                let _: ntrip::NeverOk = ntrip_result??;
-                unreachable!("NTRIP task completed.");
+                // Deliberately not propagated: losing corrections degrades RTK
+                // to plain GNSS, which is not a reason to stop FLO. See
+                // `NTRIP_MIN_RESTART_BACKOFF`.
+                // Spelled out because `Ok` in this crate is `eyre::Ok`, a
+                // function, which cannot appear in a pattern.
+                let error = match ntrip_result {
+                    std::result::Result::Err(join_error) => eyre::Report::new(join_error)
+                        .wrap_err("the NTRIP task did not shut down cleanly"),
+                    std::result::Result::Ok(std::result::Result::Err(error)) => error,
+                    std::result::Result::Ok(std::result::Result::Ok(never)) => match never {},
+                };
+                tracing::error!(
+                    "NTRIP stopped; no RTK corrections are reaching the flight controller. \
+                     Restarting it in {ntrip_restart_backoff:?}. {error:?}"
+                );
+                ntrip_task = Box::pin(spawn_ntrip_loop(
+                    handle,
+                    // Only reachable when NTRIP was configured: the `else`
+                    // branch above never resolves.
+                    mavlink_cfg.ntrip_url.clone().unwrap(),
+                    mavconn_tx.clone(),
+                    ntrip_floz_logger.clone(),
+                    ntrip_rate_tx.clone(),
+                    header,
+                    Some(ntrip_restart_backoff),
+                ));
+                ntrip_restart_backoff =
+                    (ntrip_restart_backoff * 2).min(NTRIP_MAX_RESTART_BACKOFF);
             }
         }
     }
