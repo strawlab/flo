@@ -1011,14 +1011,19 @@ fn save_tx(
 /// ceiling that wait doubles up to.
 ///
 /// Reconnecting is the NTRIP client's own job and it does that itself for as
-/// long as the failure looks transient, but some failures escape it: a caster
-/// answering 4xx, for one, which it treats as an unrecoverable configuration
-/// error rather than something to retry. Corrections are an enhancement — the
-/// flight controller falls back to non-RTK GNSS without them — so a caster
-/// having a bad afternoon must not end the flight. Restart the task instead,
-/// backing off so a genuinely misconfigured URL does not spin, and let
-/// `ntrip_kbps` (which decays to zero on its own once bytes stop arriving)
-/// show the operator that no corrections are being received.
+/// long as the failure looks transient — indefinitely, if it cannot reach the
+/// caster at all. Some failures still reach us: a 401, which it will not retry
+/// because credentials the caster has rejected do not start working, and its
+/// give-up limit after a hundred attempts the caster answered. Its docs are
+/// explicit that stopping there is a handover to the caller rather than a
+/// verdict, and this is the caller.
+///
+/// Corrections are an enhancement — the flight controller falls back to non-RTK
+/// GNSS without them — so a caster having a bad afternoon must not end the
+/// flight. Restart the task instead, backing off so a genuinely misconfigured
+/// URL does not spin, and let `ntrip_kbps` (which decays to zero on its own once
+/// bytes stop arriving) show the operator that no corrections are being
+/// received.
 const NTRIP_MIN_RESTART_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(1);
 const NTRIP_MAX_RESTART_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(60);
 
