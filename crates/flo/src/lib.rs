@@ -2573,11 +2573,15 @@ fn play_sound(
     device_config: &FloControllerConfig,
     audio_stream: Option<&rodio::OutputStreamHandle>,
 ) {
-    match play_sound_inner(new_mode, device_config, audio_stream) {
+    match play_sound_inner(new_mode, device_config, audio_stream)
+        .with_context(|| format!("playing sound for transition into mode {new_mode:?}"))
+    {
         Ok(()) => {}
         Err(e) => {
-            // log error and then drop it.
-            log::error!("{} {}:{}", e, file!(), line!());
+            // log error and then drop it. Use alternate formatting so the
+            // context chain (which mode, which file) is logged and not only
+            // the innermost message.
+            log::error!("{:#} {}:{}", e, file!(), line!());
         }
     }
 }
@@ -2594,7 +2598,9 @@ fn play_sound_inner(
         use std::fs::File;
         use std::io::BufReader;
 
-        let file = BufReader::new(File::open(filename)?);
+        let file = BufReader::new(
+            File::open(filename).with_context(|| format!("opening sound file \"{filename}\""))?,
+        );
         let source = Decoder::new(file)?;
         audio_stream.play_raw(source.convert_samples())?;
     };
